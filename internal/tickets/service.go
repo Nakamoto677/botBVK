@@ -328,6 +328,7 @@ func (s *Service) AddMessage(ctx context.Context, actorID, ticketID int64, msg d
 		resumed := false
 		if client {
 			msg.Direction = "inbound"
+			msg.RoutingDepartment = t.Department
 			kind = "team_message"
 			if t.Status == domain.Waiting {
 				t.Status = domain.InProgress
@@ -391,6 +392,7 @@ func (s *Service) EditMessage(ctx context.Context, actorID, ticketID int64, msg 
 			}
 		}
 		if client && t.Status.Active() {
+			msg.RoutingDepartment = t.Department
 			msg.Text = fmt.Sprintf("Исправление сообщения #%d: %s", msg.TelegramMessageID, msg.Text)
 			return s.enqueue(ctx, tx, *t, "team_message", msg)
 		}
@@ -429,5 +431,42 @@ func (s *Service) Cancel(ctx context.Context, actorID, ticketID int64, reason st
 			return err
 		}
 		return s.notify(ctx, tx, *t, "Заявка отменена. Причина: "+reason)
+	})
+}
+
+// Assign changes the primary engineer with the current owner or dispatcher authorization.
+func (s *Service) Assign(ctx context.Context, actorID, ticketID, engineerID int64) error {
+	if engineerID <= 0 {
+		return domain.ErrInvalid
+	}
+	return s.mutate(ctx, actorID, ticketID, func(tx domain.Tx, u domain.User, t *domain.Ticket) error {
+		if !canAct(u, *t) {
+			return domain.ErrForbidden
+		}
+		if !t.Status.Active() {
+			return domain.ErrConflict
+		}
+		target, err := tx.GetUser(ctx, engineerID)
+		if err != nil {
+			return err
+		}
+		if target.Role != "engineer" || !team(target, t.Department) {
+			return domain.ErrForbidden
+		}
+		if t.AssigneeID == engineerID {
+			return domain.ErrConflict
+		}
+		old := t.AssigneeID
+		t.AssigneeID = engineerID
+		if t.Status == domain.New {
+			t.Status = domain.InProgress
+		}
+		if err := s.save(ctx, tx, t, actorID, "reassigned", map[string]int64{"from": old, "to": engineerID}); err != nil {
+			return err
+		}
+		if err := s.enqueue(ctx, tx, *t, "refresh_card", nil); err != nil {
+			return err
+		}
+		return s.notify(ctx, tx, *t, "По заявке назначен другой инженер.")
 	})
 }
