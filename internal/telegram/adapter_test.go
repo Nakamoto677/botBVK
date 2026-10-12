@@ -20,6 +20,9 @@ type adapterStore struct {
 	storedMessages []domain.Message
 }
 
+func (s *adapterStore) Companies(context.Context) ([]domain.Company, error) {
+	return []domain.Company{{ID: 10, Name: "Компания Тест"}}, nil
+}
 func (s *adapterStore) User(context.Context, int64) (domain.User, error) { return s.user, nil }
 func (s *adapterStore) TopicTicket(context.Context, int64, int64) (domain.Ticket, error) {
 	return s.ticket, nil
@@ -31,17 +34,32 @@ func (s *adapterStore) Messages(context.Context, int64) ([]domain.Message, error
 func (s *adapterStore) Events(context.Context, int64) ([]domain.Event, error) { return s.events, nil }
 
 type adapterService struct {
+	closedID           int64
+	closeText          string
+	transferID         int64
+	transferDepartment domain.Department
+	transferReason     string
+	cancelID           int64
 	Service
-	messages       []domain.Message
-	public         []bool
-	EmergencyActor int64
+	messages []domain.Message
+	public   []bool
 }
 
-func (s *adapterService) SetEmergency(_ context.Context, actorID, _ int64) error {
-	s.EmergencyActor = actorID
+func (s *adapterService) Close(_ context.Context, _ int64, id int64, text string) error {
+	s.closedID = id
+	s.closeText = text
 	return nil
 }
-
+func (s *adapterService) Transfer(_ context.Context, _ int64, id int64, d domain.Department, text string) error {
+	s.transferID = id
+	s.transferDepartment = d
+	s.transferReason = text
+	return nil
+}
+func (s *adapterService) Cancel(_ context.Context, _ int64, id int64, _ string) error {
+	s.cancelID = id
+	return nil
+}
 func (s *adapterService) AddMessage(_ context.Context, _ int64, _ int64, m domain.Message, public bool) error {
 	s.messages = append(s.messages, m)
 	s.public = append(s.public, public)
@@ -127,7 +145,7 @@ func TestHistoryShowsInitialDescriptionAndRevisionsWithoutInternalNotes(t *testi
 	}
 }
 func TestUntrustedGroupRejectedBeforeStoreRead(t *testing.T) {
-	a := NewAdapter(nil, nil, nil, Config{DispatcherChatID: -100})
+	a := NewAdapter(nil, nil, nil, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100}}})
 	err := a.Handle(context.Background(), Update{Message: &Message{From: Person{ID: 3}, Chat: Chat{ID: -200, Type: "supergroup"}, Text: "/report"}})
 	if !errors.Is(err, domain.ErrForbidden) {
 		t.Fatal(err)
@@ -139,27 +157,5 @@ func TestHistoryCannotCrossDepartmentGroups(t *testing.T) {
 	ticket := domain.Ticket{Department: domain.IT}
 	if a.historyDestination(&Message{Chat: Chat{ID: -200, Type: "supergroup"}}, u, ticket) {
 		t.Fatal("IT history allowed in 1C group")
-	}
-}
-
-func TestDispatcherCanMarkEmergencyFromDispatcherCard(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`{"ok":true,"result":true}`)) }))
-	defer server.Close()
-	client := NewClient("test")
-	client.BaseURL = server.URL
-	store := &adapterStore{ticket: domain.Ticket{ID: 7, Department: domain.IT, Status: domain.New, RoutingPending: true}}
-	service := &adapterService{}
-	adapter := NewAdapter(client, store, service, Config{DispatcherChatID: -300, Departments: map[domain.Department]Team{domain.IT: {ChatID: -100, QueueTopicID: 1}}})
-	callback := &Callback{ID: "callback", From: Person{ID: 3}, Data: "emergency:7", Message: &Message{ID: 11, Chat: Chat{ID: -300, Type: "supergroup"}}}
-	if err := adapter.Handle(context.Background(), Update{Callback: callback}); err != nil {
-		t.Fatal(err)
-	}
-	if service.EmergencyActor != 3 {
-		t.Fatal("emergency didn't reach authorized service")
-	}
-	store.ticket.Status = domain.Closed
-	service.EmergencyActor = 0
-	if err := adapter.Handle(context.Background(), Update{Callback: callback}); !errors.Is(err, domain.ErrConflict) {
-		t.Fatal("closed ticket emergency accepted", err)
 	}
 }

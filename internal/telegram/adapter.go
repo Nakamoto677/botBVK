@@ -21,7 +21,6 @@ type Team struct {
 }
 type Config struct {
 	Departments       map[domain.Department]Team
-	DispatcherChatID  int64
 	AdminIDs          []int64
 	ArchiveDir        string
 	ReportCSV         func(context.Context) (string, error)
@@ -37,7 +36,6 @@ type Service interface {
 	Close(context.Context, int64, int64, string) error
 	Reopen(context.Context, int64, int64) error
 	SetWaiting(context.Context, int64, int64, bool) error
-	SetEmergency(context.Context, int64, int64) error
 	AddMessage(context.Context, int64, int64, domain.Message, bool) error
 }
 type DraftStore interface {
@@ -56,10 +54,11 @@ type Adapter struct {
 	cfg      Config
 	drafts   map[int64]draft
 	lastPoll atomic.Int64
+	prompts  map[promptKey]prompt
 }
 
 func NewAdapter(c *Client, s domain.Store, v Service, cfg Config) *Adapter {
-	return &Adapter{client: c, store: s, service: v, cfg: cfg, drafts: make(map[int64]draft)}
+	return &Adapter{client: c, store: s, service: v, cfg: cfg, drafts: make(map[int64]draft), prompts: make(map[promptKey]prompt)}
 }
 func (a *Adapter) Run(ctx context.Context) error {
 	last, err := a.store.LastUpdateID(ctx)
@@ -172,9 +171,15 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 		return a.staff(ctx, m)
 	}
 	text := strings.TrimSpace(m.Text)
+	if command, ok := menuAliases[text]; ok {
+		text = command
+	}
 	if text == "/start" {
 		if user, e := a.store.User(ctx, m.From.ID); e == nil && user.Approved {
-			return a.say(ctx, m, "Вы зарегистрированы. Новая заявка: /new. История активной заявки: /history.", nil)
+			if e = a.updateName(ctx, user, m.From); e != nil {
+				return e
+			}
+			return a.menu(ctx, m, user)
 		} else if e != nil && !errors.Is(e, domain.ErrNotFound) {
 			return e
 		}
@@ -193,7 +198,32 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 		return err
 	}
 	if !user.Approved {
-		return domain.ErrForbidden
+		return a.say(ctx, m, "Доступ ожидает подтверждения администратора. Для выбора компании нажмите /start.", nil)
+	}
+	if err = a.updateName(ctx, user, m.From); err != nil {
+		return err
+	}
+	if text == "/menu" {
+		return a.menu(ctx, m, user)
+	}
+	if text == "/help" {
+		return a.help(ctx, m, user)
+	}
+	if consumed, e := a.consumePrompt(ctx, m, user); consumed {
+		return e
+	}
+	if text == "/current" || text == "/cancel_current" {
+		t, e := a.store.ActiveTicket(ctx, m.From.ID)
+		if errors.Is(e, domain.ErrNotFound) {
+			return a.say(ctx, m, "Активной заявки нет. Нажмите Новая заявка.", nil)
+		}
+		if e != nil {
+			return e
+		}
+		if text == "/cancel_current" {
+			return a.beginCancel(ctx, m.From.ID, m, t.ID)
+		}
+		return a.showTicket(ctx, m, user, t)
 	}
 	if text == "/requests" || strings.HasPrefix(text, "/bind ") || strings.HasPrefix(text, "/retry ") || strings.HasPrefix(text, "/revoke ") || strings.HasPrefix(text, "/staff ") {
 		return a.admin(ctx, m, user)
@@ -225,6 +255,9 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 		}
 		return a.say(ctx, m, "Выберите направление.", departmentButtons("new"))
 	}
+	if strings.HasPrefix(text, "/") {
+		return a.help(ctx, m, user)
+	}
 	d, ok, draftErr := a.getDraft(ctx, m.From.ID)
 	if draftErr != nil {
 		return draftErr
@@ -255,7 +288,7 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 	t, err := a.store.ActiveTicket(ctx, m.From.ID)
 	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) {
-			return a.say(ctx, m, "Создайте заявку командой /new.", nil)
+			return a.say(ctx, m, "Нажмите «📝 Новая заявка» в меню, чтобы описать проблему.", nil)
 		}
 		return err
 	}
@@ -274,18 +307,15 @@ func (a *Adapter) callback(ctx context.Context, c *Callback) error {
 	if len(parts) > 1 {
 		id, _ = strconv.ParseInt(parts[1], 10, 64)
 	}
-	if action == "claim" || action == "waiting" || action == "resume" || action == "emergency" || action == "close" || action == "transfer" {
+	if action == "claim" || action == "waiting" || action == "resume" || action == "close" || action == "transfer" || action == "reply" {
 		t, e := a.store.Ticket(ctx, id)
 		if e != nil {
 			return e
 		}
-		dispatcherEmergency := action == "emergency" && c.Message != nil && a.cfg.DispatcherChatID != 0 && c.Message.Chat.ID == a.cfg.DispatcherChatID
-		if c.Message == nil || (!dispatcherEmergency && !a.currentSource(c.Message, t)) {
+		if c.Message == nil || !a.currentSource(c.Message, t) {
 			return domain.ErrConflict
 		}
-		if dispatcherEmergency && !t.Status.Active() {
-			return domain.ErrConflict
-		}
+
 	}
 	var err error
 	switch action {
@@ -358,21 +388,27 @@ func (a *Adapter) callback(ctx context.Context, c *Callback) error {
 			if hours == "" {
 				hours = "Пн–Пт, 09:00–18:00 по Иркутску"
 			}
-			_, err = a.client.Send(ctx, c.From.ID, 0, fmt.Sprintf("Заявка #%d сохранена. Пишите дополнения здесь. Обычная обработка: %s. Срочность вне графика определяет диспетчер.", t.ID, hours), nil)
+			_, err = a.client.Send(ctx, c.From.ID, 0, fmt.Sprintf("Заявка #%d сохранена. Пишите дополнения здесь. Обычная обработка: %s. ", t.ID, hours), nil)
 		}
 	case "cancel":
-		err = a.deleteDraft(ctx, c.From.ID)
+		if id == 0 {
+			err = a.deleteDraft(ctx, c.From.ID)
+		} else {
+			err = a.beginCancel(ctx, c.From.ID, c.Message, id)
+		}
 	case "claim":
 		err = a.service.Claim(ctx, c.From.ID, id)
 	case "waiting":
 		err = a.service.SetWaiting(ctx, c.From.ID, id, true)
 	case "resume":
 		err = a.service.SetWaiting(ctx, c.From.ID, id, false)
-	case "emergency":
-		err = a.service.SetEmergency(ctx, c.From.ID, id)
 	case "reopen":
 		err = a.service.Reopen(ctx, c.From.ID, id)
-	case "close", "transfer":
+	case "close", "transfer", "reply":
+		err = a.beginStaffPrompt(ctx, c, id, action)
+	case "transferdept", "cancelconfirm", "promptcancel":
+		err = a.promptCallback(ctx, c, action, id, parts)
+	case "ticket", "history":
 		if c.Message == nil {
 			return domain.ErrInvalid
 		}
@@ -384,14 +420,12 @@ func (a *Adapter) callback(ctx context.Context, c *Callback) error {
 		if e != nil {
 			return e
 		}
-		if !staffAuthorized(user, t) {
-			return domain.ErrForbidden
-		}
-		if action == "close" {
-			_, err = a.client.Send(ctx, c.Message.Chat.ID, c.Message.ThreadID, fmt.Sprintf("Для закрытия: /close %d итог решения", id), nil)
+		if action == "ticket" {
+			err = a.showTicket(ctx, c.Message, user, t)
 		} else {
-			_, err = a.client.Send(ctx, c.Message.Chat.ID, c.Message.ThreadID, fmt.Sprintf("Для передачи: /transfer %d it|1c|installation|field причина", id), nil)
+			err = a.history(ctx, c.Message, user, t)
 		}
+
 	default:
 		return domain.ErrInvalid
 	}
@@ -423,6 +457,12 @@ func (a *Adapter) staff(ctx context.Context, m *Message) error {
 		return err
 	}
 	text := strings.TrimSpace(m.Text)
+	if text == "/help" || text == "/menu" {
+		return a.help(ctx, m, user)
+	}
+	if consumed, e := a.consumePrompt(ctx, m, user); consumed {
+		return e
+	}
 	if text == "/history" || strings.HasPrefix(text, "/history ") {
 		return a.historyCommand(ctx, m, user)
 	}
@@ -463,6 +503,9 @@ func (a *Adapter) staff(ctx context.Context, m *Message) error {
 			return domain.ErrInvalid
 		}
 		return a.service.Transfer(ctx, m.From.ID, id, domain.Department(rest[0]), rest[1])
+	}
+	if strings.HasPrefix(text, "/") && !strings.HasPrefix(messageText(m), "/reply") {
+		return a.help(ctx, m, user)
 	}
 	t, err := a.store.TopicTicket(ctx, m.Chat.ID, m.ThreadID)
 	if errors.Is(err, domain.ErrNotFound) {
@@ -626,12 +669,20 @@ func (a *Adapter) history(ctx context.Context, m *Message, u domain.User, t doma
 		return err
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "История #%d · компания %d · %s\nИсходное обращение: %s\n", t.ID, t.CompanyID, t.Status, t.Description)
+	company, e := companyName(ctx, a.store, t.CompanyID)
+	if e != nil {
+		return e
+	}
+	fmt.Fprintf(&b, "История #%d · %s · %s\nИсходное обращение: %s\n", t.ID, company, statusName(t.Status), t.Description)
 	for _, v := range messages {
 		if u.Role == "client" && v.Direction == "internal" {
 			continue
 		}
-		fmt.Fprintf(&b, "%s %d [%s]: %s", v.CreatedAt.UTC().Format(time.RFC3339), v.AuthorID, v.Direction, v.Text)
+		author, e := displayName(ctx, a.store, v.AuthorID, "Участник")
+		if e != nil {
+			return e
+		}
+		fmt.Fprintf(&b, "%s %s [%s]: %s", v.CreatedAt.UTC().Format(time.RFC3339), author, v.Direction, v.Text)
 		if v.FileID != "" {
 			state := "не сохранено в независимом архиве"
 			if v.ArchivePath != "" && v.SHA256 != "" {
@@ -733,9 +784,6 @@ func (a *Adapter) trustedGroup(chatID int64) bool {
 	if chatID == 0 {
 		return false
 	}
-	if a.cfg.DispatcherChatID == chatID {
-		return true
-	}
 	for _, team := range a.cfg.Departments {
 		if team.ChatID == chatID {
 			return true
@@ -753,7 +801,7 @@ func (a *Adapter) historyDestination(m *Message, u domain.User, t domain.Ticket)
 	if a.cfg.Departments[t.Department].ChatID == m.Chat.ID {
 		return true
 	}
-	return a.cfg.DispatcherChatID == m.Chat.ID && (u.Role == "admin" || u.Role == "dispatcher")
+	return false
 }
 func (a *Adapter) historyCommand(ctx context.Context, m *Message, u domain.User) error {
 	parts := strings.Fields(m.Text)
@@ -789,20 +837,22 @@ func (a *Adapter) ticketList(ctx context.Context, m *Message, u domain.User) err
 	}
 	sort.Slice(tickets, func(i, j int) bool { return tickets[i].ID > tickets[j].ID })
 	var b strings.Builder
-	b.WriteString("Последние заявки (до 50). История: /history ID\n")
+	b.WriteString("Ваши последние заявки. Нажмите номер заявки, чтобы открыть её.\n")
+	buttons := [][]Button{}
 	count := 0
 	for _, t := range tickets {
 		if !historyAuthorized(u, t) || !a.historyDestination(m, u, t) {
 			continue
 		}
-		fmt.Fprintf(&b, "#%d · %s · %s · компания %d\n", t.ID, t.Department, t.Status, t.CompanyID)
+		fmt.Fprintf(&b, "#%d · %s · %s\n", t.ID, departmentName(t.Department), statusName(t.Status))
+		buttons = append(buttons, []Button{{Text: fmt.Sprintf("#%d · %s", t.ID, statusName(t.Status)), Data: fmt.Sprintf("ticket:%d", t.ID)}})
 		count++
-		if count == 50 {
+		if count == 10 {
 			break
 		}
 	}
 	if count == 0 {
 		b.WriteString("Заявок нет.\n")
 	}
-	return a.sendChunks(ctx, m, b.String())
+	return a.say(ctx, m, b.String(), buttons)
 }

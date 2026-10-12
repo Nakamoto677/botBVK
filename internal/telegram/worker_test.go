@@ -12,12 +12,28 @@ import (
 
 type workerStore struct {
 	domain.Store
-	ticket  domain.Ticket
-	current domain.Ticket
-	events  []domain.Event
+	ticket   domain.Ticket
+	current  domain.Ticket
+	events   []domain.Event
+	messages []domain.Message
 }
 
-func (s *workerStore) Ticket(context.Context, int64) (domain.Ticket, error) { return s.ticket, nil }
+func (s *workerStore) User(_ context.Context, id int64) (domain.User, error) {
+	return domain.User{ID: id, Name: "Иван Клиент", Approved: true, Role: "client"}, nil
+}
+func (s *workerStore) Companies(context.Context) ([]domain.Company, error) {
+	return []domain.Company{{ID: 10, Name: "Компания Тест"}}, nil
+}
+func (s *workerStore) Messages(context.Context, int64) ([]domain.Message, error) {
+	return s.messages, nil
+}
+func (s *workerStore) Events(context.Context, int64) ([]domain.Event, error) { return s.events, nil }
+func (s *workerStore) Ticket(context.Context, int64) (domain.Ticket, error) {
+	if s.current.ID != 0 {
+		return s.current, nil
+	}
+	return s.ticket, nil
+}
 func (s *workerStore) Transact(ctx context.Context, f func(domain.Tx) error) error {
 	return f(&workerTx{store: s})
 }
@@ -131,7 +147,7 @@ func TestPendingTransferPreservesPriorMessagesAndDefersNewOnes(t *testing.T) {
 			client := NewClient("test")
 			client.BaseURL = server.URL
 			ticket := domain.Ticket{ID: 1, Department: domain.IT, RoutingPending: true, TopicChatID: -100, TopicID: 10}
-			store := &workerStore{ticket: ticket, current: ticket}
+			store := &workerStore{ticket: ticket, current: ticket, events: []domain.Event{{Kind: "transferred", Data: json.RawMessage(`{"from":"1c","old_chat_id":-100,"old_topic_id":10}`)}}}
 			worker := NewWorker(client, store, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -200, QueueTopicID: 1}}})
 			payload, _ := json.Marshal(domain.Message{Text: "message", Direction: "inbound", RoutingDepartment: department})
 			err := worker.Handle(context.Background(), domain.Operation{Kind: "team_message", TicketID: 1, Payload: payload})
@@ -176,29 +192,5 @@ func TestInitialTopicCardSupportsPublicReplyAndRetry(t *testing.T) {
 	}
 	if len(service.public) != 1 || !service.public[0] {
 		t.Fatal("cannot reply to initial card")
-	}
-}
-
-func TestDispatcherCardHasEmergencyButtonBeforeTopicCreation(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var p struct {
-			ChatID int64  `json:"chat_id"`
-			Markup Markup `json:"reply_markup"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-			t.Fatal(err)
-		}
-		if p.ChatID != -300 || len(p.Markup.Buttons) != 1 || p.Markup.Buttons[0][0].Data != "emergency:7" {
-			t.Fatal("dispatcher emergency button missing", p)
-		}
-		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":11}}`))
-	}))
-	defer server.Close()
-	client := NewClient("test")
-	client.BaseURL = server.URL
-	store := &workerStore{ticket: domain.Ticket{ID: 7, Department: domain.IT, Status: domain.New, RoutingPending: true}}
-	worker := NewWorker(client, store, Config{DispatcherChatID: -300})
-	if err := worker.Handle(context.Background(), domain.Operation{Kind: "dispatcher_message", Payload: json.RawMessage(`{"ticket_id":7,"text":"Новая заявка"}`)}); err != nil {
-		t.Fatal(err)
 	}
 }

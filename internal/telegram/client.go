@@ -169,6 +169,17 @@ func (c *Client) Send(ctx context.Context, chat, topic int64, text string, butto
 	err := c.Call(ctx, "sendMessage", p, &result)
 	return result, err
 }
+func (c *Client) SendKeyboard(ctx context.Context, chat int64, text string, keyboard [][]string) error {
+	buttons := [][]map[string]string{}
+	for _, row := range keyboard {
+		items := []map[string]string{}
+		for _, label := range row {
+			items = append(items, map[string]string{"text": label})
+		}
+		buttons = append(buttons, items)
+	}
+	return c.Call(ctx, "sendMessage", map[string]any{"chat_id": chat, "text": text, "reply_markup": map[string]any{"keyboard": buttons, "resize_keyboard": true, "is_persistent": true}}, nil)
+}
 func (c *Client) Answer(ctx context.Context, id, text string) error {
 	return c.Call(ctx, "answerCallbackQuery", map[string]any{"callback_query_id": id, "text": text}, nil)
 }

@@ -21,10 +21,11 @@ type Worker struct {
 	store    domain.Store
 	cfg      Config
 	lastChat map[int64]time.Time
+	interval time.Duration
 }
 
 func NewWorker(c *Client, s domain.Store, cfg Config) *Worker {
-	return &Worker{c, s, cfg, make(map[int64]time.Time)}
+	return &Worker{client: c, store: s, cfg: cfg, lastChat: make(map[int64]time.Time), interval: 3100 * time.Millisecond}
 }
 func (w *Worker) Run(ctx context.Context) error {
 	for ctx.Err() == nil {
@@ -55,9 +56,12 @@ func (w *Worker) Run(ctx context.Context) error {
 			if e := w.store.RetryOperation(ctx, op.ID, err.Error(), delay, dead); e != nil {
 				return e
 			}
-			if dead && w.cfg.DispatcherChatID != 0 {
-				_, _ = w.client.Send(ctx, w.cfg.DispatcherChatID, 0, fmt.Sprintf("Ошибка операции %d (%s), заявка #%d. Требуется проверка: %s", op.ID, op.Kind, op.TicketID, err), nil)
+			if dead && op.Kind != "access_notification" {
+				if e := w.notifyAdmins(ctx, fmt.Sprintf("Ошибка операции %d (%s), заявка #%d. Требуется проверка: %s", op.ID, op.Kind, op.TicketID, err)); e != nil {
+					return e
+				}
 			}
+
 		} else if err = w.store.FinishOperation(ctx, op.ID); err != nil {
 			return err
 		}
@@ -65,7 +69,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	return ctx.Err()
 }
 func (w *Worker) rate(ctx context.Context, chat int64) error {
-	wait := time.Until(w.lastChat[chat].Add(3100 * time.Millisecond))
+	wait := time.Until(w.lastChat[chat].Add(w.interval))
 	if wait > 0 && !pause(ctx, wait) {
 		return ctx.Err()
 	}
@@ -79,34 +83,39 @@ func (w *Worker) send(ctx context.Context, chat, topic int64, text string, butto
 	return w.client.Send(ctx, chat, topic, text, buttons)
 }
 func card(t domain.Ticket) string {
-	description := []rune(t.Description)
-	if len(description) > 2800 {
-		description = append(description[:2800], []rune("… /history")...)
-	}
-	return fmt.Sprintf("Заявка #%d · компания %d\n%s\nОтдел: %s · статус: %s\nИсполнитель: %d", t.ID, t.CompanyID, string(description), t.Department, t.Status, t.AssigneeID)
+	return ticketText(t, "Клиент", "Компания", "Специалист")
 }
 func cardButtons(t domain.Ticket) [][]Button {
 	if !t.Status.Active() {
 		return nil
 	}
 	id := fmt.Sprint(t.ID)
-	buttons := [][]Button{{{Text: "Взять", Data: "claim:" + id}, {Text: "Передать", Data: "transfer:" + id}}, {{Text: "Закрыть", Data: "close:" + id}, {Text: "Ждём клиента", Data: "waiting:" + id}, {Text: "Продолжить", Data: "resume:" + id}}, {{Text: "Авария", Data: "emergency:" + id}}}
-	chat := strings.TrimPrefix(fmt.Sprint(t.TopicChatID), "-100")
-	if t.TopicID != 0 && t.TopicChatID < 0 {
-		buttons = append(buttons, []Button{{Text: "Открыть топик", URL: fmt.Sprintf("https://t.me/c/%s/%d", chat, t.TopicID)}})
+	if t.Status == domain.New {
+		return [][]Button{{{Text: "Взять в работу", Data: "claim:" + id}, {Text: "Передать", Data: "transfer:" + id}}, {{Text: "История", Data: "history:" + id}}}
 	}
-	return buttons
+	buttons := [][]Button{}
+	if t.TopicID != 0 && t.TopicChatID < 0 {
+		chat := strings.TrimPrefix(fmt.Sprint(t.TopicChatID), "-100")
+		buttons = append(buttons, []Button{{Text: "Открыть", URL: fmt.Sprintf("https://t.me/c/%s/%d", chat, t.TopicID)}})
+	}
+	return append(buttons, []Button{{Text: "Ответить клиенту", Data: "reply:" + id}}, []Button{{Text: "Закрыть", Data: "close:" + id}, {Text: "Передать", Data: "transfer:" + id}}, []Button{{Text: "Ждём клиента", Data: "waiting:" + id}, {Text: "Продолжить", Data: "resume:" + id}}, []Button{{Text: "История", Data: "history:" + id}})
 }
 func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 	var payload struct {
-		Text       string `json:"text"`
-		UserID     int64  `json:"user_id"`
-		TicketID   int64  `json:"ticket_id"`
-		ChatID     int64  `json:"chat_id"`
-		TopicID    int64  `json:"topic_id"`
-		OldChatID  int64  `json:"old_chat_id"`
-		OldTopicID int64  `json:"old_topic_id"`
-		Reason     string `json:"reason"`
+		Text              string            `json:"text"`
+		UserID            int64             `json:"user_id"`
+		TicketID          int64             `json:"ticket_id"`
+		ChatID            int64             `json:"chat_id"`
+		TopicID           int64             `json:"topic_id"`
+		OldChatID         int64             `json:"old_chat_id"`
+		OldTopicID        int64             `json:"old_topic_id"`
+		Reason            string            `json:"reason"`
+		Pause             bool              `json:"pause"`
+		Retire            bool              `json:"retire"`
+		MessageID         int64             `json:"message_id"`
+		FromDepartment    domain.Department `json:"from_department"`
+		ToDepartment      domain.Department `json:"to_department"`
+		RoutingGeneration int64             `json:"routing_generation"`
 	}
 	if len(op.Payload) > 0 {
 		if err := json.Unmarshal(op.Payload, &payload); err != nil {
@@ -130,25 +139,17 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 		return nil
 	}
 	if op.Kind == "access_notification" {
-		_, err := w.send(ctx, payload.UserID, 0, payload.Text, nil)
-		return err
-	}
-	if op.Kind == "dispatcher_message" {
-		var buttons [][]Button
-		if payload.TicketID > 0 {
-			t, err := w.store.Ticket(ctx, payload.TicketID)
-			if err != nil {
+		user, err := w.store.User(ctx, payload.UserID)
+		if err != nil && !errors.Is(err, domain.ErrNotFound) {
+			return err
+		}
+		if user.Approved && user.Role == "client" {
+			if err = w.rate(ctx, payload.UserID); err != nil {
 				return err
 			}
-			if t.Status.Active() {
-				buttons = [][]Button{{{Text: "Авария", Data: fmt.Sprintf("emergency:%d", t.ID)}}}
-			}
-			if t.TopicChatID < 0 && t.TopicID != 0 && !t.RoutingPending {
-				chat := strings.TrimPrefix(fmt.Sprint(t.TopicChatID), "-100")
-				buttons = append(buttons, []Button{{Text: "Открыть", URL: fmt.Sprintf("https://t.me/c/%s/%d", chat, t.TopicID)}})
-			}
+			return w.client.SendKeyboard(ctx, payload.UserID, payload.Text+"\nВыберите действие в меню.", clientKeyboard)
 		}
-		_, err := w.send(ctx, w.cfg.DispatcherChatID, 0, payload.Text, buttons)
+		_, err = w.send(ctx, payload.UserID, 0, payload.Text, nil)
 		return err
 	}
 
@@ -162,8 +163,18 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 	}
 	switch op.Kind {
 	case "create_topic":
+		if payload.RoutingGeneration != 0 && payload.RoutingGeneration != t.RoutingGeneration {
+			return nil
+		}
+		// Old queued operations must not create a topic before an engineer claims the ticket.
+		if t.Status == domain.New {
+			return w.refresh(ctx, t)
+		}
+		if !provisioningStatus(t.Status) {
+			return nil
+		}
 		// A binding matching this department makes a retried operation safe after a crash.
-		if t.TopicID != 0 && t.TopicChatID == team.ChatID && !t.RoutingPending {
+		if t.TopicID != 0 && t.TopicChatID == team.ChatID {
 			t, err = w.ensureTopicCard(ctx, t)
 			if err != nil {
 				return err
@@ -176,6 +187,13 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 					return err
 				}
 			}
+			if err = w.replayDeferred(ctx, t); err != nil {
+				return err
+			}
+			t, err = w.finishProvision(ctx, t)
+			if err != nil {
+				return err
+			}
 			return w.refresh(ctx, t)
 		}
 		if !t.Status.Active() {
@@ -184,7 +202,19 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 		if err = w.rate(ctx, team.ChatID); err != nil {
 			return err
 		}
-		topic, err := w.client.Topic(ctx, team.ChatID, fmt.Sprintf("#%d · компания %d", t.ID, t.CompanyID))
+		name, err := displayName(ctx, w.store, t.ClientID, "Клиент")
+		if err != nil {
+			return err
+		}
+		company, err := companyName(ctx, w.store, t.CompanyID)
+		if err != nil {
+			return err
+		}
+		title := []rune(fmt.Sprintf("#%d · %s · %s", t.ID, name, company))
+		if len(title) > 120 {
+			title = title[:120]
+		}
+		topic, err := w.client.Topic(ctx, team.ChatID, string(title))
 		if err != nil {
 			return err
 		}
@@ -194,13 +224,11 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 			if e != nil {
 				return e
 			}
-			if current.Department != t.Department || !current.Status.Active() || current.TopicID != t.TopicID || current.TopicChatID != t.TopicChatID {
+			if current.Department != t.Department || !provisioningStatus(current.Status) || !current.RoutingPending || current.AssigneeID != t.AssigneeID || current.RoutingGeneration != t.RoutingGeneration || current.TopicID != t.TopicID || current.TopicChatID != t.TopicChatID {
 				return domain.ErrConflict
 			}
-			current.RoutingPending = false
 			current.TopicChatID = team.ChatID
 			current.TopicID = topic
-			current.QueueMessageID = 0
 			current.TopicMessageID = 0
 			if e = tx.SaveTicket(ctx, &current); e != nil {
 				return e
@@ -233,17 +261,37 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 				return err
 			}
 		}
+		if err = w.replayDeferred(ctx, t); err != nil {
+			return err
+		}
+		t, err = w.finishProvision(ctx, t)
+		if err != nil {
+			return err
+		}
 		return w.refresh(ctx, t)
 	case "refresh_card":
 		return w.refresh(ctx, t)
+	case "retire_queue_card":
+		chat := payload.ChatID
+		if chat == 0 {
+			chat = w.cfg.Departments[payload.FromDepartment].ChatID
+		}
+		if chat == 0 || payload.MessageID == 0 {
+			return nil
+		}
+		text, e := w.card(ctx, t)
+		if e != nil {
+			return e
+		}
+		if err = w.rate(ctx, chat); err != nil {
+			return err
+		}
+		return messageEditError(w.client.Call(ctx, "editMessageText", map[string]any{"chat_id": chat, "message_id": payload.MessageID, "text": text + "\nПередано в отдел: " + departmentName(payload.ToDepartment), "reply_markup": Markup{Buttons: [][]Button{}}}, nil))
 	case "team_notification":
 		_, err = w.send(ctx, team.ChatID, team.QueueTopicID, payload.Text, nil)
 		return err
 	case "notify_client":
-		buttons := [][]Button(nil)
-		if t.Status == domain.Closed {
-			buttons = [][]Button{{{Text: "Открыть повторно", Data: fmt.Sprintf("reopen:%d", t.ID)}}}
-		}
+		buttons := clientTicketButtons(t)
 		_, err = w.send(ctx, t.ClientID, 0, payload.Text, buttons)
 		return err
 	case "archive_message":
@@ -264,28 +312,11 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 		}
 		chat, topic := t.ClientID, int64(0)
 		if op.Kind == "team_message" {
-			if t.RoutingPending && t.TopicChatID != team.ChatID {
-				if msg.RoutingDepartment == t.Department {
-					return fmt.Errorf("new department topic pending")
-				}
-				if msg.RoutingDepartment == "" {
-					events, e := w.store.Events(ctx, t.ID)
-					if e != nil {
-						return e
-					}
-					var transferAt time.Time
-					for _, event := range events {
-						if event.Kind == "transferred" && event.CreatedAt.After(transferAt) {
-							transferAt = event.CreatedAt
-						}
-					}
-					if transferAt.IsZero() || msg.CreatedAt.IsZero() || !msg.CreatedAt.Before(transferAt) {
-						return fmt.Errorf("new department topic pending")
-					}
-				}
+			chat, topic, err = w.messageRoute(ctx, t, msg)
+			if err != nil {
+				return err
 			}
 
-			chat, topic = t.TopicChatID, t.TopicID
 			if topic == 0 {
 				return fmt.Errorf("topic pending")
 			}
@@ -294,7 +325,7 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 		if e != nil {
 			return e
 		}
-		data, _ := json.Marshal(map[string]any{"source_message_id": msg.ID, "telegram_chat_id": chat, "telegram_message_id": sent.ID, "direction": msg.Direction})
+		data, _ := json.Marshal(map[string]any{"source_message_id": msg.ID, "telegram_chat_id": chat, "telegram_message_id": sent.ID, "telegram_topic_id": topic, "direction": msg.Direction})
 		return w.store.Transact(ctx, func(tx domain.Tx) error {
 			if op.Kind == "client_message" {
 				current, e := tx.GetTicket(ctx, t.ID)
@@ -324,15 +355,35 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 		if payload.TopicID == 0 {
 			return nil
 		}
-		if payload.ChatID == t.TopicChatID && payload.TopicID == t.TopicID && t.Status.Active() {
+		if payload.ChatID == t.TopicChatID && payload.TopicID == t.TopicID && t.Status.Active() && t.Status != domain.New {
 			return nil
 		}
-		return w.client.CloseTopic(ctx, payload.ChatID, payload.TopicID)
+		if err = w.client.CloseTopic(ctx, payload.ChatID, payload.TopicID); err != nil {
+			return err
+		}
+		if payload.Retire {
+			return w.retire(ctx, t.ID, payload.ChatID, payload.TopicID)
+		}
+		return nil
 	case "reopen_topic":
-		if t.TopicID == 0 || !t.Status.Active() {
+		if payload.RoutingGeneration != 0 && payload.RoutingGeneration != t.RoutingGeneration {
+			return nil
+		}
+		if t.TopicID == 0 || !provisioningStatus(t.Status) {
 			return nil
 		}
 		if err = w.client.ReopenTopic(ctx, t.TopicChatID, t.TopicID); err != nil {
+			return err
+		}
+		t, err = w.ensureTopicCard(ctx, t)
+		if err != nil {
+			return err
+		}
+		if err = w.replayDeferred(ctx, t); err != nil {
+			return err
+		}
+		t, err = w.finishProvision(ctx, t)
+		if err != nil {
 			return err
 		}
 		return w.refresh(ctx, t)
@@ -411,18 +462,35 @@ func (w *Worker) retire(ctx context.Context, id, chat, topic int64) error {
 }
 func (w *Worker) refresh(ctx context.Context, t domain.Ticket) error {
 	team := w.cfg.Departments[t.Department]
-	if t.RoutingPending && t.TopicChatID != team.ChatID {
-		return nil
+
+	text, err := w.card(ctx, t)
+	if err != nil {
+		return err
+	}
+	if t.TopicID != 0 && t.TopicMessageID != 0 {
+		buttons := cardButtons(t)
+		if t.Status == domain.New {
+			buttons = [][]Button{}
+		}
+		if err = w.rate(ctx, t.TopicChatID); err != nil {
+			return err
+		}
+		if err = messageEditError(w.client.Call(ctx, "editMessageText", map[string]any{"chat_id": t.TopicChatID, "message_id": t.TopicMessageID, "text": text, "reply_markup": Markup{Buttons: buttons}}, nil)); err != nil {
+			return err
+		}
 	}
 	if t.QueueMessageID != 0 {
-		err := w.client.Call(ctx, "editMessageText", map[string]any{"chat_id": team.ChatID, "message_id": t.QueueMessageID, "text": card(t), "reply_markup": Markup{cardButtons(t)}}, nil)
+		if err = w.rate(ctx, team.ChatID); err != nil {
+			return err
+		}
+		err := w.client.Call(ctx, "editMessageText", map[string]any{"chat_id": team.ChatID, "message_id": t.QueueMessageID, "text": text, "reply_markup": Markup{cardButtons(t)}}, nil)
 		var api *APIError
 		if errors.As(err, &api) && strings.Contains(api.Description, "message is not modified") {
 			return nil
 		}
 		return err
 	}
-	sent, err := w.send(ctx, team.ChatID, team.QueueTopicID, card(t), cardButtons(t))
+	sent, err := w.send(ctx, team.ChatID, team.QueueTopicID, text, cardButtons(t))
 	if err != nil {
 		return err
 	}
@@ -439,10 +507,29 @@ func (w *Worker) refresh(ctx context.Context, t domain.Ticket) error {
 	})
 }
 func (w *Worker) deliver(ctx context.Context, chat, topic int64, msg domain.Message, toTeam bool) (Message, error) {
-	text := msg.Text
-	if toTeam && msg.FileID == "" && len([]rune(text)) < 4000 {
-		text = fmt.Sprintf("Клиент %d:\n%s", msg.AuthorID, text)
+	name := ""
+	if toTeam {
+		var err error
+		name, err = displayName(ctx, w.store, msg.AuthorID, "Клиент")
+		if err != nil {
+			return Message{}, err
+		}
 	}
+	return w.deliverNamed(ctx, chat, topic, msg, name)
+}
+func (w *Worker) deliverNamed(ctx context.Context, chat, topic int64, msg domain.Message, name string) (Message, error) {
+	text := msg.Text
+	if name != "" {
+		prefix := name + ":\n"
+		limit := 4096
+		if msg.FileID != "" {
+			limit = 1024
+		}
+		if len([]rune(prefix+text)) <= limit {
+			text = prefix + text
+		}
+	}
+
 	if msg.FileID == "" {
 		return w.send(ctx, chat, topic, text, nil)
 	}
@@ -528,7 +615,11 @@ func (w *Worker) ensureTopicCard(ctx context.Context, t domain.Ticket) (domain.T
 	if t.TopicID == 0 {
 		return t, domain.ErrConflict
 	}
-	sent, err := w.send(ctx, t.TopicChatID, t.TopicID, card(t)+"\nИстория: /history", cardButtons(t))
+	text, err := w.card(ctx, t)
+	if err != nil {
+		return t, err
+	}
+	sent, err := w.send(ctx, t.TopicChatID, t.TopicID, text, cardButtons(t))
 	if err != nil {
 		return t, err
 	}
@@ -537,15 +628,179 @@ func (w *Worker) ensureTopicCard(ctx context.Context, t domain.Ticket) (domain.T
 		if e != nil {
 			return e
 		}
-		if current.TopicChatID != t.TopicChatID || current.TopicID != t.TopicID || current.Department != t.Department {
+		if current.TopicChatID != t.TopicChatID || current.TopicID != t.TopicID || current.Department != t.Department || current.RoutingGeneration != t.RoutingGeneration || current.AssigneeID != t.AssigneeID || !provisioningStatus(current.Status) {
 			return domain.ErrConflict
 		}
 		current.TopicMessageID = sent.ID
 		if e = tx.SaveTicket(ctx, &current); e != nil {
 			return e
 		}
-		data, _ := json.Marshal(map[string]any{"source_message_id": 0, "telegram_chat_id": t.TopicChatID, "telegram_message_id": sent.ID, "direction": "inbound", "initial_description": true})
+		data, _ := json.Marshal(map[string]any{"source_message_id": 0, "telegram_chat_id": t.TopicChatID, "telegram_message_id": sent.ID, "telegram_topic_id": t.TopicID, "direction": "inbound", "initial_description": true})
 		if e = tx.AddEvent(ctx, domain.Event{TicketID: t.ID, ActorID: t.ClientID, Kind: "message_delivered", Data: data, CreatedAt: time.Now().UTC()}); e != nil {
+			return e
+		}
+		t = current
+		return nil
+	})
+	return t, err
+}
+
+func (w *Worker) notifyAdmins(ctx context.Context, text string) error {
+	return w.store.Transact(ctx, func(tx domain.Tx) error {
+		for _, id := range w.cfg.AdminIDs {
+			data, _ := json.Marshal(map[string]any{"user_id": id, "text": text})
+			if err := tx.Enqueue(ctx, domain.Operation{Kind: "access_notification", Payload: data, AvailableAt: time.Now().UTC(), State: "pending"}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+func (w *Worker) card(ctx context.Context, t domain.Ticket) (string, error) {
+	name, err := displayName(ctx, w.store, t.ClientID, "Клиент")
+	if err != nil {
+		return "", err
+	}
+	company, err := companyName(ctx, w.store, t.CompanyID)
+	if err != nil {
+		return "", err
+	}
+	assignee := "Не назначен"
+	if t.AssigneeID != 0 {
+		assignee, err = displayName(ctx, w.store, t.AssigneeID, "Специалист")
+		if err != nil {
+			return "", err
+		}
+	}
+	text := ticketText(t, name, company, assignee)
+	if t.Status == domain.New {
+		messages, e := w.store.Messages(ctx, t.ID)
+		if e != nil {
+			return "", e
+		}
+		count := 0
+		for _, m := range messages {
+			if m.Direction == "inbound" {
+				count++
+			}
+		}
+		if count > 0 {
+			text += fmt.Sprintf("\nДополнений от клиента: %d", count)
+		}
+	}
+	return text, nil
+}
+func messageEditError(err error) error {
+	var api *APIError
+	if errors.As(err, &api) && strings.Contains(strings.ToLower(api.Description), "message is not modified") {
+		return nil
+	}
+	return err
+}
+func (w *Worker) messageRoute(ctx context.Context, t domain.Ticket, m domain.Message) (int64, int64, error) {
+	if t.TopicID != 0 && !t.RoutingPending && (m.RoutingDepartment == "" || m.RoutingDepartment == t.Department) {
+		return t.TopicChatID, t.TopicID, nil
+	}
+	events, err := w.store.Events(ctx, t.ID)
+	if err != nil {
+		return 0, 0, err
+	}
+	var selected domain.Event
+	var chat, topic int64
+	for _, event := range events {
+		if event.Kind != "transferred" {
+			continue
+		}
+		var data struct {
+			From    domain.Department `json:"from"`
+			ChatID  int64             `json:"old_chat_id"`
+			TopicID int64             `json:"old_topic_id"`
+		}
+		if json.Unmarshal(event.Data, &data) != nil || data.ChatID == 0 || data.TopicID == 0 || data.From != m.RoutingDepartment {
+			continue
+		}
+		if topic == 0 || event.CreatedAt.After(selected.CreatedAt) {
+			selected = event
+			chat, topic = data.ChatID, data.TopicID
+		}
+	}
+	if topic != 0 {
+		return chat, topic, nil
+	}
+	return 0, 0, fmt.Errorf("message destination topic pending")
+}
+func (w *Worker) replayDeferred(ctx context.Context, t domain.Ticket) error {
+	messages, err := w.store.Messages(ctx, t.ID)
+	if err != nil {
+		return err
+	}
+	events, err := w.store.Events(ctx, t.ID)
+	if err != nil {
+		return err
+	}
+	delivered := map[int64]bool{}
+	for _, event := range events {
+		if event.Kind != "message_delivered" {
+			continue
+		}
+		var d struct {
+			SourceID int64 `json:"source_message_id"`
+			ChatID   int64 `json:"telegram_chat_id"`
+			TopicID  int64 `json:"telegram_topic_id"`
+		}
+		if json.Unmarshal(event.Data, &d) == nil && d.ChatID == t.TopicChatID && d.TopicID == t.TopicID {
+			delivered[d.SourceID] = true
+		}
+	}
+	for _, m := range messages {
+		if !m.DeferredDelivery || m.Direction != "inbound" || delivered[m.ID] {
+			continue
+		}
+		if m.FileID != "" {
+			if err = w.archive(ctx, t, m); err != nil {
+				return err
+			}
+		}
+		name, e := displayName(ctx, w.store, m.AuthorID, "Клиент")
+		if e != nil {
+			return e
+		}
+		err = w.store.Transact(ctx, func(tx domain.Tx) error {
+			current, e := tx.GetTicket(ctx, t.ID)
+			if e != nil {
+				return e
+			}
+			if current.Department != t.Department || current.TopicID != t.TopicID || current.TopicChatID != t.TopicChatID || !provisioningStatus(current.Status) || current.RoutingGeneration != t.RoutingGeneration || current.AssigneeID != t.AssigneeID {
+				return domain.ErrConflict
+			}
+			sent, e := w.deliverNamed(ctx, t.TopicChatID, t.TopicID, m, name)
+			if e != nil {
+				return e
+			}
+			data, _ := json.Marshal(map[string]any{"source_message_id": m.ID, "telegram_chat_id": t.TopicChatID, "telegram_topic_id": t.TopicID, "telegram_message_id": sent.ID, "direction": "inbound"})
+			return tx.AddEvent(ctx, domain.Event{TicketID: t.ID, ActorID: m.AuthorID, Kind: "message_delivered", Data: data, CreatedAt: time.Now().UTC()})
+		})
+		if err != nil {
+			return err
+		}
+
+		delivered[m.ID] = true
+	}
+	return nil
+}
+
+func provisioningStatus(s domain.Status) bool { return s == domain.InProgress || s == domain.Waiting }
+func (w *Worker) finishProvision(ctx context.Context, t domain.Ticket) (domain.Ticket, error) {
+	err := w.store.Transact(ctx, func(tx domain.Tx) error {
+		current, e := tx.GetTicket(ctx, t.ID)
+		if e != nil {
+			return e
+		}
+		if !provisioningStatus(current.Status) || current.Department != t.Department || current.TopicChatID != t.TopicChatID || current.TopicID != t.TopicID || current.AssigneeID != t.AssigneeID || current.RoutingGeneration != t.RoutingGeneration {
+			return domain.ErrConflict
+		}
+		current.RoutingPending = false
+		if e = tx.SaveTicket(ctx, &current); e != nil {
 			return e
 		}
 		t = current
