@@ -130,6 +130,13 @@ func (s *Service) Create(ctx context.Context, actorID int64, department domain.D
 		if err := s.event(ctx, tx, t, actorID, "created", nil); err != nil {
 			return err
 		}
+		dispatcherText := []rune(fmt.Sprintf("Новая заявка #%d · компания %d · отдел %s\n%s", t.ID, t.CompanyID, t.Department, t.Description))
+		if len(dispatcherText) > 3000 {
+			dispatcherText = append(dispatcherText[:2999], '…')
+		}
+		if err := tx.Enqueue(ctx, domain.Operation{Kind: "dispatcher_message", TicketID: 0, Payload: encode(map[string]any{"ticket_id": t.ID, "text": string(dispatcherText)}), AvailableAt: s.now(), State: "pending"}); err != nil {
+			return err
+		}
 		if err := s.enqueue(ctx, tx, t, "create_topic", map[string]any{"old_chat_id": 0, "old_topic_id": 0, "reason": ""}); err != nil {
 			return err
 		}
