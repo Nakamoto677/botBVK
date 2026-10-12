@@ -145,3 +145,36 @@ func TestPendingTransferPreservesPriorMessagesAndDefersNewOnes(t *testing.T) {
 		})
 	}
 }
+
+func TestInitialTopicCardSupportsPublicReplyAndRetry(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":99}}`))
+	}))
+	defer server.Close()
+	client := NewClient("test")
+	client.BaseURL = server.URL
+	ticket := domain.Ticket{ID: 7, ClientID: 1, Department: domain.IT, TopicChatID: -100, TopicID: 10, Description: "Initial description", Status: domain.InProgress, AssigneeID: 2}
+	store := &workerStore{ticket: ticket, current: ticket}
+	worker := NewWorker(client, store, Config{})
+	bound, err := worker.ensureTopicCard(context.Background(), ticket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bound.TopicMessageID != 99 || len(store.events) != 1 {
+		t.Fatal("initial card not persisted", bound, store.events)
+	}
+	if _, err = worker.ensureTopicCard(context.Background(), bound); err != nil || calls != 1 {
+		t.Fatalf("retry duplicated card: %v calls %d", err, calls)
+	}
+	adapterStore := &adapterStore{user: domain.User{ID: 2, Role: "engineer", Approved: true, Departments: []domain.Department{domain.IT}}, ticket: bound, events: store.events}
+	service := &adapterService{}
+	adapter := NewAdapter(nil, adapterStore, service, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100, QueueTopicID: 1}}})
+	if err = adapter.Handle(context.Background(), Update{Message: &Message{ID: 100, From: Person{ID: 2}, Chat: Chat{ID: -100, Type: "supergroup"}, ThreadID: 10, Text: "/reply Ответ на исходное обращение", Reply: &Message{ID: 99}}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(service.public) != 1 || !service.public[0] {
+		t.Fatal("cannot reply to initial card")
+	}
+}

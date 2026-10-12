@@ -117,6 +117,7 @@ func (a *Adapter) admin(ctx context.Context, m *Message, u domain.User) error {
 			current.TopicID = topic
 			current.RoutingPending = false
 			current.QueueMessageID = 0
+			current.TopicMessageID = 0
 			if e = tx.SaveTicket(ctx, &current); e != nil {
 				return e
 			}
