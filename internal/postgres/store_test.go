@@ -314,3 +314,38 @@ func TestMessageEditKeepsArchiveAndHistory(t *testing.T) {
 		t.Fatalf("stale edit: %v", err)
 	}
 }
+
+func TestDraftPersistenceAndValidation(t *testing.T) {
+	s := testStore(t)
+	seed(t, s)
+	ctx := context.Background()
+	if err := s.SaveDraft(ctx, 1, domain.OneC, ""); err != nil {
+		t.Fatal(err)
+	}
+	department, text, err := s.Draft(ctx, 1)
+	if err != nil || department != domain.OneC || text != "" {
+		t.Fatalf("initial draft: %s %q %v", department, text, err)
+	}
+	if err = s.SaveDraft(ctx, 1, domain.IT, "printer broken"); err != nil {
+		t.Fatal(err)
+	}
+	department, text, err = s.Draft(ctx, 1)
+	if err != nil || department != domain.IT || text != "printer broken" {
+		t.Fatalf("updated draft: %s %q %v", department, text, err)
+	}
+	if err = s.SaveDraft(ctx, 1, domain.Department("invalid"), "x"); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid department: %v", err)
+	}
+	if err = s.SaveDraft(ctx, 111, domain.IT, "x"); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("unknown user: %v", err)
+	}
+	if err = s.DeleteDraft(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.DeleteDraft(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = s.Draft(ctx, 1); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("removed draft: %v", err)
+	}
+}

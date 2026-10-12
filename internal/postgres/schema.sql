@@ -19,3 +19,10 @@ CREATE TABLE IF NOT EXISTS bvk_updates (id bigint PRIMARY KEY, payload jsonb NOT
 CREATE TABLE IF NOT EXISTS bvk_outbox (id bigserial PRIMARY KEY, kind text NOT NULL, ticket_id bigint NOT NULL DEFAULT 0, payload jsonb NOT NULL, attempts integer NOT NULL DEFAULT 0, available_at timestamptz NOT NULL DEFAULT now(), last_error text NOT NULL DEFAULT '', state text NOT NULL DEFAULT 'pending', lease_until timestamptz);
 CREATE INDEX IF NOT EXISTS bvk_outbox_ready ON bvk_outbox(available_at,id) WHERE state IN ('pending','processing');
 CREATE INDEX IF NOT EXISTS bvk_outbox_ticket_order ON bvk_outbox(ticket_id,id) WHERE state IN ('pending','processing');
+CREATE TABLE IF NOT EXISTS bvk_drafts (
+ user_id bigint PRIMARY KEY REFERENCES bvk_users(id),
+ department text NOT NULL CHECK (department IN ('it','1c','installation','field')),
+ body text NOT NULL DEFAULT '',
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now()
+);
