@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -88,6 +87,8 @@ func (tx fakeTx) EditMessage(_ context.Context, m *domain.Message) error {
 		if old.TicketID == m.TicketID && old.AuthorID == m.AuthorID && old.TelegramChatID == m.TelegramChatID && old.TelegramMessageID == m.TelegramMessageID {
 			m.ID = old.ID
 			m.Direction = old.Direction
+			m.DeferredDelivery = old.DeferredDelivery
+			m.RoutingDepartment = old.RoutingDepartment
 			m.CreatedAt = old.CreatedAt
 			tx.f.messages[i] = *m
 			return nil
@@ -190,40 +191,54 @@ func TestMessagesAndFirstResponse(t *testing.T) {
 }
 func TestTransferRetainsHistoryAndReopen(t *testing.T) {
 	s, f := setup()
-	ctx := context.Background()
-	ticket, _ := s.Create(ctx, 1, domain.IT, "help")
+	ticket, _ := s.Create(t.Context(), 1, domain.IT, "help")
+	_ = s.Claim(t.Context(), 2, ticket.ID)
 	v := f.tickets[ticket.ID]
+	v.RoutingPending = false
 	v.TopicChatID = -100
 	v.TopicID = 5
-	v.RoutingPending = false
+	v.QueueMessageID = 55
+	v.TopicMessageID = 56
 	f.tickets[v.ID] = v
-	if err := s.Transfer(ctx, 2, v.ID, domain.OneC, "wrong team"); err != nil {
+	before := len(f.ops)
+	if err := s.Transfer(t.Context(), 2, v.ID, domain.OneC, "wrong team"); err != nil {
 		t.Fatal(err)
 	}
-	op := f.ops[len(f.ops)-2]
+	got := f.tickets[v.ID]
+	if got.Status != domain.New || got.AssigneeID != 0 || got.TopicID != 0 || got.TopicChatID != 0 || got.QueueMessageID != 0 || got.TopicMessageID != 0 || got.RoutingPending {
+		t.Fatal(got)
+	}
+	kinds := []string{"close_topic", "retire_queue_card", "refresh_card", "notify_client"}
+	if len(f.ops)-before != len(kinds) {
+		t.Fatal("transfer operations", f.ops[before:])
+	}
+	for i, kind := range kinds {
+		if f.ops[before+i].Kind != kind {
+			t.Fatal(f.ops[before+i])
+		}
+	}
 	var payload map[string]any
-	if err := json.Unmarshal(op.Payload, &payload); err != nil {
+	_ = json.Unmarshal(f.ops[before].Payload, &payload)
+	if payload["topic_id"] != float64(5) || payload["retire"] != true {
+		t.Fatal(payload)
+	}
+	if err := s.Claim(t.Context(), 3, v.ID); err != nil {
 		t.Fatal(err)
 	}
-	if op.Kind != "create_topic" || payload["old_topic_id"] != float64(5) {
-		t.Fatal(op)
+	if f.ops[len(f.ops)-3].Kind != "create_topic" {
+		t.Fatal("claim did not create target")
 	}
-	if err := s.Claim(ctx, 3, v.ID); err != nil {
+	if err := s.Close(t.Context(), 3, v.ID, "fixed"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Close(ctx, 3, v.ID, "fixed"); err != nil {
+	if err := s.Reopen(t.Context(), 1, v.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Reopen(ctx, 1, v.ID); err != nil {
-		t.Fatal(err)
-	}
-	if f.tickets[v.ID].Status != domain.New {
-		t.Fatal("not reopened")
-	}
-	if len(f.events) != 5 {
-		t.Fatal(len(f.events))
+	if f.tickets[v.ID].Status != domain.New || f.ops[len(f.ops)-2].Kind != "refresh_card" {
+		t.Fatal("reopen not queued")
 	}
 }
+
 func TestReopenWindowAndForeignClient(t *testing.T) {
 	s, f := setup()
 	ctx := context.Background()
@@ -288,32 +303,23 @@ func TestInternalAttachmentArchival(t *testing.T) {
 		t.Fatal("internal file missing archive")
 	}
 }
-func TestRoutingPendingRetainsBindingAndBlocksSecondTransfer(t *testing.T) {
+func TestClaimRoutingPendingBlocksTransfer(t *testing.T) {
 	s, f := setup()
 	ticket, _ := s.Create(t.Context(), 1, domain.IT, "help")
-	if !ticket.RoutingPending {
-		t.Fatal("initial routing missing")
+	if ticket.RoutingPending {
+		t.Fatal("unclaimed requires no topology")
+	}
+	if err := s.Claim(t.Context(), 2, ticket.ID); err != nil {
+		t.Fatal(err)
+	}
+	if !f.tickets[ticket.ID].RoutingPending {
+		t.Fatal("claim routing missing")
 	}
 	if err := s.Transfer(t.Context(), 2, ticket.ID, domain.OneC, "wrong"); !errors.Is(err, domain.ErrConflict) {
 		t.Fatal(err)
 	}
-	v := f.tickets[ticket.ID]
-	v.RoutingPending = false
-	v.TopicChatID = -100
-	v.TopicID = 42
-	v.QueueMessageID = 55
-	f.tickets[v.ID] = v
-	if err := s.Transfer(t.Context(), 2, v.ID, domain.OneC, "wrong"); err != nil {
-		t.Fatal(err)
-	}
-	v = f.tickets[v.ID]
-	if !v.RoutingPending || v.TopicChatID != -100 || v.TopicID != 42 || v.QueueMessageID != 55 {
-		t.Fatal("old binding lost", v)
-	}
-	if err := s.Transfer(t.Context(), 4, v.ID, domain.Field, "another"); !errors.Is(err, domain.ErrConflict) {
-		t.Fatal(err)
-	}
 }
+
 func TestCancellationAuthorizationAndAllowsNewTicket(t *testing.T) {
 	s, f := setup()
 	ticket, _ := s.Create(t.Context(), 1, domain.IT, "help")
@@ -363,78 +369,116 @@ func TestAssignScopeOwnerAndDispatcher(t *testing.T) {
 		t.Fatal(err)
 	}
 }
-func TestInboundRoutingSnapshotAndCorrection(t *testing.T) {
+func TestQueuedMessagesAndEditsDeferWithoutBlockingClaim(t *testing.T) {
 	s, f := setup()
 	ticket, _ := s.Create(t.Context(), 1, domain.IT, "help")
-	v := f.tickets[ticket.ID]
-	v.RoutingPending = false
-	v.TopicChatID = -100
-	v.TopicID = 42
-	f.tickets[v.ID] = v
-	if err := s.AddMessage(t.Context(), 1, v.ID, domain.Message{Text: "before", TelegramChatID: 1, TelegramMessageID: 42}, false); err != nil {
+	if err := s.AddMessage(t.Context(), 1, ticket.ID, domain.Message{Text: "before", TelegramChatID: 1, TelegramMessageID: 42, FileID: "file"}, false); err != nil {
 		t.Fatal(err)
 	}
-	if f.messages[0].RoutingDepartment != domain.IT {
-		t.Fatal("snapshot missing")
+	if !f.messages[0].DeferredDelivery || f.messages[0].RoutingDepartment != domain.IT {
+		t.Fatal("new message not deferred")
 	}
-	if err := s.Transfer(t.Context(), 2, v.ID, domain.OneC, "wrong"); err != nil {
+	if err := s.EditMessage(t.Context(), 1, ticket.ID, domain.Message{Text: "corrected", TelegramChatID: 1, TelegramMessageID: 42}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AddMessage(t.Context(), 1, v.ID, domain.Message{Text: "after", TelegramChatID: 1, TelegramMessageID: 43}, false); err != nil {
+	if !f.messages[0].DeferredDelivery || f.messages[0].Text != "corrected" {
+		t.Fatal("deferred edit lost")
+	}
+	for _, op := range f.ops {
+		if op.Kind == "team_message" || op.Kind == "create_topic" {
+			t.Fatal("unclaimed traffic blocks claim", op)
+		}
+	}
+	if err := s.Claim(t.Context(), 2, ticket.ID); err != nil {
 		t.Fatal(err)
 	}
-	if f.messages[1].RoutingDepartment != domain.OneC {
-		t.Fatal("new route missing")
-	}
-	if err := s.EditMessage(t.Context(), 1, v.ID, domain.Message{Text: "corrected", TelegramChatID: 1, TelegramMessageID: 42}); err != nil {
+	if err := s.AddMessage(t.Context(), 1, ticket.ID, domain.Message{Text: "active", TelegramChatID: 1, TelegramMessageID: 43}, false); err != nil {
 		t.Fatal(err)
 	}
-	var payload domain.Message
-	if err := json.Unmarshal(f.ops[len(f.ops)-1].Payload, &payload); err != nil {
-		t.Fatal(err)
-	}
-	if payload.RoutingDepartment != domain.OneC {
-		t.Fatal("correction route stale")
+	if f.messages[1].DeferredDelivery || f.ops[len(f.ops)-1].Kind != "team_message" {
+		t.Fatal("active routing not enabled")
 	}
 }
-func TestNewTicketAlwaysNotifiesDispatcherWithoutTopicDependency(t *testing.T) {
+
+func TestCreateQueuesWithoutTopicAndClaimCreatesExactlyOnce(t *testing.T) {
 	s, f := setup()
-	ticket, err := s.Create(t.Context(), 1, domain.IT, strings.Repeat("я", 5000))
+	ticket, err := s.Create(t.Context(), 1, domain.IT, "help")
 	if err != nil {
 		t.Fatal(err)
 	}
-	found := 0
-	for _, op := range f.ops {
-		if op.Kind == "dispatcher_message" {
-			found++
-			if op.TicketID != 0 {
-				t.Fatal("dispatcher waits for topic")
-			}
-			var payload struct {
-				TicketID int64  `json:"ticket_id"`
-				Text     string `json:"text"`
-			}
-			if err := json.Unmarshal(op.Payload, &payload); err != nil {
-				t.Fatal(err)
-			}
-			if payload.TicketID != ticket.ID || len([]rune(payload.Text)) > 3000 {
-				t.Fatal("bad notification")
-			}
-		}
-	}
-	if found != 1 {
-		t.Fatal("missing dispatcher notification")
+	if ticket.RoutingPending || ticket.TopicID != 0 || len(f.ops) != 2 || f.ops[0].Kind != "refresh_card" || f.ops[1].Kind != "notify_client" {
+		t.Fatal(f.ops)
 	}
 	if _, err := s.Create(t.Context(), 1, domain.IT, "duplicate"); !errors.Is(err, domain.ErrConflict) {
 		t.Fatal(err)
 	}
+	errs := make(chan error, 2)
+	for range 2 {
+		go func() { errs <- s.Claim(t.Context(), 2, ticket.ID) }()
+	}
+	success := 0
+	for range 2 {
+		err := <-errs
+		if err == nil {
+			success++
+		} else if !errors.Is(err, domain.ErrConflict) {
+			t.Fatal(err)
+		}
+	}
 	count := 0
 	for _, op := range f.ops {
-		if op.Kind == "dispatcher_message" {
+		if op.Kind == "create_topic" {
+			count++
+		}
+	}
+	if success != 1 || count != 1 {
+		t.Fatal(success, count)
+	}
+}
+func TestTransferUnclaimedQueueNeverCreatesOrClosesTopic(t *testing.T) {
+	s, f := setup()
+	ticket, _ := s.Create(t.Context(), 1, domain.IT, "help")
+	v := f.tickets[ticket.ID]
+	v.QueueMessageID = 44
+	f.tickets[v.ID] = v
+	before := len(f.ops)
+	if err := s.Transfer(t.Context(), 2, v.ID, domain.OneC, "wrong team"); err != nil {
+		t.Fatal(err)
+	}
+	for _, op := range f.ops[before:] {
+		if op.Kind == "create_topic" || op.Kind == "reopen_topic" || op.Kind == "close_topic" {
+			t.Fatal("unexpected topology", op)
+		}
+	}
+	var payload map[string]any
+	_ = json.Unmarshal(f.ops[before].Payload, &payload)
+	if f.ops[before].Kind != "retire_queue_card" || payload["from_department"] != "it" || payload["message_id"] != float64(44) {
+		t.Fatal(payload)
+	}
+	if err := s.Transfer(t.Context(), 3, v.ID, domain.Field, "second validation"); err != nil {
+		t.Fatal(err)
+	}
+}
+func TestAssignQueuedTicketCreatesOneTopic(t *testing.T) {
+	s, f := setup()
+	ticket, _ := s.Create(t.Context(), 1, domain.IT, "help")
+	before := len(f.ops)
+	if err := s.Assign(t.Context(), 4, ticket.ID, 2); err != nil {
+		t.Fatal(err)
+	}
+	if !f.tickets[ticket.ID].RoutingPending || f.tickets[ticket.ID].Status != domain.InProgress || f.ops[before].Kind != "create_topic" {
+		t.Fatal("assignment did not take request")
+	}
+	if err := s.Assign(t.Context(), 4, ticket.ID, 2); !errors.Is(err, domain.ErrConflict) {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, op := range f.ops {
+		if op.Kind == "create_topic" {
 			count++
 		}
 	}
 	if count != 1 {
-		t.Fatal("duplicate notification")
+		t.Fatal(count)
 	}
 }
