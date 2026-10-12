@@ -127,7 +127,7 @@ func WaitingDuration(ticketID int64, events []domain.Event, until time.Time, cal
 			}
 			waiting = payload.Status == domain.Waiting
 			stop = !waiting
-		case "closed", "transferred", "reopened":
+		case "closed", "cancelled", "transferred", "reopened":
 			stop = true
 		}
 		if waiting && start == nil {
