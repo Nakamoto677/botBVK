@@ -266,3 +266,51 @@ func TestAccessAndBootstrap(t *testing.T) {
 		t.Fatal("bootstrap overwrote user")
 	}
 }
+
+func TestMessageEditKeepsArchiveAndHistory(t *testing.T) {
+	s := testStore(t)
+	ticket := seed(t, s)
+	ctx := context.Background()
+	created := time.Now().UTC().Add(-time.Hour)
+	original := domain.Message{TicketID: ticket.ID, AuthorID: 1, Direction: "inbound", Text: "original", TelegramChatID: 1, TelegramMessageID: 789, FileID: "source-file", CreatedAt: created}
+	if err := s.Transact(ctx, func(tx domain.Tx) error { return tx.AddMessage(ctx, &original) }); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveArchive(ctx, original.ID, "archives/file", "checksum"); err != nil {
+		t.Fatal(err)
+	}
+	editTime := time.Now().UTC()
+	edited := domain.Message{TicketID: ticket.ID, AuthorID: 1, Text: "corrected", TelegramChatID: 1, TelegramMessageID: 789, EditedAt: &editTime}
+	if err := s.Transact(ctx, func(tx domain.Tx) error { return tx.EditMessage(ctx, &edited) }); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := s.Messages(ctx, ticket.ID)
+	if err != nil || len(messages) != 1 {
+		t.Fatalf("messages: %v %v", messages, err)
+	}
+	got := messages[0]
+	if got.ID != original.ID || got.ArchivePath != "archives/file" || got.SHA256 != "checksum" || got.FileID != "source-file" || got.AuthorID != 1 {
+		t.Fatalf("metadata overwritten: %#v", got)
+	}
+	if got.Text != "corrected" || got.EditedAt == nil || len(got.Revisions) != 1 || got.Revisions[0].Text != "original" || !got.Revisions[0].EditedAt.Equal(created) {
+		t.Fatalf("history missing: %#v", got)
+	}
+	if err = s.Transact(ctx, func(tx domain.Tx) error { return tx.EditMessage(ctx, &edited) }); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("duplicate edit: %v", err)
+	}
+	secondTime := editTime.Add(time.Second)
+	edited.Text = "final"
+	edited.EditedAt = &secondTime
+	if err = s.Transact(ctx, func(tx domain.Tx) error { return tx.EditMessage(ctx, &edited) }); err != nil {
+		t.Fatal(err)
+	}
+	if len(edited.Revisions) != 2 || edited.Revisions[1].Text != "corrected" || !edited.Revisions[1].EditedAt.Equal(editTime) {
+		t.Fatalf("second revision: %#v", edited)
+	}
+	older := editTime.Add(-time.Second)
+	edited.Text = "stale edit"
+	edited.EditedAt = &older
+	if err = s.Transact(ctx, func(tx domain.Tx) error { return tx.EditMessage(ctx, &edited) }); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("stale edit: %v", err)
+	}
+}
