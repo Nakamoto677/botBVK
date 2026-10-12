@@ -163,39 +163,36 @@ func TestRollbackWhenOutboxFails(t *testing.T) {
 }
 func TestMessagesAndFirstResponse(t *testing.T) {
 	s, f := setup()
-	ctx := context.Background()
-	ticket, _ := s.Create(ctx, 1, domain.IT, "help")
-	if _, err := s.Create(ctx, 1, domain.OneC, "second"); !errors.Is(err, domain.ErrConflict) {
+	ticket, _ := s.Create(t.Context(), 1, domain.IT, "help")
+	if _, err := s.Create(t.Context(), 1, domain.OneC, "second"); !errors.Is(err, domain.ErrConflict) {
 		t.Fatal(err)
 	}
-	if err := s.AddMessage(ctx, 2, ticket.ID, domain.Message{Text: "secret"}, false); err != nil {
+	if err := s.AddMessage(t.Context(), 2, ticket.ID, domain.Message{Text: "secret"}, false); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatal(err)
 	}
-	if f.messages[0].Direction != "internal" || f.tickets[ticket.ID].FirstResponseAt != nil {
-		t.Fatal("note leaked")
+	if len(f.messages) != 0 {
+		t.Fatal("legacy note path accepted")
 	}
-	if err := s.AddMessage(ctx, 2, ticket.ID, domain.Message{Text: "reply"}, true); !errors.Is(err, domain.ErrForbidden) {
+	_ = s.Claim(t.Context(), 2, ticket.ID)
+	bind(f, ticket.ID, -100, 42)
+	f.users[6] = domain.User{ID: 6, Role: "engineer", Approved: true, Departments: []domain.Department{domain.IT}}
+	if err := s.AddMessage(t.Context(), 6, ticket.ID, domain.Message{Text: "ordinary reply", TelegramChatID: -100, TelegramTopicID: 42, TelegramMessageID: 123}, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Claim(ctx, 2, ticket.ID); err != nil {
+	if f.ops[len(f.ops)-1].Kind != "client_message" || f.messages[0].Direction != "outbound" || f.tickets[ticket.ID].FirstResponseAt != nil {
+		t.Fatal("public reply failed")
+	}
+	if err := s.SetWaiting(t.Context(), 2, ticket.ID, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AddMessage(ctx, 2, ticket.ID, domain.Message{Text: "reply"}, true); err != nil {
-		t.Fatal(err)
-	}
-	if f.ops[len(f.ops)-1].Kind != "client_message" || f.tickets[ticket.ID].FirstResponseAt != nil {
-		t.Fatal("public response missing")
-	}
-	if err := s.SetWaiting(ctx, 2, ticket.ID, true); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.AddMessage(ctx, 1, ticket.ID, domain.Message{Text: "new details"}, false); err != nil {
+	if err := s.AddMessage(t.Context(), 1, ticket.ID, domain.Message{Text: "details"}, false); err != nil {
 		t.Fatal(err)
 	}
 	if f.tickets[ticket.ID].Status != domain.InProgress {
 		t.Fatal("client did not resume")
 	}
 }
+
 func TestTransferRetainsHistoryAndReopen(t *testing.T) {
 	s, f := setup()
 	ticket, _ := s.Create(t.Context(), 1, domain.IT, "help")
@@ -269,6 +266,7 @@ func TestEditArchivesAndOnlyClientCorrectionIsDelivered(t *testing.T) {
 	ctx := context.Background()
 	ticket, _ := s.Create(ctx, 1, domain.IT, "help")
 	_ = s.Claim(ctx, 2, ticket.ID)
+	bind(f, ticket.ID, -100, 42)
 	if err := s.AddMessage(ctx, 1, ticket.ID, domain.Message{Text: "original", TelegramChatID: 1, TelegramMessageID: 42}, false); err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +279,7 @@ func TestEditArchivesAndOnlyClientCorrectionIsDelivered(t *testing.T) {
 	if err := s.EditMessage(ctx, 2, ticket.ID, domain.Message{Text: "forged", TelegramChatID: 1, TelegramMessageID: 42}); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatal(err)
 	}
-	if err := s.AddMessage(ctx, 2, ticket.ID, domain.Message{Text: "answer", TelegramChatID: -100, TelegramMessageID: 100}, true); err != nil {
+	if err := s.AddMessage(ctx, 2, ticket.ID, domain.Message{Text: "answer", TelegramChatID: -100, TelegramTopicID: 42, TelegramMessageID: 100}, true); err != nil {
 		t.Fatal(err)
 	}
 	count := len(f.ops)
@@ -300,16 +298,27 @@ func TestEditArchivesAndOnlyClientCorrectionIsDelivered(t *testing.T) {
 		t.Fatal("closed edit delivered")
 	}
 }
-func TestInternalAttachmentArchival(t *testing.T) {
+func TestLegacyInternalEditsStayArchivalAndNewNotesRejected(t *testing.T) {
 	s, f := setup()
 	ticket, _ := s.Create(t.Context(), 1, domain.IT, "help")
-	if err := s.AddMessage(t.Context(), 2, ticket.ID, domain.Message{FileID: "file"}, false); err != nil {
+	_ = s.Claim(t.Context(), 2, ticket.ID)
+	bind(f, ticket.ID, -100, 42)
+	f.messages = append(f.messages, domain.Message{ID: 1, TicketID: ticket.ID, AuthorID: 2, Direction: "internal", Text: "old private note", TelegramChatID: -100, TelegramMessageID: 55, CreatedAt: s.now()})
+	before := len(f.ops)
+	if err := s.EditMessage(t.Context(), 2, ticket.ID, domain.Message{Text: "archival revision", TelegramChatID: -100, TelegramMessageID: 55}); err != nil {
 		t.Fatal(err)
 	}
-	if f.ops[len(f.ops)-1].Kind != "archive_message" {
-		t.Fatal("internal file missing archive")
+	if len(f.ops) != before || f.messages[0].Direction != "internal" {
+		t.Fatal("old note relayed")
+	}
+	if err := s.AddMessage(t.Context(), 2, ticket.ID, domain.Message{FileID: "file", TelegramChatID: -100, TelegramTopicID: 42}, false); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatal(err)
+	}
+	if len(f.messages) != 1 {
+		t.Fatal("new private file accepted")
 	}
 }
+
 func TestClaimRoutingPendingBlocksTransfer(t *testing.T) {
 	s, f := setup()
 	ticket, _ := s.Create(t.Context(), 1, domain.IT, "help")
@@ -482,64 +491,43 @@ func TestAssignQueuedTicketRejectedWithoutCreatingTopic(t *testing.T) {
 		}
 	}
 }
-func TestClaimGenerationSurvivesCloseReopenAndRejectsOldProvision(t *testing.T) {
+func TestReopenDetachesCompletedTopicAndNextClaimCreatesNewGeneration(t *testing.T) {
 	s, f := setup()
 	ticket, _ := s.Create(t.Context(), 1, domain.IT, "help")
+	_ = s.Claim(t.Context(), 2, ticket.ID)
+	bind(f, ticket.ID, -100, 42)
+	first := f.tickets[ticket.ID].RoutingGeneration
+	if err := s.Close(t.Context(), 2, ticket.ID, "fixed"); err != nil {
+		t.Fatal(err)
+	}
+	before := len(f.ops)
+	if err := s.Reopen(t.Context(), 1, ticket.ID); err != nil {
+		t.Fatal(err)
+	}
+	v := f.tickets[ticket.ID]
+	if v.TopicID != 0 || v.TopicChatID != 0 || v.TopicMessageID != 0 || v.Status != domain.New || v.RoutingGeneration != first {
+		t.Fatal(v)
+	}
+	if len(f.ops)-before != 2 || f.ops[before].Kind != "refresh_card" {
+		t.Fatal("reopen touched old topic")
+	}
+	before = len(f.ops)
 	if err := s.Claim(t.Context(), 2, ticket.ID); err != nil {
 		t.Fatal(err)
 	}
-	first := f.tickets[ticket.ID].RoutingGeneration
-	if first != 1 {
-		t.Fatal(first)
-	}
-	var firstPayload map[string]any
-	for _, op := range f.ops {
-		if op.Kind == "create_topic" {
-			_ = json.Unmarshal(op.Payload, &firstPayload)
-		}
-	}
-	if firstPayload["routing_generation"] != float64(first) {
-		t.Fatal(firstPayload)
-	}
-	v := f.tickets[ticket.ID]
-	v.TopicChatID = -100
-	v.TopicID = 42
-	v.RoutingPending = false
-	f.tickets[v.ID] = v
-	_ = s.Close(t.Context(), 2, v.ID, "fixed")
-	before := len(f.ops)
-	if err := s.Reopen(t.Context(), 1, v.ID); err != nil {
-		t.Fatal(err)
-	}
-	if f.ops[before].Kind != "close_topic" {
-		t.Fatal("missing requeue pause")
-	}
-	var pause map[string]any
-	_ = json.Unmarshal(f.ops[before].Payload, &pause)
-	if pause["pause"] != true || pause["topic_id"] != float64(42) {
-		t.Fatal(pause)
-	}
-	if f.tickets[v.ID].RoutingGeneration != first {
-		t.Fatal("reopen advanced claim generation")
-	}
-	before = len(f.ops)
-	if err := s.Claim(t.Context(), 2, v.ID); err != nil {
-		t.Fatal(err)
-	}
-	current := f.tickets[v.ID]
-	if current.RoutingGeneration != first+1 {
-		t.Fatal(current)
-	}
-	var secondPayload map[string]any
-	_ = json.Unmarshal(f.ops[before].Payload, &secondPayload)
-	if f.ops[before].Kind != "reopen_topic" || secondPayload["routing_generation"] != float64(current.RoutingGeneration) {
-		t.Fatal(secondPayload)
+	current := f.tickets[ticket.ID]
+	var payload map[string]any
+	_ = json.Unmarshal(f.ops[before].Payload, &payload)
+	if current.RoutingGeneration != first+1 || f.ops[before].Kind != "create_topic" || payload["routing_generation"] != float64(current.RoutingGeneration) {
+		t.Fatal(current, payload)
 	}
 }
+
 func TestCloseAttachmentPreservesSourceAndArchivesAtomically(t *testing.T) {
 	s, f := setup()
 	ticket, _ := s.Create(t.Context(), 1, domain.IT, "help")
 	_ = s.Claim(t.Context(), 2, ticket.ID)
+	bind(f, ticket.ID, -100, 42)
 	before := len(f.ops)
 	msg := domain.Message{ID: 99, AuthorID: 999, TicketID: 999, Text: "result screenshot", FileID: "file", MediaType: "photo", TelegramChatID: -100, TelegramMessageID: 123, ArchivePath: "spoof", SHA256: "spoof", DeferredDelivery: true}
 	if err := s.CloseWithMessage(t.Context(), 2, ticket.ID, "fixed", msg); err != nil {
@@ -549,7 +537,7 @@ func TestCloseAttachmentPreservesSourceAndArchivesAtomically(t *testing.T) {
 		t.Fatal(f.messages)
 	}
 	got := f.messages[0]
-	if got.ID == 99 || got.AuthorID != 2 || got.TicketID != ticket.ID || got.Direction != "internal" || got.TelegramChatID != -100 || got.TelegramMessageID != 123 || got.FileID != "file" || got.Text != msg.Text || got.ArchivePath != "" || got.SHA256 != "" || got.DeferredDelivery || !got.CreatedAt.Equal(s.now()) {
+	if got.ID == 99 || got.AuthorID != 2 || got.TicketID != ticket.ID || got.Direction != "service" || got.TelegramChatID != -100 || got.TelegramMessageID != 123 || got.FileID != "file" || got.Text != msg.Text || got.ArchivePath != "" || got.SHA256 != "" || got.DeferredDelivery || !got.CreatedAt.Equal(s.now()) {
 		t.Fatal(got)
 	}
 	if f.ops[before].Kind != "archive_message" || f.ops[before+1].Kind != "close_topic" || f.tickets[ticket.ID].Status != domain.Closed {
@@ -609,5 +597,149 @@ func TestTransferAttachmentAndDuplicateSourceRollback(t *testing.T) {
 	}
 	if len(f.messages) != 1 {
 		t.Fatal("plain reason duplicated row")
+	}
+}
+
+func bind(f *fakeStore, ticketID, chatID, topicID int64) {
+	t := f.tickets[ticketID]
+	t.TopicChatID = chatID
+	t.TopicID = topicID
+	t.RoutingPending = false
+	f.tickets[ticketID] = t
+}
+func TestCancellationWithoutReasonIsIdempotentAndScoped(t *testing.T) {
+	s, f := setup()
+	ticket, _ := s.Create(t.Context(), 1, domain.IT, "help")
+	_ = s.Claim(t.Context(), 2, ticket.ID)
+	bind(f, ticket.ID, -100, 42)
+	if err := s.Cancel(t.Context(), 1, ticket.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	v := f.tickets[ticket.ID]
+	if v.Status != domain.Cancelled || v.Resolution != "" || v.ClosedBy != 1 {
+		t.Fatal(v)
+	}
+	events, ops, version := len(f.events), len(f.ops), v.Version
+	if err := s.Cancel(t.Context(), 1, ticket.ID, "ignored legacy argument"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.events) != events || len(f.ops) != ops || f.tickets[ticket.ID].Version != version {
+		t.Fatal("repeated cancel duplicated action")
+	}
+	f.users[5] = domain.User{ID: 5, Role: "client", Approved: true, CompanyID: 10}
+	if err := s.Cancel(t.Context(), 5, ticket.ID, ""); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatal(err)
+	}
+	kinds := map[string]int{}
+	for _, e := range f.events {
+		kinds[e.Kind]++
+	}
+	if kinds["cancelled"] != 1 || kinds["closed"] != 0 || kinds["completion_cleanup_requested"] != 1 {
+		t.Fatal(kinds)
+	}
+}
+func TestCompletionIntentCapturesOldBindingAndNoHistoricalBackfill(t *testing.T) {
+	s, f := setup()
+	ticket, _ := s.Create(t.Context(), 1, domain.IT, "help")
+	_ = s.Claim(t.Context(), 2, ticket.ID)
+	bind(f, ticket.ID, -100, 42)
+	if err := s.Close(t.Context(), 2, ticket.ID, "fixed"); err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	var payload struct {
+		ChatID     int64  `json:"chat_id"`
+		TopicID    int64  `json:"topic_id"`
+		Generation int64  `json:"routing_generation"`
+		Key        string `json:"completion_key"`
+	}
+	for _, e := range f.events {
+		if e.Kind == "completion_cleanup_requested" {
+			count++
+			if err := json.Unmarshal(e.Data, &payload); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if count != 1 || payload.ChatID != -100 || payload.TopicID != 42 || payload.Generation != 1 || payload.Key != "completion:1:1:-100:42" {
+		t.Fatal(payload, count)
+	}
+	if err := s.Reopen(t.Context(), 1, ticket.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Claim(t.Context(), 2, ticket.ID); err != nil {
+		t.Fatal(err)
+	}
+	bind(f, ticket.ID, -100, 99)
+	if payload.TopicID != 42 {
+		t.Fatal("old proof mutable")
+	}
+	if err := s.Cancel(t.Context(), 1, ticket.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	keys := map[string]bool{}
+	for _, e := range f.events {
+		if e.Kind == "completion_cleanup_requested" {
+			_ = json.Unmarshal(e.Data, &payload)
+			keys[payload.Key] = true
+		}
+	}
+	if !keys["completion:1:2:-100:99"] || len(keys) != 2 {
+		t.Fatal(keys)
+	}
+	s2, f2 := setup()
+	t2, _ := s2.Create(t.Context(), 1, domain.IT, "unclaimed")
+	if err := s2.Cancel(t.Context(), 1, t2.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range f2.events {
+		if e.Kind == "completion_cleanup_requested" {
+			t.Fatal("no topic but cleanup intent")
+		}
+	}
+	for _, op := range f2.ops {
+		if op.Kind == "close_topic" {
+			t.Fatal("empty close could target a later cycle")
+		}
+	}
+}
+func TestPublicRelayRequiresCurrentSourceTopicForEveryEngineer(t *testing.T) {
+	s, f := setup()
+	ticket, _ := s.Create(t.Context(), 1, domain.IT, "help")
+	_ = s.Claim(t.Context(), 2, ticket.ID)
+	bind(f, ticket.ID, -100, 42)
+	f.users[6] = domain.User{ID: 6, Role: "engineer", Approved: true, Departments: []domain.Department{domain.IT}}
+	cases := []struct{ actor, chat, topic int64 }{{6, -100, 41}, {6, -101, 42}, {6, -100, 0}, {3, -100, 42}}
+	for _, c := range cases {
+		if err := s.AddMessage(t.Context(), c.actor, ticket.ID, domain.Message{Text: "wrong source", TelegramChatID: c.chat, TelegramTopicID: c.topic}, true); !errors.Is(err, domain.ErrForbidden) {
+			t.Fatal(c, err)
+		}
+	}
+	if len(f.messages) != 0 {
+		t.Fatal("foreign source archived as public")
+	}
+	if err := s.AddMessage(t.Context(), 6, ticket.ID, domain.Message{Text: "valid colleague", TelegramChatID: -100, TelegramTopicID: 42}, true); err != nil {
+		t.Fatal(err)
+	}
+	if f.messages[0].AuthorID != 6 || f.messages[0].Direction != "outbound" || f.messages[0].TelegramTopicID != 42 {
+		t.Fatal(f.messages[0])
+	}
+	f.users[6] = domain.User{ID: 6, Role: "engineer", Approved: false, Departments: []domain.Department{domain.IT}}
+	if err := s.AddMessage(t.Context(), 6, ticket.ID, domain.Message{Text: "revoked", TelegramChatID: -100, TelegramTopicID: 42}, true); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatal(err)
+	}
+}
+func TestFailedCompletionRollbackLeavesNoDeletionIntent(t *testing.T) {
+	s, f := setup()
+	ticket, _ := s.Create(t.Context(), 1, domain.IT, "help")
+	_ = s.Claim(t.Context(), 2, ticket.ID)
+	bind(f, ticket.ID, -100, 42)
+	events, ops := len(f.events), len(f.ops)
+	f.failEnqueue = true
+	if err := s.Cancel(t.Context(), 1, ticket.ID, ""); err == nil {
+		t.Fatal("expected failure")
+	}
+	if f.tickets[ticket.ID].Status != domain.InProgress || len(f.events) != events || len(f.ops) != ops {
+		t.Fatal("partial completion intent")
 	}
 }

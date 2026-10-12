@@ -31,28 +31,7 @@ func TestMetricsAndSafeCSV(t *testing.T) {
 		t.Fatal(rows[1][12])
 	}
 }
-func TestReopenUsesExistingTopic(t *testing.T) {
-	s, f := setup()
-	ticket, _ := s.Create(t.Context(), 1, domain.IT, "help")
-	_ = s.Claim(t.Context(), 2, ticket.ID)
-	v := f.tickets[ticket.ID]
-	v.TopicID = 42
-	v.TopicChatID = -100
-	f.tickets[v.ID] = v
-	_ = s.Close(t.Context(), 2, v.ID, "fixed")
-	if err := s.Reopen(t.Context(), 1, v.ID); err != nil {
-		t.Fatal(err)
-	}
-	if f.ops[len(f.ops)-2].Kind != "refresh_card" || f.tickets[v.ID].TopicID != 42 || f.tickets[v.ID].RoutingPending {
-		t.Fatal("existing topic was replaced")
-	}
-	if err := s.Claim(t.Context(), 2, v.ID); err != nil {
-		t.Fatal(err)
-	}
-	if f.ops[len(f.ops)-3].Kind != "reopen_topic" {
-		t.Fatal("claim did not reopen existing topic")
-	}
-}
+
 func TestWaitingIntervalsSortedAndClipped(t *testing.T) {
 	c := DefaultCalendar()
 	start := time.Date(2026, 10, 13, 10, 0, 0, 0, c.Location)

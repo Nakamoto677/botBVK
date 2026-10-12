@@ -256,14 +256,20 @@ func (s *Service) close(ctx context.Context, actorID, ticketID int64, resolution
 		}
 		now := s.now()
 		t.Status = domain.Closed
+		t.RoutingPending = false
 		t.ClosedAt = &now
 		t.ClosedBy = u.ID
 		t.Resolution = strings.TrimSpace(resolution)
 		if err := s.save(ctx, tx, t, actorID, "closed", map[string]string{"resolution": t.Resolution}); err != nil {
 			return err
 		}
-		if err := s.enqueue(ctx, tx, *t, "close_topic", map[string]int64{"chat_id": t.TopicChatID, "topic_id": t.TopicID}); err != nil {
+		if err := s.completionCleanup(ctx, tx, *t, actorID); err != nil {
 			return err
+		}
+		if t.TopicChatID != 0 && t.TopicID != 0 {
+			if err := s.enqueue(ctx, tx, *t, "close_topic", map[string]int64{"chat_id": t.TopicChatID, "topic_id": t.TopicID}); err != nil {
+				return err
+			}
 		}
 		return s.notify(ctx, tx, *t, "Заявка закрыта. Результат: "+t.Resolution)
 	})
@@ -291,19 +297,18 @@ func (s *Service) Reopen(ctx context.Context, actorID, ticketID int64) error {
 		if !errors.Is(err, domain.ErrNotFound) {
 			return err
 		}
+		oldChat, oldTopic := t.TopicChatID, t.TopicID
 		t.Status = domain.New
 		t.AssigneeID = 0
 		t.ClosedAt = nil
 		t.ClosedBy = 0
 		t.Resolution = ""
 		t.RoutingPending = false
-		if err := s.save(ctx, tx, t, actorID, "reopened", nil); err != nil {
+		t.TopicChatID = 0
+		t.TopicID = 0
+		t.TopicMessageID = 0
+		if err := s.save(ctx, tx, t, actorID, "reopened", map[string]any{"old_chat_id": oldChat, "old_topic_id": oldTopic, "from": t.Department, "routing_generation": t.RoutingGeneration}); err != nil {
 			return err
-		}
-		if t.TopicChatID != 0 && t.TopicID != 0 {
-			if err := s.enqueue(ctx, tx, *t, "close_topic", map[string]any{"chat_id": t.TopicChatID, "topic_id": t.TopicID, "pause": true}); err != nil {
-				return err
-			}
 		}
 		if err := s.enqueue(ctx, tx, *t, "refresh_card", nil); err != nil {
 			return err
@@ -342,14 +347,17 @@ func (s *Service) AddMessage(ctx context.Context, actorID, ticketID int64, msg d
 		if !t.Status.Active() {
 			return domain.ErrConflict
 		}
-		if !client && public && !canAct(u, *t) {
-			return domain.ErrForbidden
+		if !client {
+			if !public || t.Status == domain.New || t.TopicChatID == 0 || t.TopicID == 0 || msg.TelegramChatID != t.TopicChatID || msg.TelegramTopicID != t.TopicID {
+				return domain.ErrForbidden
+			}
 		}
 		msg.ID = 0
 		msg.TicketID = t.ID
 		msg.AuthorID = u.ID
 		msg.CreatedAt = s.now()
-		msg.Direction = "internal"
+		msg.Direction = ""
+		msg.DeferredDelivery = false
 		kind := ""
 		resumed := false
 		if client {
@@ -397,8 +405,8 @@ func (s *Service) AddMessage(ctx context.Context, actorID, ticketID int64, msg d
 	})
 }
 
-// EditMessage archives a revision of an existing message. Engineer edits never
-// resend a public response; a deliberate new /reply is required for delivery.
+// EditMessage preserves revisions. Legacy internal and service messages remain
+// archival; editing them does not send them to the client.
 func (s *Service) EditMessage(ctx context.Context, actorID, ticketID int64, msg domain.Message) error {
 	if msg.TelegramChatID == 0 || msg.TelegramMessageID == 0 || (strings.TrimSpace(msg.Text) == "" && msg.FileID == "") {
 		return domain.ErrInvalid
@@ -438,17 +446,16 @@ func (s *Service) EditMessage(ctx context.Context, actorID, ticketID int64, msg 
 	})
 }
 
-// Cancel lets a client withdraw their own request, or a dispatcher cancel it
-// with an explicit reason; cancellation does not record a completed solution.
+// Cancel records a client withdrawal separately from an engineer completion.
+// reason is ignored for API compatibility; clients are not asked for one.
 func (s *Service) Cancel(ctx context.Context, actorID, ticketID int64, reason string) error {
-	reason = strings.TrimSpace(reason)
-	if reason == "" {
-		return domain.ErrInvalid
-	}
 	return s.mutate(ctx, actorID, ticketID, func(tx domain.Tx, u domain.User, t *domain.Ticket) error {
 		owner := u.Approved && u.Role == "client" && u.ID == t.ClientID && u.CompanyID == t.CompanyID
 		if !owner && !privileged(u) {
 			return domain.ErrForbidden
+		}
+		if t.Status == domain.Cancelled {
+			return nil
 		}
 		if !t.Status.Active() {
 			return domain.ErrConflict
@@ -457,18 +464,23 @@ func (s *Service) Cancel(ctx context.Context, actorID, ticketID int64, reason st
 		t.Status = domain.Cancelled
 		t.ClosedAt = &now
 		t.ClosedBy = u.ID
-		t.Resolution = reason
+		t.Resolution = ""
 		t.RoutingPending = false
-		if err := s.save(ctx, tx, t, actorID, "cancelled", map[string]string{"reason": reason}); err != nil {
+		if err := s.save(ctx, tx, t, actorID, "cancelled", nil); err != nil {
 			return err
 		}
-		if err := s.enqueue(ctx, tx, *t, "close_topic", map[string]int64{"chat_id": t.TopicChatID, "topic_id": t.TopicID}); err != nil {
+		if err := s.completionCleanup(ctx, tx, *t, actorID); err != nil {
 			return err
+		}
+		if t.TopicChatID != 0 && t.TopicID != 0 {
+			if err := s.enqueue(ctx, tx, *t, "close_topic", map[string]int64{"chat_id": t.TopicChatID, "topic_id": t.TopicID}); err != nil {
+				return err
+			}
 		}
 		if err := s.enqueue(ctx, tx, *t, "refresh_card", nil); err != nil {
 			return err
 		}
-		return s.notify(ctx, tx, *t, "Заявка отменена. Причина: "+reason)
+		return s.notify(ctx, tx, *t, "Заявка завершена по вашему запросу.")
 	})
 }
 
@@ -514,7 +526,7 @@ func (s *Service) activateTopic(ctx context.Context, tx domain.Tx, t domain.Tick
 	return s.enqueue(ctx, tx, t, "create_topic", map[string]any{"old_chat_id": 0, "old_topic_id": 0, "reason": "", "routing_generation": t.RoutingGeneration})
 }
 
-// actionAttachment retains a prompt attachment as an internal note in the same
+// actionAttachment retains a prompt attachment as service data in the same
 // transaction as its state change. Text-only reasons are already captured in events.
 func (s *Service) actionAttachment(ctx context.Context, tx domain.Tx, t domain.Ticket, u domain.User, input *domain.Message) error {
 	if input == nil || input.FileID == "" {
@@ -524,7 +536,7 @@ func (s *Service) actionAttachment(ctx context.Context, tx domain.Tx, t domain.T
 	msg.ID = 0
 	msg.TicketID = t.ID
 	msg.AuthorID = u.ID
-	msg.Direction = "internal"
+	msg.Direction = "service"
 	msg.CreatedAt = s.now()
 	msg.EditedAt = nil
 	msg.Revisions = nil
@@ -539,4 +551,14 @@ func (s *Service) actionAttachment(ctx context.Context, tx domain.Tx, t domain.T
 		return err
 	}
 	return s.enqueue(ctx, tx, t, "archive_message", msg)
+}
+
+// completionCleanup records only new explicit completion intents; historical
+// closed tickets receive no implicit cleanup request.
+func (s *Service) completionCleanup(ctx context.Context, tx domain.Tx, t domain.Ticket, actorID int64) error {
+	if t.TopicChatID == 0 || t.TopicID == 0 {
+		return nil
+	}
+	key := fmt.Sprintf("completion:%d:%d:%d:%d", t.ID, t.RoutingGeneration, t.TopicChatID, t.TopicID)
+	return s.event(ctx, tx, t, actorID, "completion_cleanup_requested", map[string]any{"chat_id": t.TopicChatID, "topic_id": t.TopicID, "routing_generation": t.RoutingGeneration, "completion_key": key})
 }
