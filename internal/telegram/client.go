@@ -29,7 +29,12 @@ type APIError struct {
 	Ambiguous   bool
 }
 
-func (e *APIError) Error() string { return fmt.Sprintf("telegram %d: %s", e.Code, e.Description) }
+func (e *APIError) Error() string {
+	if e.Ambiguous {
+		return fmt.Sprintf("telegram %d: %s; outcome unknown", e.Code, e.Description)
+	}
+	return fmt.Sprintf("telegram %d: %s", e.Code, e.Description)
+}
 func (c *Client) Call(ctx context.Context, method string, payload any, result any) error {
 	b, err := json.Marshal(payload)
 	if err != nil {
@@ -82,6 +87,7 @@ type File struct {
 	Path string `json:"file_path"`
 }
 type Message struct {
+	EditDate     int64    `json:"edit_date,omitempty"`
 	SenderChat   *Chat    `json:"sender_chat,omitempty"`
 	ID           int64    `json:"message_id"`
 	ThreadID     int64    `json:"message_thread_id"`

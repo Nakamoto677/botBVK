@@ -82,3 +82,66 @@ func TestDeleteRechecksReopenUnderLock(t *testing.T) {
 		t.Fatal("reopened topic was deleted")
 	}
 }
+
+func TestDeleteRequiresCurrentBackupProof(t *testing.T) {
+	ticket := domain.Ticket{ID: 1, Department: domain.IT, Status: domain.Closed, TopicChatID: -100, TopicID: 10}
+	store := &workerStore{ticket: ticket, current: ticket}
+	called := false
+	worker := NewWorker(nil, store, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100, QueueTopicID: 1}}, BeforeDelete: func(_ context.Context, _ domain.Tx, _ domain.Ticket, chat, topic int64) error {
+		called = true
+		if chat != -100 || topic != 10 {
+			t.Fatal("wrong binding")
+		}
+		return domain.ErrConflict
+	}})
+	if err := worker.Handle(context.Background(), domain.Operation{Kind: "delete_topic", TicketID: 1, Payload: json.RawMessage(`{"chat_id":-100,"topic_id":10}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if !called || len(store.events) != 1 || store.events[0].Kind != "cleanup_deferred" {
+		t.Fatalf("missing deferral: %#v", store.events)
+	}
+	var data map[string]any
+	_ = json.Unmarshal(store.events[0].Data, &data)
+	if data["key"] != "cleanup:-100:10" {
+		t.Fatal(data)
+	}
+}
+
+func TestPollHealthStartsUnknown(t *testing.T) {
+	a := NewAdapter(nil, nil, nil, Config{})
+	if !a.LastPoll().IsZero() {
+		t.Fatal("unstarted poll marked healthy")
+	}
+}
+
+func TestPendingTransferPreservesPriorMessagesAndDefersNewOnes(t *testing.T) {
+	for _, department := range []domain.Department{domain.OneC, domain.IT} {
+		t.Run(string(department), func(t *testing.T) {
+			called := false
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				called = true
+				var body map[string]any
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				if body["chat_id"] != float64(-100) || body["message_thread_id"] != float64(10) {
+					t.Fatal("prior message routed to wrong group", body)
+				}
+				_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":80}}`))
+			}))
+			defer server.Close()
+			client := NewClient("test")
+			client.BaseURL = server.URL
+			ticket := domain.Ticket{ID: 1, Department: domain.IT, RoutingPending: true, TopicChatID: -100, TopicID: 10}
+			store := &workerStore{ticket: ticket, current: ticket}
+			worker := NewWorker(client, store, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -200, QueueTopicID: 1}}})
+			payload, _ := json.Marshal(domain.Message{Text: "message", Direction: "inbound", RoutingDepartment: department})
+			err := worker.Handle(context.Background(), domain.Operation{Kind: "team_message", TicketID: 1, Payload: payload})
+			if department == domain.OneC {
+				if err != nil || !called {
+					t.Fatalf("prior message wasn't delivered: %v", err)
+				}
+			} else if err == nil || called {
+				t.Fatal("new message leaked to previous department")
+			}
+		})
+	}
+}
