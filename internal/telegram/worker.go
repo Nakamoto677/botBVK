@@ -527,6 +527,10 @@ func (w *Worker) deliverNamed(ctx context.Context, chat, topic int64, msg domain
 		}
 		if len([]rune(prefix+text)) <= limit {
 			text = prefix + text
+		} else {
+			if _, err := w.send(ctx, chat, topic, name+":", nil); err != nil {
+				return Message{}, err
+			}
 		}
 	}
 

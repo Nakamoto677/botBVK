@@ -261,3 +261,101 @@ func TestClosedTicketCannotReceiveReplayAfterSnapshot(t *testing.T) {
 		t.Fatal("closed ticket received a replay")
 	}
 }
+
+func TestMaximumBodyAndCaptionAlwaysKeepHumanAuthor(t *testing.T) {
+	for _, file := range []bool{false, true} {
+		client, capture := capturedClient()
+		worker := NewWorker(client, &workerStore{}, Config{})
+		worker.interval = 0
+		limit := 4096
+		msg := domain.Message{AuthorID: 12}
+		if file {
+			limit = 1024
+			msg.FileID = "document"
+			msg.MediaType = "document"
+		}
+		msg.Text = strings.Repeat("А", limit)
+		if _, err := worker.deliver(context.Background(), -100, 10, msg, true); err != nil {
+			t.Fatal(err)
+		}
+		if len(capture.bodies) != 2 || capture.bodies[0]["text"] != "Иван Клиент:" {
+			t.Fatal("author missing for maximum payload", capture.bodies)
+		}
+		field := "text"
+		if file {
+			field = "caption"
+		}
+		if capture.bodies[1][field] != msg.Text {
+			t.Fatal("body truncated")
+		}
+	}
+}
+
+func TestStaffPrivateCardDoesNotShowClientOnlyOperations(t *testing.T) {
+	client, capture := capturedClient()
+	u := domain.User{ID: 2, Role: "engineer", Approved: true, Departments: []domain.Department{domain.IT}}
+	ticket := domain.Ticket{ID: 7, ClientID: 12, Department: domain.IT, Status: domain.InProgress, TopicChatID: -1001234567890, TopicID: 10}
+	store := &adapterStore{user: u, ticket: ticket}
+	adapter := NewAdapter(client, store, &adapterService{}, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -1001234567890, QueueTopicID: 1}}})
+	if err := adapter.showTicket(context.Background(), &Message{Chat: Chat{ID: 2, Type: "private"}}, u, ticket); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(capture.bodies[0]["reply_markup"])
+	text := string(body)
+	if strings.Contains(text, "cancel:") || strings.Contains(text, "reopen:") || !strings.Contains(text, "history:7") || !strings.Contains(text, "https://t.me/c/1234567890/10") {
+		t.Fatal("wrong staff private controls", text)
+	}
+}
+
+func TestReasonAttachmentWithoutAtomicServiceIsExplicitlyRejected(t *testing.T) {
+	client, capture := capturedClient()
+	u := domain.User{ID: 2, Role: "engineer", Approved: true, Departments: []domain.Department{domain.IT}}
+	ticket := domain.Ticket{ID: 7, Department: domain.IT, Status: domain.InProgress, AssigneeID: 2, TopicChatID: -100, TopicID: 10}
+	service := &adapterService{}
+	adapter := NewAdapter(client, &adapterStore{user: u, ticket: ticket}, service, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100, QueueTopicID: 1}}})
+	origin := &Message{ID: 20, Chat: Chat{ID: -100, Type: "supergroup"}, ThreadID: 10}
+	if err := adapter.beginStaffPrompt(context.Background(), &Callback{From: Person{ID: 2}, Message: origin}, 7, "close"); err != nil {
+		t.Fatal(err)
+	}
+	message := &Message{ID: 21, From: Person{ID: 2}, Chat: origin.Chat, ThreadID: 10, Caption: "Решено", Document: &File{ID: "proof", Name: "proof.pdf"}}
+	if consumed, err := adapter.consumePrompt(context.Background(), message, u); !consumed || err != nil {
+		t.Fatal(err)
+	}
+	if service.closedID != 0 {
+		t.Fatal("attachment silently discarded")
+	}
+	last := capture.bodies[len(capture.bodies)-1]["text"].(string)
+	if !strings.Contains(last, "вложение нельзя сохранить") {
+		t.Fatal("missing attachment warning", last)
+	}
+}
+
+type attachmentActionService struct {
+	adapterService
+	attachment domain.Message
+}
+
+func (s *attachmentActionService) CloseWithMessage(_ context.Context, _ int64, id int64, resolution string, msg domain.Message) error {
+	s.closedID = id
+	s.closeText = resolution
+	s.attachment = msg
+	return nil
+}
+func TestClosePromptUsesAtomicAttachmentActionWhenAvailable(t *testing.T) {
+	client, _ := capturedClient()
+	u := domain.User{ID: 2, Role: "engineer", Approved: true, Departments: []domain.Department{domain.IT}}
+	ticket := domain.Ticket{ID: 7, Department: domain.IT, Status: domain.InProgress, AssigneeID: 2, TopicChatID: -100, TopicID: 10}
+	service := &attachmentActionService{}
+	adapter := NewAdapter(client, &adapterStore{user: u, ticket: ticket}, service, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100, QueueTopicID: 1}}})
+	origin := &Message{ID: 20, Chat: Chat{ID: -100, Type: "supergroup"}, ThreadID: 10}
+	if err := adapter.beginStaffPrompt(context.Background(), &Callback{From: Person{ID: 2}, Message: origin}, 7, "close"); err != nil {
+		t.Fatal(err)
+	}
+	message := &Message{ID: 21, From: Person{ID: 2}, Chat: origin.Chat, ThreadID: 10, Caption: "Решение подтверждено", Document: &File{ID: "proof", Name: "proof.pdf"}}
+	if consumed, err := adapter.consumePrompt(context.Background(), message, u); !consumed || err != nil {
+		t.Fatal(err)
+	}
+	if service.closedID != 7 || service.closeText != "Решение подтверждено" || service.attachment.FileID != "proof" || service.attachment.TelegramMessageID != 21 {
+		t.Fatal("atomic attachment action didn't receive original media", service)
+	}
+}

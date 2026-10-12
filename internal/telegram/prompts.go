@@ -157,6 +157,34 @@ func (a *Adapter) consumePrompt(ctx context.Context, m *Message, u domain.User) 
 	if p.Action != "cancel" && !staffAuthorized(u, t) {
 		return true, domain.ErrForbidden
 	}
+	attachment := normalise(m, false)
+	if attachment.FileID != "" && p.Action != "reply" {
+		switch p.Action {
+		case "close":
+			if service, ok := a.service.(interface {
+				CloseWithMessage(context.Context, int64, int64, string, domain.Message) error
+			}); ok {
+				err = service.CloseWithMessage(ctx, u.ID, p.TicketID, text, attachment)
+			} else {
+				return true, a.promptText(ctx, m, p.TicketID, "вложение нельзя сохранить вместе с этим действием. Отправьте файл отдельным сообщением, затем напишите итог текстом.")
+			}
+		case "transfer":
+			if service, ok := a.service.(interface {
+				TransferWithMessage(context.Context, int64, int64, domain.Department, string, domain.Message) error
+			}); ok {
+				err = service.TransferWithMessage(ctx, u.ID, p.TicketID, p.Department, text, attachment)
+			} else {
+				return true, a.promptText(ctx, m, p.TicketID, "вложение нельзя сохранить вместе с этим действием. Отправьте файл отдельным сообщением, затем напишите причину текстом.")
+			}
+		default:
+			return true, a.promptText(ctx, m, p.TicketID, "пришлите причину текстом без вложения; файл можно отправить отдельным сообщением до завершения действия.")
+		}
+		if err != nil {
+			return true, err
+		}
+		delete(a.prompts, key)
+		return true, a.say(ctx, m, "Готово. Заявка обновлена, вложение сохранено для архива.", nil)
+	}
 	switch p.Action {
 	case "reply":
 		if u.Role != "admin" && u.Role != "dispatcher" && t.AssigneeID != u.ID {
@@ -183,5 +211,8 @@ func (a *Adapter) consumePrompt(ctx context.Context, m *Message, u domain.User) 
 		return true, err
 	}
 	delete(a.prompts, key)
+	if p.Action == "reply" {
+		return true, a.say(ctx, m, "Ответ поставлен в очередь отправки клиенту.", nil)
+	}
 	return true, a.say(ctx, m, "Готово. Заявка обновлена.", nil)
 }

@@ -98,7 +98,7 @@ func (a *Adapter) menu(ctx context.Context, m *Message, u domain.User) error {
 }
 func (a *Adapter) help(ctx context.Context, m *Message, u domain.User) error {
 	if u.Role != "client" {
-		return a.say(ctx, m, "В группе отдела: возьмите заявку кнопкой, отвечайте клиенту через /reply ответом на его сообщение. Кнопки Закрыть и Передать зададут нужные вопросы. /history ID — переписка, /tickets — список, /report — отчёт для администратора. Для отмены ввода нажмите Отмена.", nil)
+		return a.say(ctx, m, "В группе отдела: возьмите заявку кнопкой и отправляйте ответы кнопкой Ответить клиенту. Обычные сообщения остаются внутренними заметками; /reply поддерживается для ответа на сообщение клиента. Кнопки Закрыть и Передать зададут нужные вопросы. /history ID — переписка, /tickets — список, /report — отчёт для администратора. Для отмены ввода нажмите Отмена.", nil)
 	}
 	return a.client.SendKeyboard(ctx, m.Chat.ID, "Новая заявка: выберите направление и опишите проблему. До взятия в работу дополнения сохраняются в заявке; после назначения их увидит специалист. Одна активная заявка одновременно. Кнопка Мои заявки открывает историю, а Отменить заявку — отмену с подтверждением.", clientKeyboard)
 }
@@ -118,7 +118,22 @@ func (a *Adapter) showTicket(ctx context.Context, m *Message, u domain.User, t d
 	if err != nil {
 		return err
 	}
-	return a.say(ctx, m, ticketText(t, name, company, assignee), clientTicketButtons(t))
+	buttons := clientTicketButtons(t)
+	if u.Role == "engineer" {
+		buttons = [][]Button{{{Text: "История", Data: fmt.Sprintf("history:%d", t.ID)}}}
+		team := a.cfg.Departments[t.Department]
+		topicOrMessage := t.TopicID
+		label := "Открыть топик"
+		if topicOrMessage == 0 {
+			topicOrMessage = t.QueueMessageID
+			label = "Открыть очередь"
+		}
+		if team.ChatID < 0 && topicOrMessage != 0 {
+			chat := strings.TrimPrefix(fmt.Sprint(team.ChatID), "-100")
+			buttons = append(buttons, []Button{{Text: label, URL: fmt.Sprintf("https://t.me/c/%s/%d", chat, topicOrMessage)}})
+		}
+	}
+	return a.say(ctx, m, ticketText(t, name, company, assignee), buttons)
 }
 func (a *Adapter) updateName(ctx context.Context, u domain.User, p Person) error {
 	name := strings.TrimSpace(p.FirstName + " " + p.LastName)
