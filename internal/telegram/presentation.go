@@ -88,9 +88,13 @@ func clientTicketButtons(t domain.Ticket) [][]Button {
 
 var menuAliases = map[string]string{"📝 Новая заявка": "/new", "📋 Мои заявки": "/tickets", "💬 Текущая заявка": "/current", "❌ Отменить заявку": "/cancel_current", "ℹ️ Помощь": "/help", "📊 Отчёт": "/report"}
 var staffKeyboard = [][]string{{"📋 Мои заявки", "📊 Отчёт"}, {"ℹ️ Помощь"}}
+var engineerKeyboard = [][]string{{"📋 Мои заявки"}, {"ℹ️ Помощь"}}
 var clientKeyboard = [][]string{{"📝 Новая заявка", "📋 Мои заявки"}, {"💬 Текущая заявка", "❌ Отменить заявку"}, {"ℹ️ Помощь"}}
 
 func (a *Adapter) menu(ctx context.Context, m *Message, u domain.User) error {
+	if u.Role == "engineer" {
+		return a.client.SendKeyboard(ctx, m.Chat.ID, "Работайте с кнопками заявок в группе отдела. Выберите список заявок или помощь.", engineerKeyboard)
+	}
 	if u.Role != "client" {
 		return a.client.SendKeyboard(ctx, m.Chat.ID, "Работайте с кнопками заявок в группе отдела. Выберите список заявок, отчёт или помощь.", staffKeyboard)
 	}

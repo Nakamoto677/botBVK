@@ -359,3 +359,21 @@ func TestClosePromptUsesAtomicAttachmentActionWhenAvailable(t *testing.T) {
 		t.Fatal("atomic attachment action didn't receive original media", service)
 	}
 }
+
+func TestMenuOnlyOffersReportToPrivilegedStaff(t *testing.T) {
+	for _, role := range []string{"engineer", "admin", "dispatcher"} {
+		client, capture := capturedClient()
+		adapter := NewAdapter(client, nil, nil, Config{})
+		if err := adapter.menu(context.Background(), &Message{Chat: Chat{ID: 2, Type: "private"}}, domain.User{ID: 2, Role: role, Approved: true}); err != nil {
+			t.Fatal(err)
+		}
+		body, _ := json.Marshal(capture.bodies[0])
+		report := strings.Contains(string(body), "📊 Отчёт")
+		if report != (role != "engineer") {
+			t.Fatalf("wrong menu for %s: %s", role, body)
+		}
+		if !strings.Contains(string(body), "📋 Мои заявки") || !strings.Contains(string(body), "ℹ️ Помощь") {
+			t.Fatal("staff menu incomplete", role)
+		}
+	}
+}
