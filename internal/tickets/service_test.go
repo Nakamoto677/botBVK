@@ -34,12 +34,13 @@ func (f *fakeStore) Transact(ctx context.Context, fn func(domain.Tx) error) erro
 	for k, v := range f.tickets {
 		tickets[k] = v
 	}
-	m, e, o := len(f.messages), len(f.events), len(f.ops)
+	messages := append([]domain.Message(nil), f.messages...)
+	e, o := len(f.events), len(f.ops)
 	err := fn(fakeTx{f})
 	if err != nil {
 		f.users = users
 		f.tickets = tickets
-		f.messages = f.messages[:m]
+		f.messages = messages
 		f.events = f.events[:e]
 		f.ops = f.ops[:o]
 	}
@@ -80,6 +81,18 @@ func (tx fakeTx) AddMessage(_ context.Context, m *domain.Message) error {
 	m.ID = int64(len(tx.f.messages) + 1)
 	tx.f.messages = append(tx.f.messages, *m)
 	return nil
+}
+func (tx fakeTx) EditMessage(_ context.Context, m *domain.Message) error {
+	for i, old := range tx.f.messages {
+		if old.TicketID == m.TicketID && old.AuthorID == m.AuthorID && old.TelegramChatID == m.TelegramChatID && old.TelegramMessageID == m.TelegramMessageID {
+			m.ID = old.ID
+			m.Direction = old.Direction
+			m.CreatedAt = old.CreatedAt
+			tx.f.messages[i] = *m
+			return nil
+		}
+	}
+	return domain.ErrNotFound
 }
 func (tx fakeTx) AddEvent(_ context.Context, e domain.Event) error {
 	tx.f.events = append(tx.f.events, e)
@@ -161,7 +174,7 @@ func TestMessagesAndFirstResponse(t *testing.T) {
 	if err := s.AddMessage(ctx, 2, ticket.ID, domain.Message{Text: "reply"}, true); err != nil {
 		t.Fatal(err)
 	}
-	if f.ops[len(f.ops)-1].Kind != "client_message" || f.tickets[ticket.ID].FirstResponseAt == nil {
+	if f.ops[len(f.ops)-1].Kind != "client_message" || f.tickets[ticket.ID].FirstResponseAt != nil {
 		t.Fatal("public response missing")
 	}
 	if err := s.SetWaiting(ctx, 2, ticket.ID, true); err != nil {
@@ -225,5 +238,51 @@ func TestReopenWindowAndForeignClient(t *testing.T) {
 	}
 	if err := s.Reopen(ctx, 4, ticket.ID); err != nil {
 		t.Fatal(err)
+	}
+}
+func TestEditArchivesAndOnlyClientCorrectionIsDelivered(t *testing.T) {
+	s, f := setup()
+	ctx := context.Background()
+	ticket, _ := s.Create(ctx, 1, domain.IT, "help")
+	_ = s.Claim(ctx, 2, ticket.ID)
+	if err := s.AddMessage(ctx, 1, ticket.ID, domain.Message{Text: "original", TelegramChatID: 1, TelegramMessageID: 42}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EditMessage(ctx, 1, ticket.ID, domain.Message{Text: "corrected", TelegramChatID: 1, TelegramMessageID: 42}); err != nil {
+		t.Fatal(err)
+	}
+	if f.ops[len(f.ops)-1].Kind != "team_message" || f.messages[0].Text != "corrected" {
+		t.Fatal("missing correction")
+	}
+	if err := s.EditMessage(ctx, 2, ticket.ID, domain.Message{Text: "forged", TelegramChatID: 1, TelegramMessageID: 42}); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatal(err)
+	}
+	if err := s.AddMessage(ctx, 2, ticket.ID, domain.Message{Text: "answer", TelegramChatID: -100, TelegramMessageID: 100}, true); err != nil {
+		t.Fatal(err)
+	}
+	count := len(f.ops)
+	if err := s.EditMessage(ctx, 2, ticket.ID, domain.Message{Text: "changed answer", TelegramChatID: -100, TelegramMessageID: 100}); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.ops) != count {
+		t.Fatal("outbound edit resent")
+	}
+	_ = s.Close(ctx, 2, ticket.ID, "fixed")
+	count = len(f.ops)
+	if err := s.EditMessage(ctx, 1, ticket.ID, domain.Message{Text: "closed revision", TelegramChatID: 1, TelegramMessageID: 42}); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.ops) != count {
+		t.Fatal("closed edit delivered")
+	}
+}
+func TestInternalAttachmentArchival(t *testing.T) {
+	s, f := setup()
+	ticket, _ := s.Create(t.Context(), 1, domain.IT, "help")
+	if err := s.AddMessage(t.Context(), 2, ticket.ID, domain.Message{FileID: "file"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if f.ops[len(f.ops)-1].Kind != "archive_message" {
+		t.Fatal("internal file missing archive")
 	}
 }
