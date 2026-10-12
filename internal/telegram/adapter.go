@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -136,7 +137,7 @@ func (a *Adapter) respondError(ctx context.Context, u Update, err error) {
 	text := "Действие недоступно: " + err.Error()
 	if u.Callback != nil {
 		_ = a.client.Answer(ctx, u.Callback.ID, text)
-	} else if u.Message != nil {
+	} else if u.Message != nil && (u.Message.Chat.Type == "private" || a.trustedGroup(u.Message.Chat.ID)) {
 		_, _ = a.client.Send(ctx, u.Message.Chat.ID, u.Message.ThreadID, text, nil)
 	}
 }
@@ -154,6 +155,9 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 	m := u.Message
 	if m == nil {
 		return nil
+	}
+	if m.Chat.Type != "private" && !a.trustedGroup(m.Chat.ID) {
+		return domain.ErrForbidden
 	}
 	if m.From.ID == 0 || m.SenderChat != nil {
 		return domain.ErrForbidden
@@ -194,12 +198,11 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 	if text == "/report" {
 		return a.report(ctx, m, user)
 	}
-	if text == "/history" {
-		t, err := a.store.ActiveTicket(ctx, m.From.ID)
-		if err != nil {
-			return err
-		}
-		return a.history(ctx, m, user, t)
+	if text == "/history" || strings.HasPrefix(text, "/history ") {
+		return a.historyCommand(ctx, m, user)
+	}
+	if text == "/tickets" {
+		return a.ticketList(ctx, m, user)
 	}
 	if strings.HasPrefix(text, "/reopen ") {
 		id, err := strconv.ParseInt(strings.TrimSpace(strings.TrimPrefix(text, "/reopen ")), 10, 64)
@@ -256,6 +259,9 @@ func departmentButtons(prefix string) [][]Button {
 	return [][]Button{{{Text: "1С", Data: prefix + ":1c"}, {Text: "IT", Data: prefix + ":it"}}, {{Text: "Монтаж", Data: prefix + ":installation"}, {Text: "Выезд", Data: prefix + ":field"}}}
 }
 func (a *Adapter) callback(ctx context.Context, c *Callback) error {
+	if c.Message != nil && c.Message.Chat.Type != "private" && !a.trustedGroup(c.Message.Chat.ID) {
+		return domain.ErrForbidden
+	}
 	parts := strings.Split(c.Data, ":")
 	action := parts[0]
 	id := int64(0)
@@ -407,6 +413,12 @@ func (a *Adapter) staff(ctx context.Context, m *Message) error {
 		return err
 	}
 	text := strings.TrimSpace(m.Text)
+	if text == "/history" || strings.HasPrefix(text, "/history ") {
+		return a.historyCommand(ctx, m, user)
+	}
+	if text == "/tickets" {
+		return a.ticketList(ctx, m, user)
+	}
 	if strings.HasPrefix(text, "/cancel ") || strings.HasPrefix(text, "/assign ") {
 		return a.ticketCommand(ctx, m)
 	}
@@ -549,6 +561,9 @@ func (a *Adapter) receive(ctx context.Context, m *Message, t domain.Ticket, publ
 	return nil
 }
 func (a *Adapter) edit(ctx context.Context, m *Message) error {
+	if m.Chat.Type != "private" && !a.trustedGroup(m.Chat.ID) {
+		return domain.ErrForbidden
+	}
 	if m.From.ID == 0 || m.SenderChat != nil {
 		return domain.ErrForbidden
 	}
@@ -593,7 +608,7 @@ func (a *Adapter) edit(ctx context.Context, m *Message) error {
 }
 
 func (a *Adapter) history(ctx context.Context, m *Message, u domain.User, t domain.Ticket) error {
-	if !(u.Approved && (u.ID == t.ClientID || staffAuthorized(u, t))) {
+	if !historyAuthorized(u, t) || !a.historyDestination(m, u, t) {
 		return domain.ErrForbidden
 	}
 	messages, err := a.store.Messages(ctx, t.ID)
@@ -601,16 +616,23 @@ func (a *Adapter) history(ctx context.Context, m *Message, u domain.User, t doma
 		return err
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "История #%d\n", t.ID)
+	fmt.Fprintf(&b, "История #%d · компания %d · %s\nИсходное обращение: %s\n", t.ID, t.CompanyID, t.Status, t.Description)
 	for _, v := range messages {
 		if u.Role == "client" && v.Direction == "internal" {
 			continue
 		}
 		fmt.Fprintf(&b, "%s %d [%s]: %s", v.CreatedAt.UTC().Format(time.RFC3339), v.AuthorID, v.Direction, v.Text)
 		if v.FileID != "" {
-			fmt.Fprintf(&b, " [вложение: %s]", v.FileName)
+			state := "не сохранено в независимом архиве"
+			if v.ArchivePath != "" && v.SHA256 != "" {
+				state = "сохранено в архиве"
+			}
+			fmt.Fprintf(&b, " [вложение #%d: %s (%s), %s]", v.ID, v.FileName, v.MediaType, state)
 		}
 		b.WriteByte('\n')
+		for _, revision := range v.Revisions {
+			fmt.Fprintf(&b, "  Предыдущая версия (%s): %s\n", revision.EditedAt.UTC().Format(time.RFC3339), revision.Text)
+		}
 	}
 	return a.sendChunks(ctx, m, b.String())
 }
@@ -629,6 +651,9 @@ func (a *Adapter) sendChunks(ctx context.Context, m *Message, text string) error
 	return nil
 }
 func (a *Adapter) report(ctx context.Context, m *Message, u domain.User) error {
+	if m.Chat.Type != "private" && !a.trustedGroup(m.Chat.ID) {
+		return domain.ErrForbidden
+	}
 	if !u.Approved || (u.Role != "admin" && u.Role != "dispatcher") {
 		return domain.ErrForbidden
 	}
@@ -692,4 +717,82 @@ func (a *Adapter) LastPoll() time.Time {
 		return time.Time{}
 	}
 	return time.Unix(0, n).UTC()
+}
+
+func (a *Adapter) trustedGroup(chatID int64) bool {
+	if chatID == 0 {
+		return false
+	}
+	if a.cfg.DispatcherChatID == chatID {
+		return true
+	}
+	for _, team := range a.cfg.Departments {
+		if team.ChatID == chatID {
+			return true
+		}
+	}
+	return false
+}
+func historyAuthorized(u domain.User, t domain.Ticket) bool {
+	return u.Approved && ((u.Role == "client" && u.ID == t.ClientID && u.CompanyID == t.CompanyID) || staffAuthorized(u, t))
+}
+func (a *Adapter) historyDestination(m *Message, u domain.User, t domain.Ticket) bool {
+	if m.Chat.Type == "private" {
+		return true
+	}
+	if a.cfg.Departments[t.Department].ChatID == m.Chat.ID {
+		return true
+	}
+	return a.cfg.DispatcherChatID == m.Chat.ID && (u.Role == "admin" || u.Role == "dispatcher")
+}
+func (a *Adapter) historyCommand(ctx context.Context, m *Message, u domain.User) error {
+	parts := strings.Fields(m.Text)
+	var t domain.Ticket
+	var err error
+	if len(parts) == 2 {
+		id, e := strconv.ParseInt(parts[1], 10, 64)
+		if e != nil || id <= 0 {
+			return domain.ErrInvalid
+		}
+		t, err = a.store.Ticket(ctx, id)
+	} else if len(parts) == 1 {
+		if m.Chat.Type == "private" {
+			t, err = a.store.ActiveTicket(ctx, m.From.ID)
+		} else {
+			t, err = a.store.TopicTicket(ctx, m.Chat.ID, m.ThreadID)
+		}
+	} else {
+		return domain.ErrInvalid
+	}
+	if err != nil {
+		return err
+	}
+	return a.history(ctx, m, u, t)
+}
+func (a *Adapter) ticketList(ctx context.Context, m *Message, u domain.User) error {
+	if !u.Approved {
+		return domain.ErrForbidden
+	}
+	tickets, err := a.store.Tickets(ctx)
+	if err != nil {
+		return err
+	}
+	sort.Slice(tickets, func(i, j int) bool { return tickets[i].ID > tickets[j].ID })
+	var b strings.Builder
+	b.WriteString("Последние заявки (до 50). История: /history ID\n")
+	count := 0
+	for _, t := range tickets {
+		if !historyAuthorized(u, t) || !a.historyDestination(m, u, t) {
+			continue
+		}
+		fmt.Fprintf(&b, "#%d · %s · %s · компания %d\n", t.ID, t.Department, t.Status, t.CompanyID)
+		count++
+		if count == 50 {
+			break
+		}
+	}
+	if count == 0 {
+		b.WriteString("Заявок нет.\n")
+	}
+	return a.sendChunks(ctx, m, b.String())
 }

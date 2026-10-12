@@ -148,6 +148,10 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 	case "create_topic":
 		// A binding matching this department makes a retried operation safe after a crash.
 		if t.TopicID != 0 && t.TopicChatID == team.ChatID && !t.RoutingPending {
+			t, err = w.ensureTopicCard(ctx, t)
+			if err != nil {
+				return err
+			}
 			if payload.OldChatID != 0 && payload.OldTopicID != 0 {
 				if err = w.client.CloseTopic(ctx, payload.OldChatID, payload.OldTopicID); err != nil {
 					return err
@@ -181,6 +185,7 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 			current.TopicChatID = team.ChatID
 			current.TopicID = topic
 			current.QueueMessageID = 0
+			current.TopicMessageID = 0
 			if e = tx.SaveTicket(ctx, &current); e != nil {
 				return e
 			}
@@ -195,7 +200,7 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 		if !bound {
 			return domain.ErrConflict
 		}
-		_, err = w.send(ctx, t.TopicChatID, t.TopicID, card(t)+"\nИстория: /history", cardButtons(t))
+		t, err = w.ensureTopicCard(ctx, t)
 		if err != nil {
 			return err
 		}
@@ -371,6 +376,7 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 				now.TopicChatID = 0
 				now.TopicID = 0
 				now.QueueMessageID = 0
+				now.TopicMessageID = 0
 				if e = tx.SaveTicket(ctx, &now); e != nil {
 					return e
 				}
@@ -497,4 +503,37 @@ func (w *Worker) archive(ctx context.Context, t domain.Ticket, msg domain.Messag
 		return err
 	}
 	return w.store.SaveArchive(ctx, msg.ID, path, hex.EncodeToString(hash.Sum(nil)))
+}
+
+func (w *Worker) ensureTopicCard(ctx context.Context, t domain.Ticket) (domain.Ticket, error) {
+	if t.TopicMessageID != 0 {
+		return t, nil
+	}
+	if t.TopicID == 0 {
+		return t, domain.ErrConflict
+	}
+	sent, err := w.send(ctx, t.TopicChatID, t.TopicID, card(t)+"\nИстория: /history", cardButtons(t))
+	if err != nil {
+		return t, err
+	}
+	err = w.store.Transact(ctx, func(tx domain.Tx) error {
+		current, e := tx.GetTicket(ctx, t.ID)
+		if e != nil {
+			return e
+		}
+		if current.TopicChatID != t.TopicChatID || current.TopicID != t.TopicID || current.Department != t.Department {
+			return domain.ErrConflict
+		}
+		current.TopicMessageID = sent.ID
+		if e = tx.SaveTicket(ctx, &current); e != nil {
+			return e
+		}
+		data, _ := json.Marshal(map[string]any{"source_message_id": 0, "telegram_chat_id": t.TopicChatID, "telegram_message_id": sent.ID, "direction": "inbound", "initial_description": true})
+		if e = tx.AddEvent(ctx, domain.Event{TicketID: t.ID, ActorID: t.ClientID, Kind: "message_delivered", Data: data, CreatedAt: time.Now().UTC()}); e != nil {
+			return e
+		}
+		t = current
+		return nil
+	})
+	return t, err
 }
