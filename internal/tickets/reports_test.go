@@ -43,8 +43,14 @@ func TestReopenUsesExistingTopic(t *testing.T) {
 	if err := s.Reopen(t.Context(), 1, v.ID); err != nil {
 		t.Fatal(err)
 	}
-	if f.ops[len(f.ops)-2].Kind != "reopen_topic" || f.tickets[v.ID].TopicID != 42 {
+	if f.ops[len(f.ops)-2].Kind != "refresh_card" || f.tickets[v.ID].TopicID != 42 || f.tickets[v.ID].RoutingPending {
 		t.Fatal("existing topic was replaced")
+	}
+	if err := s.Claim(t.Context(), 2, v.ID); err != nil {
+		t.Fatal(err)
+	}
+	if f.ops[len(f.ops)-3].Kind != "reopen_topic" {
+		t.Fatal("claim did not reopen existing topic")
 	}
 }
 func TestWaitingIntervalsSortedAndClipped(t *testing.T) {

@@ -123,21 +123,14 @@ func (s *Service) Create(ctx context.Context, actorID int64, department domain.D
 			return err
 		}
 		now := s.now()
-		t = domain.Ticket{ClientID: u.ID, CompanyID: u.CompanyID, Department: department, Description: strings.TrimSpace(description), Status: domain.New, RoutingPending: true, CreatedAt: now, UpdatedAt: now}
+		t = domain.Ticket{ClientID: u.ID, CompanyID: u.CompanyID, Department: department, Description: strings.TrimSpace(description), Status: domain.New, RoutingPending: false, CreatedAt: now, UpdatedAt: now}
 		if err := tx.SaveTicket(ctx, &t); err != nil {
 			return err
 		}
 		if err := s.event(ctx, tx, t, actorID, "created", nil); err != nil {
 			return err
 		}
-		dispatcherText := []rune(fmt.Sprintf("Новая заявка #%d · компания %d · отдел %s\n%s", t.ID, t.CompanyID, t.Department, t.Description))
-		if len(dispatcherText) > 3000 {
-			dispatcherText = append(dispatcherText[:2999], '…')
-		}
-		if err := tx.Enqueue(ctx, domain.Operation{Kind: "dispatcher_message", TicketID: 0, Payload: encode(map[string]any{"ticket_id": t.ID, "text": string(dispatcherText)}), AvailableAt: s.now(), State: "pending"}); err != nil {
-			return err
-		}
-		if err := s.enqueue(ctx, tx, t, "create_topic", map[string]any{"old_chat_id": 0, "old_topic_id": 0, "reason": ""}); err != nil {
+		if err := s.enqueue(ctx, tx, t, "refresh_card", nil); err != nil {
 			return err
 		}
 		return s.notify(ctx, tx, t, "Заявка принята и поставлена в очередь.")
@@ -174,7 +167,11 @@ func (s *Service) Claim(ctx context.Context, actorID, ticketID int64) error {
 		}
 		t.AssigneeID = u.ID
 		t.Status = domain.InProgress
+		t.RoutingPending = true
 		if err := s.save(ctx, tx, t, actorID, "claimed", nil); err != nil {
+			return err
+		}
+		if err := s.activateTopic(ctx, tx, *t); err != nil {
 			return err
 		}
 		if err := s.enqueue(ctx, tx, *t, "refresh_card", nil); err != nil {
@@ -195,15 +192,29 @@ func (s *Service) Transfer(ctx context.Context, actorID, ticketID int64, departm
 			return domain.ErrConflict
 		}
 		oldDept := t.Department
-		oldChat, oldTopic := t.TopicChatID, t.TopicID
+		oldChat, oldTopic, oldQueue := t.TopicChatID, t.TopicID, t.QueueMessageID
 		t.Department = department
 		t.Status = domain.New
 		t.AssigneeID = 0
-		t.RoutingPending = true
-		if err := s.save(ctx, tx, t, actorID, "transferred", map[string]any{"from": oldDept, "to": department, "reason": reason}); err != nil {
+		t.RoutingPending = false
+		t.TopicChatID = 0
+		t.TopicID = 0
+		t.QueueMessageID = 0
+		t.TopicMessageID = 0
+		if err := s.save(ctx, tx, t, actorID, "transferred", map[string]any{"from": oldDept, "to": department, "reason": reason, "old_chat_id": oldChat, "old_topic_id": oldTopic}); err != nil {
 			return err
 		}
-		if err := s.enqueue(ctx, tx, *t, "create_topic", map[string]any{"old_chat_id": oldChat, "old_topic_id": oldTopic, "reason": reason}); err != nil {
+		if oldChat != 0 && oldTopic != 0 {
+			if err := s.enqueue(ctx, tx, *t, "close_topic", map[string]any{"chat_id": oldChat, "topic_id": oldTopic, "retire": true}); err != nil {
+				return err
+			}
+		}
+		if oldQueue != 0 {
+			if err := s.enqueue(ctx, tx, *t, "retire_queue_card", map[string]any{"chat_id": oldChat, "message_id": oldQueue, "from_department": oldDept, "to_department": department}); err != nil {
+				return err
+			}
+		}
+		if err := s.enqueue(ctx, tx, *t, "refresh_card", nil); err != nil {
 			return err
 		}
 		return s.notify(ctx, tx, *t, "Заявка передана в другой отдел.")
@@ -262,16 +273,11 @@ func (s *Service) Reopen(ctx context.Context, actorID, ticketID int64) error {
 		t.ClosedAt = nil
 		t.ClosedBy = 0
 		t.Resolution = ""
-		kind := "reopen_topic"
 		t.RoutingPending = false
-		if t.TopicID == 0 || t.TopicChatID == 0 {
-			kind = "create_topic"
-			t.RoutingPending = true
-		}
 		if err := s.save(ctx, tx, t, actorID, "reopened", nil); err != nil {
 			return err
 		}
-		if err := s.enqueue(ctx, tx, *t, kind, map[string]any{"old_chat_id": 0, "old_topic_id": 0, "reason": "Повторное открытие"}); err != nil {
+		if err := s.enqueue(ctx, tx, *t, "refresh_card", nil); err != nil {
 			return err
 		}
 		return s.notify(ctx, tx, *t, "Заявка повторно открыта.")
@@ -291,21 +297,6 @@ func (s *Service) SetWaiting(ctx context.Context, actorID, ticketID int64, waiti
 			t.Status = domain.InProgress
 		}
 		if err := s.save(ctx, tx, t, actorID, "status_changed", map[string]domain.Status{"status": t.Status}); err != nil {
-			return err
-		}
-		return s.enqueue(ctx, tx, *t, "refresh_card", nil)
-	})
-}
-func (s *Service) SetEmergency(ctx context.Context, actorID, ticketID int64) error {
-	return s.mutate(ctx, actorID, ticketID, func(tx domain.Tx, u domain.User, t *domain.Ticket) error {
-		if !privileged(u) {
-			return domain.ErrForbidden
-		}
-		if !t.Status.Active() {
-			return domain.ErrConflict
-		}
-		t.Emergency = true
-		if err := s.save(ctx, tx, t, actorID, "emergency", nil); err != nil {
 			return err
 		}
 		return s.enqueue(ctx, tx, *t, "refresh_card", nil)
@@ -337,6 +328,10 @@ func (s *Service) AddMessage(ctx context.Context, actorID, ticketID int64, msg d
 			msg.Direction = "inbound"
 			msg.RoutingDepartment = t.Department
 			kind = "team_message"
+			msg.DeferredDelivery = t.Status == domain.New
+			if msg.DeferredDelivery {
+				kind = ""
+			}
 			if t.Status == domain.Waiting {
 				t.Status = domain.InProgress
 				resumed = true
@@ -363,7 +358,12 @@ func (s *Service) AddMessage(ctx context.Context, actorID, ticketID int64, msg d
 			return s.enqueue(ctx, tx, *t, kind, msg)
 		}
 		if msg.FileID != "" {
-			return s.enqueue(ctx, tx, *t, "archive_message", msg)
+			if err := s.enqueue(ctx, tx, *t, "archive_message", msg); err != nil {
+				return err
+			}
+		}
+		if client && t.Status == domain.New {
+			return s.enqueue(ctx, tx, *t, "refresh_card", nil)
 		}
 		return nil
 	})
@@ -397,6 +397,9 @@ func (s *Service) EditMessage(ctx context.Context, actorID, ticketID int64, msg 
 			if err := s.enqueue(ctx, tx, *t, "archive_message", msg); err != nil {
 				return err
 			}
+		}
+		if client && t.Status == domain.New {
+			return s.enqueue(ctx, tx, *t, "refresh_card", nil)
 		}
 		if client && t.Status.Active() {
 			msg.RoutingDepartment = t.Department
@@ -465,15 +468,30 @@ func (s *Service) Assign(ctx context.Context, actorID, ticketID, engineerID int6
 		}
 		old := t.AssigneeID
 		t.AssigneeID = engineerID
-		if t.Status == domain.New {
+		taking := t.Status == domain.New
+		if taking {
 			t.Status = domain.InProgress
+			t.RoutingPending = true
 		}
 		if err := s.save(ctx, tx, t, actorID, "reassigned", map[string]int64{"from": old, "to": engineerID}); err != nil {
 			return err
+		}
+		if taking {
+			if err := s.activateTopic(ctx, tx, *t); err != nil {
+				return err
+			}
 		}
 		if err := s.enqueue(ctx, tx, *t, "refresh_card", nil); err != nil {
 			return err
 		}
 		return s.notify(ctx, tx, *t, "По заявке назначен другой инженер.")
 	})
+}
+
+// activateTopic is called only when an engineer explicitly takes a queued request.
+func (s *Service) activateTopic(ctx context.Context, tx domain.Tx, t domain.Ticket) error {
+	if t.TopicChatID != 0 && t.TopicID != 0 {
+		return s.enqueue(ctx, tx, t, "reopen_topic", nil)
+	}
+	return s.enqueue(ctx, tx, t, "create_topic", map[string]any{"old_chat_id": 0, "old_topic_id": 0, "reason": ""})
 }
