@@ -475,3 +475,57 @@ func TestAssignQueuedTicketRejectedWithoutCreatingTopic(t *testing.T) {
 		}
 	}
 }
+func TestClaimGenerationSurvivesCloseReopenAndRejectsOldProvision(t *testing.T) {
+	s, f := setup()
+	ticket, _ := s.Create(t.Context(), 1, domain.IT, "help")
+	if err := s.Claim(t.Context(), 2, ticket.ID); err != nil {
+		t.Fatal(err)
+	}
+	first := f.tickets[ticket.ID].RoutingGeneration
+	if first != 1 {
+		t.Fatal(first)
+	}
+	var firstPayload map[string]any
+	for _, op := range f.ops {
+		if op.Kind == "create_topic" {
+			_ = json.Unmarshal(op.Payload, &firstPayload)
+		}
+	}
+	if firstPayload["routing_generation"] != float64(first) {
+		t.Fatal(firstPayload)
+	}
+	v := f.tickets[ticket.ID]
+	v.TopicChatID = -100
+	v.TopicID = 42
+	v.RoutingPending = false
+	f.tickets[v.ID] = v
+	_ = s.Close(t.Context(), 2, v.ID, "fixed")
+	before := len(f.ops)
+	if err := s.Reopen(t.Context(), 1, v.ID); err != nil {
+		t.Fatal(err)
+	}
+	if f.ops[before].Kind != "close_topic" {
+		t.Fatal("missing requeue pause")
+	}
+	var pause map[string]any
+	_ = json.Unmarshal(f.ops[before].Payload, &pause)
+	if pause["pause"] != true || pause["topic_id"] != float64(42) {
+		t.Fatal(pause)
+	}
+	if f.tickets[v.ID].RoutingGeneration != first {
+		t.Fatal("reopen advanced claim generation")
+	}
+	before = len(f.ops)
+	if err := s.Claim(t.Context(), 2, v.ID); err != nil {
+		t.Fatal(err)
+	}
+	current := f.tickets[v.ID]
+	if current.RoutingGeneration != first+1 {
+		t.Fatal(current)
+	}
+	var secondPayload map[string]any
+	_ = json.Unmarshal(f.ops[before].Payload, &secondPayload)
+	if f.ops[before].Kind != "reopen_topic" || secondPayload["routing_generation"] != float64(current.RoutingGeneration) {
+		t.Fatal(secondPayload)
+	}
+}

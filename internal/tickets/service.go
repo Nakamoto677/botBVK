@@ -168,6 +168,7 @@ func (s *Service) Claim(ctx context.Context, actorID, ticketID int64) error {
 		t.AssigneeID = u.ID
 		t.Status = domain.InProgress
 		t.RoutingPending = true
+		t.RoutingGeneration++
 		if err := s.save(ctx, tx, t, actorID, "claimed", nil); err != nil {
 			return err
 		}
@@ -276,6 +277,11 @@ func (s *Service) Reopen(ctx context.Context, actorID, ticketID int64) error {
 		t.RoutingPending = false
 		if err := s.save(ctx, tx, t, actorID, "reopened", nil); err != nil {
 			return err
+		}
+		if t.TopicChatID != 0 && t.TopicID != 0 {
+			if err := s.enqueue(ctx, tx, *t, "close_topic", map[string]any{"chat_id": t.TopicChatID, "topic_id": t.TopicID, "pause": true}); err != nil {
+				return err
+			}
 		}
 		if err := s.enqueue(ctx, tx, *t, "refresh_card", nil); err != nil {
 			return err
@@ -481,7 +487,7 @@ func (s *Service) Assign(ctx context.Context, actorID, ticketID, engineerID int6
 // activateTopic is called only when an engineer explicitly takes a queued request.
 func (s *Service) activateTopic(ctx context.Context, tx domain.Tx, t domain.Ticket) error {
 	if t.TopicChatID != 0 && t.TopicID != 0 {
-		return s.enqueue(ctx, tx, t, "reopen_topic", nil)
+		return s.enqueue(ctx, tx, t, "reopen_topic", map[string]any{"routing_generation": t.RoutingGeneration})
 	}
-	return s.enqueue(ctx, tx, t, "create_topic", map[string]any{"old_chat_id": 0, "old_topic_id": 0, "reason": ""})
+	return s.enqueue(ctx, tx, t, "create_topic", map[string]any{"old_chat_id": 0, "old_topic_id": 0, "reason": "", "routing_generation": t.RoutingGeneration})
 }
