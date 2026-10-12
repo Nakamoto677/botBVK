@@ -110,6 +110,9 @@ func (a *Adapter) Run(ctx context.Context) error {
 		a.lastPoll.Store(time.Now().UTC().UnixNano())
 		for _, u := range updates {
 			raw, e := json.Marshal(u)
+			if len(u.Raw) > 0 {
+				raw = u.Raw
+			}
 			if e != nil {
 				return e
 			}
@@ -154,6 +157,9 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 	}
 	m := u.Message
 	if m == nil {
+		return nil
+	}
+	if m.From.IsBot || m.serviceMessage() {
 		return nil
 	}
 	if m.Chat.Type != "private" && !a.trustedGroup(m.Chat.ID) {

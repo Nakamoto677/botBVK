@@ -73,6 +73,7 @@ func (c *Client) Call(ctx context.Context, method string, payload any, result an
 }
 
 type Person struct {
+	IsBot     bool   `json:"is_bot"`
 	ID        int64  `json:"id"`
 	FirstName string `json:"first_name"`
 	LastName  string `json:"last_name"`
@@ -88,22 +89,28 @@ type File struct {
 	Path string `json:"file_path"`
 }
 type Message struct {
-	EditDate     int64    `json:"edit_date,omitempty"`
-	SenderChat   *Chat    `json:"sender_chat,omitempty"`
-	ID           int64    `json:"message_id"`
-	ThreadID     int64    `json:"message_thread_id"`
-	From         Person   `json:"from"`
-	Chat         Chat     `json:"chat"`
-	Text         string   `json:"text"`
-	Caption      string   `json:"caption"`
-	Reply        *Message `json:"reply_to_message"`
-	Document     *File    `json:"document"`
-	Photo        []File   `json:"photo"`
-	Voice        *File    `json:"voice"`
-	Video        *File    `json:"video"`
-	Audio        *File    `json:"audio"`
-	Sticker      *File    `json:"sticker"`
-	MediaGroupID string   `json:"media_group_id"`
+	ForumTopicCreated  json.RawMessage `json:"forum_topic_created,omitempty"`
+	ForumTopicClosed   json.RawMessage `json:"forum_topic_closed,omitempty"`
+	ForumTopicReopened json.RawMessage `json:"forum_topic_reopened,omitempty"`
+	ForumTopicEdited   json.RawMessage `json:"forum_topic_edited,omitempty"`
+	NewChatMembers     []Person        `json:"new_chat_members,omitempty"`
+	LeftChatMember     *Person         `json:"left_chat_member,omitempty"`
+	EditDate           int64           `json:"edit_date,omitempty"`
+	SenderChat         *Chat           `json:"sender_chat,omitempty"`
+	ID                 int64           `json:"message_id"`
+	ThreadID           int64           `json:"message_thread_id"`
+	From               Person          `json:"from"`
+	Chat               Chat            `json:"chat"`
+	Text               string          `json:"text"`
+	Caption            string          `json:"caption"`
+	Reply              *Message        `json:"reply_to_message"`
+	Document           *File           `json:"document"`
+	Photo              []File          `json:"photo"`
+	Voice              *File           `json:"voice"`
+	Video              *File           `json:"video"`
+	Audio              *File           `json:"audio"`
+	Sticker            *File           `json:"sticker"`
+	MediaGroupID       string          `json:"media_group_id"`
 }
 type Callback struct {
 	ID      string   `json:"id"`
@@ -112,11 +119,30 @@ type Callback struct {
 	Message *Message `json:"message"`
 }
 type Update struct {
-	ID            int64     `json:"update_id"`
-	Message       *Message  `json:"message"`
-	EditedMessage *Message  `json:"edited_message"`
-	Callback      *Callback `json:"callback_query"`
+	Raw           json.RawMessage `json:"-"`
+	ID            int64           `json:"update_id"`
+	Message       *Message        `json:"message"`
+	EditedMessage *Message        `json:"edited_message"`
+	Callback      *Callback       `json:"callback_query"`
 }
+
+// Retain the original update for durable inbox storage, including fields that
+// the current adapter does not support yet.
+func (u *Update) UnmarshalJSON(b []byte) error {
+	type wire Update
+	var v wire
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	*u = Update(v)
+	u.Raw = append(json.RawMessage(nil), b...)
+	return nil
+}
+
+func (m Message) serviceMessage() bool {
+	return len(m.ForumTopicCreated) > 0 || len(m.ForumTopicClosed) > 0 || len(m.ForumTopicReopened) > 0 || len(m.ForumTopicEdited) > 0 || len(m.NewChatMembers) > 0 || m.LeftChatMember != nil
+}
+
 type Button struct {
 	Text string `json:"text"`
 	Data string `json:"callback_data,omitempty"`
