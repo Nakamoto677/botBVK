@@ -84,45 +84,6 @@ func TestFirstResponseRequiresConfirmedDelivery(t *testing.T) {
 		})
 	}
 }
-func TestDeleteRechecksReopenUnderLock(t *testing.T) {
-	ticket := domain.Ticket{ID: 1, Department: domain.IT, Status: domain.Closed, TopicChatID: -100, TopicID: 10}
-	current := ticket
-	current.Status = domain.InProgress
-	store := &workerStore{ticket: ticket, current: current}
-	worker := NewWorker(nil, store, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100, QueueTopicID: 1}}})
-	data := json.RawMessage(`{"chat_id":-100,"topic_id":10}`)
-	if err := worker.Handle(context.Background(), domain.Operation{Kind: "delete_topic", TicketID: 1, Payload: data}); err != nil {
-		t.Fatal(err)
-	}
-	if len(store.events) != 0 || store.current.TopicID != 10 {
-		t.Fatal("reopened topic was deleted")
-	}
-}
-
-func TestDeleteRequiresCurrentBackupProof(t *testing.T) {
-	ticket := domain.Ticket{ID: 1, Department: domain.IT, Status: domain.Closed, TopicChatID: -100, TopicID: 10}
-	store := &workerStore{ticket: ticket, current: ticket}
-	called := false
-	worker := NewWorker(nil, store, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100, QueueTopicID: 1}}, BeforeDelete: func(_ context.Context, _ domain.Tx, _ domain.Ticket, chat, topic int64) error {
-		called = true
-		if chat != -100 || topic != 10 {
-			t.Fatal("wrong binding")
-		}
-		return domain.ErrConflict
-	}})
-	if err := worker.Handle(context.Background(), domain.Operation{Kind: "delete_topic", TicketID: 1, Payload: json.RawMessage(`{"chat_id":-100,"topic_id":10}`)}); err != nil {
-		t.Fatal(err)
-	}
-	if !called || len(store.events) != 1 || store.events[0].Kind != "cleanup_deferred" {
-		t.Fatalf("missing deferral: %#v", store.events)
-	}
-	var data map[string]any
-	_ = json.Unmarshal(store.events[0].Data, &data)
-	if data["key"] != "cleanup:-100:10" {
-		t.Fatal(data)
-	}
-}
-
 func TestPollHealthStartsUnknown(t *testing.T) {
 	a := NewAdapter(nil, nil, nil, Config{})
 	if !a.LastPoll().IsZero() {
@@ -187,10 +148,57 @@ func TestInitialTopicCardSupportsPublicReplyAndRetry(t *testing.T) {
 	adapterStore := &adapterStore{user: domain.User{ID: 2, Role: "engineer", Approved: true, Departments: []domain.Department{domain.IT}}, ticket: bound, events: store.events}
 	service := &adapterService{}
 	adapter := NewAdapter(nil, adapterStore, service, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100, QueueTopicID: 1}}})
-	if err = adapter.Handle(context.Background(), Update{Message: &Message{ID: 100, From: Person{ID: 2}, Chat: Chat{ID: -100, Type: "supergroup"}, ThreadID: 10, Text: "/reply Ответ на исходное обращение", Reply: &Message{ID: 99}}}); err != nil {
+	if err = adapter.Handle(context.Background(), Update{Message: &Message{ID: 100, From: Person{ID: 2}, Chat: Chat{ID: -100, Type: "supergroup"}, ThreadID: 10, Text: "Ответ на исходное обращение", Reply: &Message{ID: 99}}}); err != nil {
 		t.Fatal(err)
 	}
 	if len(service.public) != 1 || !service.public[0] {
 		t.Fatal("cannot reply to initial card")
+	}
+}
+
+func TestCompletionDeleteUsesExactOldBindingAndAbsentTopicIsSuccess(t *testing.T) {
+	ctx := context.Background()
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		var p map[string]any
+		json.NewDecoder(r.Body).Decode(&p)
+		if p["message_thread_id"] != float64(10) {
+			t.Errorf("new topic targeted %v", p)
+		}
+		w.Write([]byte(`{"ok":false,"error_code":400,"description":"TOPIC_ID_INVALID"}`))
+	}))
+	defer server.Close()
+	client := NewClient("test")
+	client.BaseURL = server.URL
+	current := domain.Ticket{ID: 1, Department: domain.IT, Status: domain.InProgress, TopicChatID: -100, TopicID: 20, RoutingGeneration: 2}
+	payload := json.RawMessage(`{"chat_id":-100,"topic_id":10,"routing_generation":1,"completion_key":"old"}`)
+	store := &workerStore{current: current, events: []domain.Event{{Kind: "completion_cleanup_requested", Data: payload}}}
+	worker := NewWorker(client, store, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100}}, BeforeDelete: func(context.Context, domain.Tx, domain.Ticket, int64, int64) error { return nil }})
+	op := domain.Operation{TicketID: 1, Kind: "delete_topic", Payload: payload}
+	if err := worker.Handle(ctx, op); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || store.current.TopicID != 20 || store.events[len(store.events)-1].Kind != "topic_deleted" {
+		t.Fatal("old cleanup affected reopened ticket")
+	}
+	op.Payload = json.RawMessage(`{"chat_id":-100,"topic_id":20,"routing_generation":2,"completion_key":"old"}`)
+	if err := worker.Handle(ctx, op); err != domain.ErrForbidden {
+		t.Fatalf("unmatched binding allowed: %v", err)
+	}
+	if calls != 1 {
+		t.Fatal("invalid intent reached Telegram")
+	}
+}
+func TestAuxiliaryDeletionHasNoTicketDependencyAndMissingMessageIsSuccess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"ok":false,"error_code":400,"description":"message to delete not found"}`))
+	}))
+	defer server.Close()
+	client := NewClient("test")
+	client.BaseURL = server.URL
+	worker := NewWorker(client, nil, Config{})
+	if err := worker.Handle(context.Background(), domain.Operation{Kind: "delete_aux_message", Payload: json.RawMessage(`{"chat_id":-100,"message_id":9}`)}); err != nil {
+		t.Fatal(err)
 	}
 }

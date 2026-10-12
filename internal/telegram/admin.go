@@ -208,7 +208,7 @@ func (a *Adapter) admin(ctx context.Context, m *Message, u domain.User) error {
 
 func (a *Adapter) ticketCommand(ctx context.Context, m *Message) error {
 	parts := strings.SplitN(strings.TrimSpace(m.Text), " ", 3)
-	if len(parts) != 3 {
+	if len(parts) < 2 || (parts[0] == "/assign" && len(parts) != 3) {
 		return domain.ErrInvalid
 	}
 	id, e := strconv.ParseInt(parts[1], 10, 64)
@@ -227,10 +227,13 @@ func (a *Adapter) ticketCommand(ctx context.Context, m *Message) error {
 	}
 	switch parts[0] {
 	case "/cancel":
+		if m.Chat.Type == "private" {
+			return a.beginCancel(ctx, m.From.ID, m, id)
+		}
 		if service, ok := a.service.(interface {
 			Cancel(context.Context, int64, int64, string) error
 		}); ok {
-			return service.Cancel(ctx, m.From.ID, id, parts[2])
+			return service.Cancel(ctx, m.From.ID, id, "")
 		}
 	case "/assign":
 		target, e := strconv.ParseInt(parts[2], 10, 64)

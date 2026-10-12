@@ -271,6 +271,9 @@ func (s *Service) close(ctx context.Context, actorID, ticketID int64, resolution
 				return err
 			}
 		}
+		if err := s.enqueue(ctx, tx, *t, "refresh_card", nil); err != nil {
+			return err
+		}
 		return s.notify(ctx, tx, *t, "Заявка закрыта. Результат: "+t.Resolution)
 	})
 }

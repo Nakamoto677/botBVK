@@ -18,6 +18,7 @@ type adapterStore struct {
 	ticket         domain.Ticket
 	events         []domain.Event
 	storedMessages []domain.Message
+	operations     []domain.Operation
 }
 
 func (s *adapterStore) Companies(context.Context) ([]domain.Company, error) {
@@ -32,6 +33,22 @@ func (s *adapterStore) Messages(context.Context, int64) ([]domain.Message, error
 	return s.storedMessages, nil
 }
 func (s *adapterStore) Events(context.Context, int64) ([]domain.Event, error) { return s.events, nil }
+
+func (s *adapterStore) Transact(ctx context.Context, f func(domain.Tx) error) error {
+	return f(&adapterTx{store: s})
+}
+
+type adapterTx struct {
+	domain.Tx
+	store *adapterStore
+}
+
+func (t *adapterTx) Enqueue(_ context.Context, op domain.Operation) error {
+	t.store.operations = append(t.store.operations, op)
+	return nil
+}
+func (t *adapterTx) GetUser(context.Context, int64) (domain.User, error) { return t.store.user, nil }
+func (t *adapterTx) SaveUser(_ context.Context, u domain.User) error     { t.store.user = u; return nil }
 
 type adapterService struct {
 	closedID           int64
@@ -65,37 +82,35 @@ func (s *adapterService) AddMessage(_ context.Context, _ int64, _ int64, m domai
 	s.public = append(s.public, public)
 	return nil
 }
-func TestOrdinaryReplyRemainsInternal(t *testing.T) {
+func TestOrdinaryReplyAutomaticallyReachesClient(t *testing.T) {
 	store := &adapterStore{user: domain.User{ID: 2, Role: "engineer", Approved: true, Departments: []domain.Department{domain.IT}}, ticket: domain.Ticket{ID: 7, Department: domain.IT, AssigneeID: 2, TopicChatID: -100, TopicID: 10, Status: domain.InProgress}}
 	service := &adapterService{}
 	a := NewAdapter(nil, store, service, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100, QueueTopicID: 1}}})
-	err := a.Handle(context.Background(), Update{Message: &Message{ID: 20, From: Person{ID: 2}, Chat: Chat{ID: -100, Type: "supergroup"}, ThreadID: 10, Text: "Внутренняя заметка", Reply: &Message{ID: 19}}})
+	err := a.Handle(context.Background(), Update{Message: &Message{ID: 20, From: Person{ID: 2}, Chat: Chat{ID: -100, Type: "supergroup"}, ThreadID: 10, Text: "Обычный ответ", Reply: &Message{ID: 19}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(service.public) != 1 || service.public[0] {
-		t.Fatal("ordinary reply escaped internally")
+	if len(service.public) != 1 || !service.public[0] || service.messages[0].TelegramTopicID != 10 {
+		t.Fatal("ordinary reply not relayed from actual source")
 	}
 }
-func TestPublicReplyRequiresDeliveryMappingAndAssignee(t *testing.T) {
-	store := &adapterStore{user: domain.User{ID: 2, Role: "engineer", Approved: true, Departments: []domain.Department{domain.IT}}, ticket: domain.Ticket{ID: 7, Department: domain.IT, AssigneeID: 2, TopicChatID: -100, TopicID: 10, Status: domain.InProgress}}
+func TestNonAssigneeDepartmentEngineerCanRelayMediaWithoutReply(t *testing.T) {
+	store := &adapterStore{user: domain.User{ID: 3, Role: "engineer", Approved: true, Departments: []domain.Department{domain.IT}}, ticket: domain.Ticket{ID: 7, Department: domain.IT, AssigneeID: 2, TopicChatID: -100, TopicID: 10, Status: domain.InProgress}}
 	service := &adapterService{}
 	a := NewAdapter(nil, store, service, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100, QueueTopicID: 1}}})
-	update := Update{Message: &Message{ID: 20, From: Person{ID: 2}, Chat: Chat{ID: -100, Type: "supergroup"}, ThreadID: 10, Text: "/reply Решено", Reply: &Message{ID: 19}}}
-	if err := a.Handle(context.Background(), update); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("unmapped reply accepted: %v", err)
-	}
-	data, _ := json.Marshal(map[string]any{"telegram_chat_id": -100, "telegram_message_id": 19, "direction": "inbound"})
-	store.events = []domain.Event{{Kind: "message_delivered", Data: data}}
-	if err := a.Handle(context.Background(), update); err != nil {
+	if err := a.Handle(context.Background(), Update{Message: &Message{ID: 20, From: Person{ID: 3}, Chat: Chat{ID: -100, Type: "supergroup"}, ThreadID: 10, Caption: "Проверили доступ", Document: &File{ID: "doc", Name: "proof.pdf"}}}); err != nil {
 		t.Fatal(err)
 	}
-	if len(service.messages) != 1 || service.messages[0].Text != "Решено" || !service.public[0] {
-		t.Fatal("public message wasn't normalized")
+	if len(service.messages) != 1 || !service.public[0] || service.messages[0].FileID != "doc" {
+		t.Fatal("nonassignee media not transparent")
 	}
-	store.ticket.AssigneeID = 3
-	if err := a.Handle(context.Background(), update); !errors.Is(err, domain.ErrForbidden) {
-		t.Fatalf("unassigned engineer accepted: %v", err)
+	for _, topic := range []int64{1, 9} {
+		if err := a.Handle(context.Background(), Update{Message: &Message{ID: 22, From: Person{ID: 3}, Chat: Chat{ID: -100, Type: "supergroup"}, ThreadID: topic, Text: "Не пересылать"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(service.messages) != 1 {
+		t.Fatal("queue or stale topic relayed")
 	}
 }
 func TestAnonymousSenderRejected(t *testing.T) {

@@ -14,8 +14,12 @@ import (
 	"testing"
 	"time"
 
+	"bot-bvk/internal/archive"
+	"bot-bvk/internal/config"
 	"bot-bvk/internal/domain"
+	"bot-bvk/internal/monitor"
 	"bot-bvk/internal/postgres"
+	"bot-bvk/internal/report"
 	"bot-bvk/internal/telegram"
 	"bot-bvk/internal/tickets"
 	"github.com/jackc/pgx/v5"
@@ -33,17 +37,15 @@ func TestWorkflowQueuesUntilClaimAndPreservesMessagesAcrossTransfer(t *testing.T
 	}
 	defer base.Close(ctx)
 	name := fmt.Sprintf("bvk_workflow_%x", time.Now().UnixNano())
-	if _, err = base.Exec(ctx, `CREATE SCHEMA "`+name+`"`); err != nil {
+	if _, err = base.Exec(ctx, `CREATE DATABASE "`+name+`"`); err != nil {
 		t.Fatal(err)
 	}
-	defer base.Exec(ctx, `DROP SCHEMA "`+name+`" CASCADE`)
+	defer base.Exec(ctx, `DROP DATABASE "`+name+`" WITH (FORCE)`)
 	u, err := url.Parse(dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	q := u.Query()
-	q.Set("search_path", name)
-	u.RawQuery = q.Encode()
+	u.Path = "/" + name
 	store, err := postgres.New(ctx, u.String())
 	if err != nil {
 		t.Fatal(err)
@@ -72,6 +74,7 @@ func TestWorkflowQueuesUntilClaimAndPreservesMessagesAcrossTransfer(t *testing.T
 	var mu sync.Mutex
 	var sends []map[string]any
 	createdTopics, reopenedTopics := 0, 0
+	var deletedTopics []int64
 	counter := 100
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/file/") {
@@ -89,6 +92,8 @@ func TestWorkflowQueuesUntilClaimAndPreservesMessagesAcrossTransfer(t *testing.T
 		case "createForumTopic":
 			createdTopics++
 			result = map[string]any{"message_thread_id": counter}
+		case "deleteForumTopic":
+			deletedTopics = append(deletedTopics, int64(p["message_thread_id"].(float64)))
 		case "reopenForumTopic":
 			reopenedTopics++
 		case "getFile":
@@ -103,6 +108,11 @@ func TestWorkflowQueuesUntilClaimAndPreservesMessagesAcrossTransfer(t *testing.T
 	client := telegram.NewClient("test")
 	client.BaseURL = server.URL
 	cfg := telegram.Config{Departments: map[domain.Department]telegram.Team{domain.IT: {ChatID: -1001, QueueTopicID: 2}, domain.OneC: {ChatID: -1002, QueueTopicID: 2}}, ArchiveDir: t.TempDir()}
+	scheduler := &monitor.Scheduler{Store: store, Config: config.Config{AdminID: 99, BackupDir: t.TempDir(), ArchiveDir: cfg.ArchiveDir}, Calendar: tickets.DefaultCalendar()}
+	scheduler.Backup = func(ctx context.Context) (string, error) {
+		return archive.Create(ctx, u.String(), cfg.ArchiveDir, scheduler.Config.BackupDir)
+	}
+	cfg.BeforeDelete = scheduler.BeforeDelete
 	worker := telegram.NewWorker(client, store, cfg)
 	drain := func() {
 		t.Helper()
@@ -186,7 +196,8 @@ func TestWorkflowQueuesUntilClaimAndPreservesMessagesAcrossTransfer(t *testing.T
 			t.Errorf("lost %s", text)
 		}
 	}
-	if err = svc.AddMessage(ctx, 2, ticket.ID, domain.Message{Text: "Password reset", TelegramChatID: -1002, TelegramMessageID: 20}, true); err != nil {
+	active, _ := store.Ticket(ctx, ticket.ID)
+	if err = svc.AddMessage(ctx, 2, ticket.ID, domain.Message{Text: "Password reset", TelegramChatID: -1002, TelegramTopicID: active.TopicID, TelegramMessageID: 20}, true); err != nil {
 		t.Fatal(err)
 	}
 	pending, _ := store.Ticket(ctx, ticket.ID)
@@ -206,6 +217,15 @@ func TestWorkflowQueuesUntilClaimAndPreservesMessagesAcrossTransfer(t *testing.T
 	if closed.Status != domain.Closed || closed.ClosedBy != 2 {
 		t.Fatalf("closure missing: %+v", closed)
 	}
+	if os.Getenv("TEST_BACKUP_TOOLS") == "1" {
+		if err = scheduler.CleanupTick(ctx); err != nil {
+			t.Fatal(err)
+		}
+		drain()
+		if len(deletedTopics) != 1 || deletedTopics[0] != active.TopicID {
+			t.Fatalf("wrong deleted topic: %v expected %d", deletedTopics, active.TopicID)
+		}
+	}
 	if err = svc.Reopen(ctx, 1, ticket.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -221,5 +241,51 @@ func TestWorkflowQueuesUntilClaimAndPreservesMessagesAcrossTransfer(t *testing.T
 	last := messages[len(messages)-1]
 	if last.FileID != "resolution-file" || last.ArchivePath == "" || len(last.SHA256) != 64 {
 		t.Fatalf("closure attachment was not archived: %+v", last)
+	}
+
+	if err = svc.Claim(ctx, 2, ticket.ID); err != nil {
+		t.Fatal(err)
+	}
+	drain()
+	newCycle, _ := store.Ticket(ctx, ticket.ID)
+	if newCycle.TopicID == active.TopicID || newCycle.TopicID == 0 || createdTopics != 3 || reopenedTopics != 0 {
+		t.Fatalf("reopen reused old topic: %+v", newCycle)
+	}
+	// Re-running preparation of an old completion never deletes the new binding.
+	if os.Getenv("TEST_BACKUP_TOOLS") == "1" {
+		if err = scheduler.CleanupTick(ctx); err != nil {
+			t.Fatal(err)
+		}
+		drain()
+		if len(deletedTopics) != 1 {
+			t.Fatalf("old intent repeated deletion: %v", deletedTopics)
+		}
+	}
+	if err = svc.Cancel(ctx, 1, ticket.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err = svc.Cancel(ctx, 1, ticket.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	drain()
+	if os.Getenv("TEST_BACKUP_TOOLS") == "1" {
+		if err = scheduler.CleanupTick(ctx); err != nil {
+			t.Fatal(err)
+		}
+		drain()
+		if len(deletedTopics) != 2 || deletedTopics[1] != newCycle.TopicID {
+			t.Fatalf("cancellation deletion wrong: %v", deletedTopics)
+		}
+	}
+	finalHistory, _ := store.Messages(ctx, ticket.ID)
+	if len(finalHistory) != len(messages) {
+		t.Fatal("history lost after deletion")
+	}
+	csvText, err := report.CSV(ctx, store, tickets.DefaultCalendar())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(csvText, "engineer_closures,client_cancellations") || !strings.HasSuffix(strings.TrimSpace(csvText), ",1,1") {
+		t.Fatalf("closure metrics combined incorrectly: %s", csvText)
 	}
 }

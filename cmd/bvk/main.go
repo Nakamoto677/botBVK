@@ -109,12 +109,15 @@ func run() error {
 	}
 	service := tickets.New(store)
 	scheduler := &monitor.Scheduler{Store: store, Config: cfg, Calendar: calendar}
+	scheduler.Backup = func(ctx context.Context) (string, error) {
+		return archive.Create(ctx, cfg.DatabaseURL, cfg.ArchiveDir, cfg.BackupDir)
+	}
 	tc.BeforeDelete = scheduler.BeforeDelete
 	tc.BusinessHoursText = fmt.Sprintf("Обработка: Пн–Пт, %02d:00–%02d:00 по Иркутску. Заявки принимаются круглосуточно.", cfg.StartHour, cfg.EndHour)
 	tc.ReportCSV = func(ctx context.Context) (string, error) { return report.CSV(ctx, store, calendar) }
 	adapter := telegram.NewAdapter(client, store, service, tc)
 	worker := telegram.NewWorker(client, store, tc)
-	errs := make(chan error, 5)
+	errs := make(chan error, 6)
 	var runners sync.WaitGroup
 	launch := func(fn func(context.Context) error) {
 		runners.Add(1)
@@ -147,6 +150,7 @@ func run() error {
 	launch(adapter.Run)
 	launch(worker.Run)
 	launch(scheduler.Run)
+	launch(scheduler.RunCleanup)
 	slog.Info("support bot started", "business_timezone", "Asia/Irkutsk", "health_address", cfg.HealthAddress)
 	select {
 	case <-ctx.Done():

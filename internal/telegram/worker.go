@@ -53,8 +53,21 @@ func (w *Worker) Run(ctx context.Context) error {
 				dead = true
 			}
 			dead = dead || op.Attempts >= 12
+			if op.Kind == "delete_topic" && !errors.Is(err, domain.ErrInvalid) && !errors.Is(err, domain.ErrForbidden) {
+				dead = false
+				if op.Attempts == 0 || op.Attempts == 11 || op.Attempts > 0 && op.Attempts%100 == 0 {
+					if e := w.notifyAdmins(ctx, fmt.Sprintf("Удаление прежнего топика заявки #%d отложено: %s. Бот продолжит автоматически после восстановления доступа.", op.TicketID, err)); e != nil {
+						return e
+					}
+				}
+			}
 			if e := w.store.RetryOperation(ctx, op.ID, err.Error(), delay, dead); e != nil {
 				return e
+			}
+			if op.Kind == "client_message" && op.Attempts == 0 {
+				if e := w.notifyAuthor(ctx, op, err, dead); e != nil {
+					return e
+				}
 			}
 			if dead && op.Kind != "access_notification" {
 				if e := w.notifyAdmins(ctx, fmt.Sprintf("Ошибка операции %d (%s), заявка #%d. Требуется проверка: %s", op.ID, op.Kind, op.TicketID, err)); e != nil {
@@ -98,7 +111,7 @@ func cardButtons(t domain.Ticket) [][]Button {
 		chat := strings.TrimPrefix(fmt.Sprint(t.TopicChatID), "-100")
 		buttons = append(buttons, []Button{{Text: "Открыть", URL: fmt.Sprintf("https://t.me/c/%s/%d", chat, t.TopicID)}})
 	}
-	return append(buttons, []Button{{Text: "Ответить клиенту", Data: "reply:" + id}}, []Button{{Text: "Закрыть", Data: "close:" + id}, {Text: "Передать", Data: "transfer:" + id}}, []Button{{Text: "Ждём клиента", Data: "waiting:" + id}, {Text: "Продолжить", Data: "resume:" + id}}, []Button{{Text: "История", Data: "history:" + id}})
+	return append(buttons, []Button{{Text: "Закрыть", Data: "close:" + id}, {Text: "Передать", Data: "transfer:" + id}}, []Button{{Text: "Ждём клиента", Data: "waiting:" + id}, {Text: "Продолжить", Data: "resume:" + id}}, []Button{{Text: "История", Data: "history:" + id}})
 }
 func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 	var payload struct {
@@ -116,6 +129,7 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 		FromDepartment    domain.Department `json:"from_department"`
 		ToDepartment      domain.Department `json:"to_department"`
 		RoutingGeneration int64             `json:"routing_generation"`
+		CompletionKey     string            `json:"completion_key"`
 	}
 	if len(op.Payload) > 0 {
 		if err := json.Unmarshal(op.Payload, &payload); err != nil {
@@ -151,6 +165,16 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 		}
 		_, err = w.send(ctx, payload.UserID, 0, payload.Text, nil)
 		return err
+	}
+
+	if op.Kind == "delete_aux_message" {
+		if payload.ChatID == 0 || payload.MessageID <= 0 {
+			return domain.ErrInvalid
+		}
+		if err := w.rate(ctx, payload.ChatID); err != nil {
+			return err
+		}
+		return auxiliaryDeleteError(w.client.Call(ctx, "deleteMessage", map[string]any{"chat_id": payload.ChatID, "message_id": payload.MessageID}, nil))
 	}
 
 	t, err := w.store.Ticket(ctx, op.TicketID)
@@ -388,61 +412,55 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 		}
 		return w.refresh(ctx, t)
 	case "delete_topic":
-		if payload.ChatID == 0 || payload.TopicID == 0 {
+		if payload.ChatID == 0 || payload.TopicID == 0 || payload.CompletionKey == "" {
 			return domain.ErrInvalid
 		}
-		current := payload.ChatID == t.TopicChatID && payload.TopicID == t.TopicID
-		if current && t.Status != domain.Closed && t.Status != domain.Cancelled {
-			return nil
+		events, e := w.store.Events(ctx, t.ID)
+		if e != nil {
+			return e
 		}
-		if !current {
-			events, e := w.store.Events(ctx, t.ID)
-			if e != nil {
-				return e
+		intent := false
+		for _, event := range events {
+			if event.Kind != "completion_cleanup_requested" {
+				continue
 			}
-			retired := false
-			for _, event := range events {
-				if event.Kind == "topic_retired" {
-					var binding struct {
-						ChatID  int64 `json:"chat_id"`
-						TopicID int64 `json:"topic_id"`
-					}
-					if json.Unmarshal(event.Data, &binding) == nil && binding.ChatID == payload.ChatID && binding.TopicID == payload.TopicID {
-						retired = true
-					}
-				}
+			var saved struct {
+				ChatID     int64  `json:"chat_id"`
+				TopicID    int64  `json:"topic_id"`
+				Generation int64  `json:"routing_generation"`
+				Key        string `json:"completion_key"`
 			}
-			if !retired {
-				return domain.ErrForbidden
+			if json.Unmarshal(event.Data, &saved) == nil && saved.ChatID == payload.ChatID && saved.TopicID == payload.TopicID && saved.Generation == payload.RoutingGeneration && saved.Key == payload.CompletionKey {
+				intent = true
 			}
 		}
-		data, _ := json.Marshal(map[string]any{"chat_id": payload.ChatID, "topic_id": payload.TopicID, "key": fmt.Sprintf("cleanup:%d:%d", payload.ChatID, payload.TopicID)})
+		if !intent {
+			return domain.ErrForbidden
+		}
+		data, _ := json.Marshal(map[string]any{"chat_id": payload.ChatID, "topic_id": payload.TopicID, "routing_generation": payload.RoutingGeneration, "key": payload.CompletionKey, "completion_key": payload.CompletionKey})
 		return w.store.Transact(ctx, func(tx domain.Tx) error {
 			now, e := tx.GetTicket(ctx, t.ID)
 			if e != nil {
 				return e
 			}
-			// Keep the ticket lock through deletion so Reopen cannot race the destructive API call.
-			if now.TopicChatID == payload.ChatID && now.TopicID == payload.TopicID && now.Status != domain.Closed && now.Status != domain.Cancelled {
-				return nil
+			if now.TopicChatID == payload.ChatID && now.TopicID == payload.TopicID && now.Status.Active() {
+				return tx.AddEvent(ctx, domain.Event{TicketID: t.ID, Kind: "cleanup_deferred", Data: data, CreatedAt: time.Now().UTC()})
 			}
 			if w.cfg.BeforeDelete == nil {
 				return domain.ErrForbidden
 			}
 			if e = w.cfg.BeforeDelete(ctx, tx, now, payload.ChatID, payload.TopicID); e != nil {
 				if errors.Is(e, domain.ErrConflict) {
-					proofData, _ := json.Marshal(map[string]any{"chat_id": payload.ChatID, "topic_id": payload.TopicID, "key": fmt.Sprintf("cleanup:%d:%d", payload.ChatID, payload.TopicID)})
-					return tx.AddEvent(ctx, domain.Event{TicketID: t.ID, Kind: "cleanup_deferred", Data: proofData, CreatedAt: time.Now().UTC()})
+					return tx.AddEvent(ctx, domain.Event{TicketID: t.ID, Kind: "cleanup_deferred", Data: data, CreatedAt: time.Now().UTC()})
 				}
 				return e
 			}
-			if e = w.client.Call(ctx, "deleteForumTopic", map[string]any{"chat_id": payload.ChatID, "message_thread_id": payload.TopicID}, nil); e != nil {
+			if e = topicDeleteError(w.client.Call(ctx, "deleteForumTopic", map[string]any{"chat_id": payload.ChatID, "message_thread_id": payload.TopicID}, nil)); e != nil {
 				return e
 			}
-			if now.TopicChatID == payload.ChatID && now.TopicID == payload.TopicID && (now.Status == domain.Closed || now.Status == domain.Cancelled) {
+			if now.TopicChatID == payload.ChatID && now.TopicID == payload.TopicID && !now.Status.Active() {
 				now.TopicChatID = 0
 				now.TopicID = 0
-				now.QueueMessageID = 0
 				now.TopicMessageID = 0
 				if e = tx.SaveTicket(ctx, &now); e != nil {
 					return e
@@ -450,6 +468,7 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 			}
 			return tx.AddEvent(ctx, domain.Event{TicketID: t.ID, Kind: "topic_deleted", Data: data, CreatedAt: time.Now().UTC()})
 		})
+
 	default:
 		return domain.ErrInvalid
 	}
@@ -712,20 +731,36 @@ func (w *Worker) messageRoute(ctx context.Context, t domain.Ticket, m domain.Mes
 	var selected domain.Event
 	var chat, topic int64
 	for _, event := range events {
-		if event.Kind != "transferred" {
-			continue
-		}
 		var data struct {
-			From    domain.Department `json:"from"`
-			ChatID  int64             `json:"old_chat_id"`
-			TopicID int64             `json:"old_topic_id"`
+			From       domain.Department `json:"from"`
+			OldChatID  int64             `json:"old_chat_id"`
+			OldTopicID int64             `json:"old_topic_id"`
+			ChatID     int64             `json:"chat_id"`
+			TopicID    int64             `json:"topic_id"`
 		}
-		if json.Unmarshal(event.Data, &data) != nil || data.ChatID == 0 || data.TopicID == 0 || data.From != m.RoutingDepartment {
+		if json.Unmarshal(event.Data, &data) != nil {
 			continue
 		}
-		if topic == 0 || event.CreatedAt.After(selected.CreatedAt) {
+		switch event.Kind {
+		case "transferred", "reopened":
+			if data.From != "" && m.RoutingDepartment != "" && data.From != m.RoutingDepartment {
+				continue
+			}
+		case "completion_cleanup_requested":
+			data.OldChatID = data.ChatID
+			data.OldTopicID = data.TopicID
+		default:
+			continue
+		}
+		if data.OldChatID == 0 || data.OldTopicID == 0 {
+			continue
+		}
+		if !m.CreatedAt.IsZero() && event.CreatedAt.Before(m.CreatedAt) {
+			continue
+		}
+		if topic == 0 || event.CreatedAt.Before(selected.CreatedAt) {
 			selected = event
-			chat, topic = data.ChatID, data.TopicID
+			chat, topic = data.OldChatID, data.OldTopicID
 		}
 	}
 	if topic != 0 {
@@ -811,4 +846,38 @@ func (w *Worker) finishProvision(ctx context.Context, t domain.Ticket) (domain.T
 		return nil
 	})
 	return t, err
+}
+
+func auxiliaryDeleteError(err error) error {
+	var api *APIError
+	if errors.As(err, &api) && api.Code == 400 && strings.Contains(strings.ToLower(api.Description), "message to delete not found") {
+		return nil
+	}
+	return err
+}
+func topicDeleteError(err error) error {
+	var api *APIError
+	if errors.As(err, &api) && api.Code == 400 {
+		description := strings.ToLower(api.Description)
+		for _, marker := range []string{"topic_id_invalid", "topic not found", "message thread not found", "message_thread_id_invalid"} {
+			if strings.Contains(description, marker) {
+				return nil
+			}
+		}
+	}
+	return err
+}
+func (w *Worker) notifyAuthor(ctx context.Context, op domain.Operation, cause error, permanent bool) error {
+	var msg domain.Message
+	if json.Unmarshal(op.Payload, &msg) != nil || msg.AuthorID == 0 {
+		return nil
+	}
+	text := fmt.Sprintf("Ответ по заявке #%d пока не доставлен клиенту. Бот повторит отправку. Причина: %s", op.TicketID, cause)
+	if permanent {
+		text = fmt.Sprintf("Ответ по заявке #%d не доставлен клиенту. Администратору отправлено уведомление; требуется восстановить доставку. Причина: %s", op.TicketID, cause)
+	}
+	raw, _ := json.Marshal(map[string]any{"user_id": msg.AuthorID, "text": text})
+	return w.store.Transact(ctx, func(tx domain.Tx) error {
+		return tx.Enqueue(ctx, domain.Operation{Kind: "access_notification", Payload: raw, AvailableAt: time.Now().UTC(), State: "pending"})
+	})
 }

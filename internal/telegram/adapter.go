@@ -48,17 +48,18 @@ type draft struct {
 	Text       string
 }
 type Adapter struct {
-	client   *Client
-	store    domain.Store
-	service  Service
-	cfg      Config
-	drafts   map[int64]draft
-	lastPoll atomic.Int64
-	prompts  map[promptKey]prompt
+	client    *Client
+	store     domain.Store
+	service   Service
+	cfg       Config
+	drafts    map[int64]draft
+	lastPoll  atomic.Int64
+	prompts   map[promptKey]prompt
+	auxiliary map[auxKey][]domain.AuxiliaryMessage
 }
 
 func NewAdapter(c *Client, s domain.Store, v Service, cfg Config) *Adapter {
-	return &Adapter{client: c, store: s, service: v, cfg: cfg, drafts: make(map[int64]draft), prompts: make(map[promptKey]prompt)}
+	return &Adapter{client: c, store: s, service: v, cfg: cfg, drafts: make(map[int64]draft), prompts: make(map[promptKey]prompt), auxiliary: make(map[auxKey][]domain.AuxiliaryMessage)}
 }
 func (a *Adapter) Run(ctx context.Context) error {
 	last, err := a.store.LastUpdateID(ctx)
@@ -179,6 +180,16 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 			if e = a.updateName(ctx, user, m.From); e != nil {
 				return e
 			}
+			key := scope(m.From.ID, m)
+			if p, ok, e := a.loadPrompt(ctx, key); e != nil {
+				return e
+			} else if ok {
+				a.finishPrompt(ctx, key, p)
+			}
+			if e := a.deleteDraft(ctx, m.From.ID); e != nil {
+				return e
+			}
+			a.cleanupBestEffort(ctx, key, "draft")
 			return a.menu(ctx, m, user)
 		} else if e != nil && !errors.Is(e, domain.ErrNotFound) {
 			return e
@@ -191,7 +202,7 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 		for _, c := range companies {
 			buttons = append(buttons, []Button{{Text: c.Name, Data: fmt.Sprintf("company:%d", c.ID)}})
 		}
-		return a.say(ctx, m, "Выберите компанию. Доступ подтвердит администратор.", buttons)
+		return a.sayAux(ctx, m, m.From.ID, "registration", "Выберите компанию. Доступ подтвердит администратор.", buttons)
 	}
 	user, err := a.store.User(ctx, m.From.ID)
 	if err != nil {
@@ -204,6 +215,18 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 		return err
 	}
 	if text == "/menu" {
+		key := scope(m.From.ID, m)
+		if p, exists, e := a.loadPrompt(ctx, key); e != nil {
+			return e
+		} else if exists {
+			a.finishPrompt(ctx, key, p)
+		}
+		if m.Chat.Type == "private" {
+			if e := a.deleteDraft(ctx, m.From.ID); e != nil {
+				return e
+			}
+			a.cleanupBestEffort(ctx, key, "draft")
+		}
 		return a.menu(ctx, m, user)
 	}
 	if text == "/help" {
@@ -253,7 +276,7 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 		} else if !errors.Is(err, domain.ErrNotFound) {
 			return err
 		}
-		return a.say(ctx, m, "Выберите направление.", departmentButtons("new"))
+		return a.sayAux(ctx, m, m.From.ID, "draft", "Выберите направление.", departmentButtons("new"))
 	}
 	if strings.HasPrefix(text, "/") {
 		return a.help(ctx, m, user)
@@ -283,7 +306,8 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 		if err := a.saveDraft(ctx, m.From.ID, d); err != nil {
 			return err
 		}
-		return a.say(ctx, m, "Создать заявку?\n"+d.Text, [][]Button{{{Text: "Отправить", Data: "submit"}, {Text: "Отменить", Data: "cancel"}}})
+		a.cleanupBestEffort(ctx, scope(m.From.ID, m), "draft")
+		return a.sayAux(ctx, m, m.From.ID, "draft", "Создать заявку?\n"+d.Text, [][]Button{{{Text: "Отправить", Data: "submit"}, {Text: "Отменить", Data: "cancel"}}})
 	}
 	t, err := a.store.ActiveTicket(ctx, m.From.ID)
 	if err != nil {
@@ -307,7 +331,7 @@ func (a *Adapter) callback(ctx context.Context, c *Callback) error {
 	if len(parts) > 1 {
 		id, _ = strconv.ParseInt(parts[1], 10, 64)
 	}
-	if action == "claim" || action == "waiting" || action == "resume" || action == "close" || action == "transfer" || action == "reply" {
+	if action == "claim" || action == "waiting" || action == "resume" || action == "close" || action == "transfer" {
 		t, e := a.store.Ticket(ctx, id)
 		if e != nil {
 			return e
@@ -350,6 +374,9 @@ func (a *Adapter) callback(ctx context.Context, c *Callback) error {
 				}
 			}
 		}
+		if err == nil {
+			a.cleanupBestEffort(ctx, scope(c.From.ID, c.Message), "registration")
+		}
 	case "approve", "reject":
 		err = a.service.ApproveAccess(ctx, c.From.ID, id, action == "approve")
 	case "new":
@@ -369,7 +396,8 @@ func (a *Adapter) callback(ctx context.Context, c *Callback) error {
 		if err := a.saveDraft(ctx, c.From.ID, draft{Department: domain.Department(parts[1])}); err != nil {
 			return err
 		}
-		_, err = a.client.Send(ctx, c.From.ID, 0, "Опишите проблему текстом. Вложения отправьте после создания заявки.", nil)
+		a.cleanupBestEffort(ctx, scope(c.From.ID, c.Message), "draft")
+		err = a.sayAux(ctx, c.Message, c.From.ID, "draft", "Опишите проблему текстом. Вложения отправьте после создания заявки.", nil)
 	case "submit":
 		d, ok, e := a.getDraft(ctx, c.From.ID)
 		if e != nil {
@@ -384,15 +412,15 @@ func (a *Adapter) callback(ctx context.Context, c *Callback) error {
 			if err = a.deleteDraft(ctx, c.From.ID); err != nil {
 				return err
 			}
-			hours := a.cfg.BusinessHoursText
-			if hours == "" {
-				hours = "Пн–Пт, 09:00–18:00 по Иркутску"
-			}
-			_, err = a.client.Send(ctx, c.From.ID, 0, fmt.Sprintf("Заявка #%d сохранена. Пишите дополнения здесь. Обычная обработка: %s. ", t.ID, hours), nil)
+			a.cleanupBestEffort(ctx, scope(c.From.ID, c.Message), "draft")
+			_ = t
 		}
 	case "cancel":
 		if id == 0 {
 			err = a.deleteDraft(ctx, c.From.ID)
+			if err == nil && c.Message != nil {
+				a.cleanupBestEffort(ctx, scope(c.From.ID, c.Message), "draft")
+			}
 		} else {
 			err = a.beginCancel(ctx, c.From.ID, c.Message, id)
 		}
@@ -404,7 +432,7 @@ func (a *Adapter) callback(ctx context.Context, c *Callback) error {
 		err = a.service.SetWaiting(ctx, c.From.ID, id, false)
 	case "reopen":
 		err = a.service.Reopen(ctx, c.From.ID, id)
-	case "close", "transfer", "reply":
+	case "close", "transfer":
 		err = a.beginStaffPrompt(ctx, c, id, action)
 	case "transferdept", "cancelconfirm", "promptcancel":
 		err = a.promptCallback(ctx, c, action, id, parts)
@@ -432,7 +460,7 @@ func (a *Adapter) callback(ctx context.Context, c *Callback) error {
 	if err != nil {
 		return err
 	}
-	return a.client.Answer(ctx, c.ID, "Готово")
+	return a.client.Answer(ctx, c.ID, "")
 }
 func staffAuthorized(u domain.User, t domain.Ticket) bool {
 	if !u.Approved {
@@ -458,6 +486,14 @@ func (a *Adapter) staff(ctx context.Context, m *Message) error {
 	}
 	text := strings.TrimSpace(m.Text)
 	if text == "/help" || text == "/menu" {
+		if text == "/menu" {
+			key := scope(m.From.ID, m)
+			if p, ok, e := a.loadPrompt(ctx, key); e != nil {
+				return e
+			} else if ok {
+				a.finishPrompt(ctx, key, p)
+			}
+		}
 		return a.help(ctx, m, user)
 	}
 	if consumed, e := a.consumePrompt(ctx, m, user); consumed {
@@ -504,7 +540,7 @@ func (a *Adapter) staff(ctx context.Context, m *Message) error {
 		}
 		return a.service.Transfer(ctx, m.From.ID, id, domain.Department(rest[0]), rest[1])
 	}
-	if strings.HasPrefix(text, "/") && !strings.HasPrefix(messageText(m), "/reply") {
+	if strings.HasPrefix(strings.TrimSpace(messageText(m)), "/") {
 		return a.help(ctx, m, user)
 	}
 	t, err := a.store.TopicTicket(ctx, m.Chat.ID, m.ThreadID)
@@ -517,42 +553,12 @@ func (a *Adapter) staff(ctx context.Context, m *Message) error {
 	if !staffAuthorized(user, t) {
 		return domain.ErrForbidden
 	}
-	if text == "/history" {
-		return a.history(ctx, m, user, t)
+	if !provisioningStatus(t.Status) || t.RoutingPending || m.Chat.ID != t.TopicChatID || m.ThreadID != t.TopicID || m.ThreadID == a.cfg.Departments[t.Department].QueueTopicID {
+		return nil
 	}
-	body := messageText(m)
-	public := body == "/reply" || strings.HasPrefix(body, "/reply ") || strings.HasPrefix(body, "/reply\n")
-	if public {
-		if m.Reply == nil {
-			return a.say(ctx, m, "Отправляйте /reply ответом на сообщение клиента.", nil)
-		}
-		events, e := a.store.Events(ctx, t.ID)
-		if e != nil {
-			return e
-		}
-		matches := false
-		for _, event := range events {
-			if event.Kind != "message_delivered" {
-				continue
-			}
-			var delivery struct {
-				ChatID    int64  `json:"telegram_chat_id"`
-				MessageID int64  `json:"telegram_message_id"`
-				Direction string `json:"direction"`
-			}
-			if json.Unmarshal(event.Data, &delivery) == nil && delivery.ChatID == m.Chat.ID && delivery.MessageID == m.Reply.ID && delivery.Direction == "inbound" {
-				matches = true
-			}
-		}
-		if !matches {
-			return domain.ErrInvalid
-		}
-		if t.AssigneeID != user.ID && user.Role != "admin" && user.Role != "dispatcher" {
-			return domain.ErrForbidden
-		}
-	}
-	return a.receive(ctx, m, t, public)
+	return a.receive(ctx, m, t, true)
 }
+
 func (a *Adapter) currentSource(m *Message, t domain.Ticket) bool {
 	team := a.cfg.Departments[t.Department]
 	return m.Chat.ID == t.TopicChatID && t.TopicID != 0 && m.ThreadID == t.TopicID || m.Chat.ID == team.ChatID && m.ThreadID == team.QueueTopicID && t.QueueMessageID != 0 && m.ID == t.QueueMessageID
@@ -564,7 +570,7 @@ func messageText(m *Message) string {
 	return m.Caption
 }
 func normalise(m *Message, public bool) domain.Message {
-	msg := domain.Message{AuthorID: m.From.ID, Text: messageText(m), TelegramChatID: m.Chat.ID, TelegramMessageID: m.ID, MediaGroupID: m.MediaGroupID, CreatedAt: time.Now().UTC()}
+	msg := domain.Message{AuthorID: m.From.ID, Text: messageText(m), TelegramChatID: m.Chat.ID, TelegramMessageID: m.ID, TelegramTopicID: m.ThreadID, MediaGroupID: m.MediaGroupID, CreatedAt: time.Now().UTC()}
 	if m.EditDate != 0 {
 		at := time.Unix(m.EditDate, 0).UTC()
 		msg.EditedAt = &at
@@ -572,9 +578,7 @@ func normalise(m *Message, public bool) domain.Message {
 	if m.Reply != nil {
 		msg.ReplyToMessageID = m.Reply.ID
 	}
-	if public {
-		msg.Text = strings.TrimSpace(strings.TrimPrefix(msg.Text, "/reply"))
-	}
+
 	var f *File
 	switch {
 	case m.Document != nil:
@@ -609,7 +613,7 @@ func (a *Adapter) receive(ctx context.Context, m *Message, t domain.Ticket, publ
 		return err
 	}
 	if msg.FileSize > 20<<20 {
-		return a.say(ctx, m, "Вложение больше 20 МБ: оно передано, но не может быть скачано в независимый архив стандартным Bot API. Отправьте меньший файл или согласуйте другой способ передачи с диспетчером. Топик не будет удалён без архива.", nil)
+		return a.say(ctx, m, "Вложение больше 20 МБ: оно передано, но не может быть скачано в независимый архив стандартным Bot API. Отправьте меньший файл или согласуйте другой способ передачи с поддержкой. Топик не будет удалён без архива.", nil)
 	}
 	return nil
 }
@@ -643,6 +647,16 @@ func (a *Adapter) edit(ctx context.Context, m *Message) error {
 		if original.TelegramChatID == m.Chat.ID && original.TelegramMessageID == m.ID && original.FileID != normalized.FileID {
 			data, _ := json.Marshal(map[string]any{"telegram_message_id": m.ID, "old_file_id": original.FileID, "new_file_id": normalized.FileID, "new_media_type": normalized.MediaType, "new_file_size": normalized.FileSize, "new_file_name": normalized.FileName})
 			if e = a.store.Transact(ctx, func(tx domain.Tx) error {
+				user, err := tx.GetUser(ctx, m.From.ID)
+				if err != nil {
+					return err
+				}
+				if !user.Approved || original.AuthorID != m.From.ID || !historyAuthorized(user, t) {
+					return domain.ErrForbidden
+				}
+				if _, err = tx.GetTicket(ctx, t.ID); err != nil {
+					return err
+				}
 				return tx.AddEvent(ctx, domain.Event{TicketID: t.ID, ActorID: m.From.ID, Kind: "media_edit_unsupported", Data: data, CreatedAt: time.Now().UTC()})
 			}); e != nil {
 				return e

@@ -25,7 +25,7 @@ func CSV(ctx context.Context, store domain.Store, calendar tickets.Calendar) (st
 	if err != nil {
 		return "", err
 	}
-	rows[0] = append(rows[0], "first_response_calendar_seconds", "first_response_working_seconds", "waiting_calendar_seconds", "waiting_working_seconds", "transfers", "reopens")
+	rows[0] = append(rows[0], "first_response_calendar_seconds", "first_response_working_seconds", "waiting_calendar_seconds", "waiting_working_seconds", "transfers", "reopens", "engineer_closures", "client_cancellations")
 	for i, t := range all {
 		events, err := store.Events(ctx, t.ID)
 		if err != nil {
@@ -41,7 +41,7 @@ func CSV(ctx context.Context, store domain.Store, calendar tickets.Calendar) (st
 			response = seconds(t.FirstResponseAt.Sub(t.CreatedAt))
 			workResponse = seconds(calendar.WorkDuration(t.CreatedAt, *t.FirstResponseAt))
 		}
-		transfers, reopens := 0, 0
+		transfers, reopens, closures, cancellations := 0, 0, 0, 0
 		for _, ev := range events {
 			if ev.Kind == "transferred" {
 				transfers++
@@ -49,8 +49,14 @@ func CSV(ctx context.Context, store domain.Store, calendar tickets.Calendar) (st
 			if ev.Kind == "reopened" {
 				reopens++
 			}
+			if ev.Kind == "closed" {
+				closures++
+			}
+			if ev.Kind == "cancelled" {
+				cancellations++
+			}
 		}
-		rows[i+1] = append(rows[i+1], response, workResponse, seconds(wait), seconds(workWait), strconv.Itoa(transfers), strconv.Itoa(reopens))
+		rows[i+1] = append(rows[i+1], response, workResponse, seconds(wait), seconds(workWait), strconv.Itoa(transfers), strconv.Itoa(reopens), strconv.Itoa(closures), strconv.Itoa(cancellations))
 	}
 	var out strings.Builder
 	w := csv.NewWriter(&out)

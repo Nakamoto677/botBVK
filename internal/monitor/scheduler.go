@@ -138,7 +138,14 @@ func (s *Scheduler) once(ctx context.Context, t domain.Ticket, events []domain.E
 
 // BeforeDelete validates only a new explicit completion and its durable proof.
 // It is called while the worker holds the ticket lock to fence concurrent edits.
-func (s *Scheduler) BeforeDelete(ctx context.Context, _ domain.Tx, t domain.Ticket, chatID, topicID int64) error {
+func (s *Scheduler) BeforeDelete(ctx context.Context, tx domain.Tx, t domain.Ticket, chatID, topicID int64) error {
+	if fence, ok := s.Store.(interface {
+		CleanupFence(context.Context, domain.Tx, int64) error
+	}); ok {
+		if err := fence.CleanupFence(ctx, tx, t.ID); err != nil {
+			return err
+		}
+	}
 	events, err := s.Store.Events(ctx, t.ID)
 	if err != nil {
 		return err

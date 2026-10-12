@@ -38,11 +38,11 @@ type Config struct {
 	FirstResponseMinutes int                        `json:"first_response_minutes"`
 	IdleHours            int                        `json:"idle_hours"`
 	WaitingDays          int                        `json:"waiting_days"`
-	TopicRetentionDays   int                        `json:"topic_retention_days"`
+	TopicRetentionDays   int                        `json:"-"` // Deprecated; completion backup now controls deletion.
 }
 
 func Load(path string) (Config, error) {
-	c := Config{ArchiveDir: "data/archive", BackupDir: "data/backups", HealthAddress: "127.0.0.1:8080", StartHour: 9, EndHour: 18, FirstResponseMinutes: 30, IdleHours: 4, WaitingDays: 2, TopicRetentionDays: 30}
+	c := Config{ArchiveDir: "data/archive", BackupDir: "data/backups", HealthAddress: "127.0.0.1:8080", StartHour: 9, EndHour: 18, FirstResponseMinutes: 30, IdleHours: 4, WaitingDays: 2}
 	f, e := os.Open(path)
 	if e != nil {
 		return c, e
@@ -55,6 +55,7 @@ func Load(path string) (Config, error) {
 	// Older installations may still have removed routing settings. Discard
 	// only those known obsolete keys; other unknown settings remain errors.
 	delete(raw, "dispatcher_chat_id")
+	delete(raw, "topic_retention_days")
 	if value, ok := raw["departments"]; ok {
 		var teams map[string]map[string]json.RawMessage
 		if e = json.Unmarshal(value, &teams); e != nil {
@@ -88,8 +89,8 @@ func Load(path string) (Config, error) {
 	if c.StartHour < 0 || c.EndHour > 24 || c.StartHour >= c.EndHour {
 		return c, fmt.Errorf("invalid business hours")
 	}
-	if c.FirstResponseMinutes <= 0 || c.IdleHours <= 0 || c.WaitingDays <= 0 || c.TopicRetentionDays < 30 {
-		return c, fmt.Errorf("invalid monitoring intervals (retention must be >=30 days)")
+	if c.FirstResponseMinutes <= 0 || c.IdleHours <= 0 || c.WaitingDays <= 0 {
+		return c, fmt.Errorf("invalid monitoring intervals")
 	}
 	for _, s := range c.Staff {
 		if s.ID <= 0 {

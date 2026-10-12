@@ -42,6 +42,5 @@
   "end_hour": 18,
   "first_response_minutes": 30,
   "idle_hours": 4,
-  "waiting_days": 2,
-  "topic_retention_days": 30
+  "waiting_days": 2
 }

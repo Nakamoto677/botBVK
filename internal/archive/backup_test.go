@@ -55,6 +55,10 @@ func TestCompletionProofSurvivesNewCycleButRejectsTranscriptChanges(t *testing.T
 	if !manifest.CoversCompletion(reopened, []domain.Message{original, newCycle}, events, completion) {
 		t.Fatal("detached completion proof blocked by new cycle or housekeeping")
 	}
+	lateReplacement := append(append([]domain.Event{}, events...), domain.Event{ID: 8, Kind: "media_edit_unsupported", CreatedAt: at.Add(time.Hour)})
+	if manifest.CoversCompletion(reopened, []domain.Message{original}, lateReplacement, completion) {
+		t.Fatal("late unarchived media replacement accepted")
+	}
 	original.Text = "edited old transcript"
 	if manifest.CoversCompletion(reopened, []domain.Message{original}, events, completion) {
 		t.Fatal("late original-message edit accepted")

@@ -413,8 +413,17 @@ func (s *Store) AccessRequests(ctx context.Context) ([]domain.AccessRequest, err
 	return result, rows.Err()
 }
 func (s *Store) SaveUpdate(ctx context.Context, id int64, payload json.RawMessage) (bool, error) {
-	tag, err := s.pool.Exec(ctx, "INSERT INTO bvk_updates(id,payload) VALUES($1,$2) ON CONFLICT(id) DO NOTHING", id, payload)
-	return tag.RowsAffected() == 1, err
+	var inserted bool
+	err := s.Transact(ctx, func(tx domain.Tx) error {
+		raw := tx.(*transaction).tx
+		if _, err := raw.Exec(ctx, "SELECT pg_advisory_xact_lock_shared(731903)"); err != nil {
+			return err
+		}
+		tag, err := raw.Exec(ctx, "INSERT INTO bvk_updates(id,payload) VALUES($1,$2) ON CONFLICT(id) DO NOTHING", id, payload)
+		inserted = tag.RowsAffected() == 1
+		return err
+	})
+	return inserted, err
 }
 func (s *Store) PendingUpdates(ctx context.Context, limit int) ([]domain.StoredUpdate, error) {
 	if limit <= 0 {

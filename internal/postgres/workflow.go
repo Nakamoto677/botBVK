@@ -4,6 +4,9 @@ import (
 	"bot-bvk/internal/domain"
 	"context"
 	"encoding/json"
+	"errors"
+	"github.com/jackc/pgx/v5"
+	"strings"
 )
 
 var _ domain.WorkflowStore = (*Store)(nil)
@@ -83,6 +86,61 @@ func (s *Store) DeleteWorkflow(ctx context.Context, user, chat, topic int64, sce
 // attachment still needs durable processing, including a failed operation.
 func (s *Store) CleanupSettled(ctx context.Context, ticketID int64) (bool, error) {
 	var unsettled bool
-	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM bvk_outbox WHERE ticket_id=$1 AND state IN ('pending','processing','failed') AND kind IN ('archive_message','client_message','team_message','create_topic','reopen_topic'))`, ticketID).Scan(&unsettled)
+	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM bvk_updates WHERE NOT finished) OR EXISTS(SELECT 1 FROM bvk_outbox WHERE ticket_id=$1 AND state IN ('pending','processing','failed') AND kind IN ('archive_message','client_message','team_message','create_topic','reopen_topic'))`, ticketID).Scan(&unsettled)
 	return !unsettled, err
+}
+
+// CleanupRetry retries archival failures only. Unsupported media and oversized
+// attachments remain blocked and visible to administrators.
+func (s *Store) CleanupRetry(ctx context.Context, ticketID int64) error {
+	_, err := s.pool.Exec(ctx, `UPDATE bvk_outbox o SET state='pending',attempts=0,available_at=now(),lease_until=NULL WHERE o.ticket_id=$1 AND o.kind='archive_message' AND o.state='failed' AND EXISTS(SELECT 1 FROM bvk_messages m WHERE m.ticket_id=o.ticket_id AND m.id=COALESCE(o.payload->>'ID',o.payload->>'message_id')::bigint AND COALESCE(m.payload->>'ArchivePath','')='' AND COALESCE((m.payload->>'FileSize')::bigint,0)<=20971520) AND NOT EXISTS(SELECT 1 FROM bvk_events e WHERE e.ticket_id=o.ticket_id AND e.payload->>'Kind'='media_edit_unsupported')`, ticketID)
+	return err
+}
+
+func (s *Store) CleanupProblem(ctx context.Context, ticketID int64) (string, error) {
+	var kind, state, lastError string
+	err := s.pool.QueryRow(ctx, `SELECT kind,state,last_error FROM bvk_outbox WHERE ticket_id=$1 AND state IN ('pending','processing','failed') AND kind IN ('archive_message','client_message','team_message','create_topic','reopen_topic') ORDER BY CASE WHEN state='failed' THEN 0 ELSE 1 END,id LIMIT 1`, ticketID).Scan(&kind, &state, &lastError)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "обработка уже принятых входящих сообщений ещё не завершена", nil
+		}
+		return "", mapError(err)
+	}
+	// Return a bounded operator-facing description, never raw errors that might
+	// contain URLs, filesystem credentials or PostgreSQL connection secrets.
+	label := map[string]string{"archive_message": "сохранение вложения", "client_message": "доставка клиенту", "team_message": "доставка инженерам", "create_topic": "создание топика", "reopen_topic": "подготовка топика"}[kind]
+	if state == "failed" {
+		lower := strings.ToLower(lastError)
+		switch {
+		case strings.Contains(lower, "20 mb") || strings.Contains(lower, "20mb") || strings.Contains(lower, "too big") || strings.Contains(lower, "too large"):
+			return label + ": файл превышает лимит независимого архива", nil
+		case strings.Contains(lower, "forbidden") || strings.Contains(lower, "blocked"):
+			return label + ": Telegram запретил доступ или бот заблокирован", nil
+		case strings.Contains(lower, "not found"):
+			return label + ": исходный файл или получатель недоступен", nil
+		default:
+			return label + ": ошибка; проверьте доступ и журнал, затем повторите операцию", nil
+		}
+	}
+	return label + ": обработка ещё не завершена", nil
+}
+
+// CleanupFence shares a lock with inbox acceptance. Updates committed before
+// this point must be processed before destructive deletion can proceed.
+func (s *Store) CleanupFence(ctx context.Context, tx domain.Tx, ticketID int64) error {
+	raw, ok := tx.(*transaction)
+	if !ok {
+		return domain.ErrInvalid
+	}
+	if _, err := raw.tx.Exec(ctx, "SELECT pg_advisory_xact_lock(731903)"); err != nil {
+		return err
+	}
+	var pending bool
+	if err := raw.tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM bvk_updates WHERE NOT finished)").Scan(&pending); err != nil {
+		return err
+	}
+	if pending {
+		return domain.ErrConflict
+	}
+	return nil
 }

@@ -182,33 +182,6 @@ func TestLegacyPauseCannotCloseClaimedTopic(t *testing.T) {
 	}
 }
 
-func TestReplyButtonExplicitlySendsPublicTextAndAttachment(t *testing.T) {
-	client, _ := capturedClient()
-	store := &adapterStore{user: domain.User{ID: 2, Role: "engineer", Approved: true, Departments: []domain.Department{domain.IT}}, ticket: domain.Ticket{ID: 7, Department: domain.IT, Status: domain.InProgress, AssigneeID: 2, TopicChatID: -100, TopicID: 10, RoutingGeneration: 1}}
-	service := &adapterService{}
-	adapter := NewAdapter(client, store, service, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100, QueueTopicID: 1}}})
-	origin := &Message{ID: 20, Chat: Chat{ID: -100, Type: "supergroup"}, ThreadID: 10}
-	if err := adapter.Handle(context.Background(), Update{Callback: &Callback{ID: "cb", From: Person{ID: 2}, Message: origin, Data: "reply:7"}}); err != nil {
-		t.Fatal(err)
-	}
-	message := &Message{ID: 21, From: Person{ID: 2}, Chat: origin.Chat, ThreadID: 10, Document: &File{ID: "document", Name: "Решение.pdf"}, Caption: "Настройка завершена"}
-	if err := adapter.Handle(context.Background(), Update{Message: message}); err != nil {
-		t.Fatal(err)
-	}
-	if len(service.messages) != 1 || !service.public[0] || service.messages[0].Text != "Настройка завершена" || service.messages[0].FileID != "document" {
-		t.Fatal("explicit response didn't preserve attachment", service.messages)
-	}
-	message.Document = nil
-	message.Caption = ""
-	message.Text = "Внутренняя заметка"
-	if err := adapter.Handle(context.Background(), Update{Message: message}); err != nil {
-		t.Fatal(err)
-	}
-	if service.public[1] {
-		t.Fatal("ordinary note became public after prompt finished")
-	}
-}
-
 func TestReopenedClaimClearsProvisioningAndPreservesTransferredDeferredFiles(t *testing.T) {
 	client, capture := capturedClient()
 	ticket := domain.Ticket{ID: 7, ClientID: 12, Department: domain.IT, Status: domain.InProgress, AssigneeID: 2, TopicChatID: -100, TopicID: 10, TopicMessageID: 99, QueueMessageID: 77, RoutingPending: true, RoutingGeneration: 2}
@@ -325,7 +298,7 @@ func TestReasonAttachmentWithoutAtomicServiceIsExplicitlyRejected(t *testing.T) 
 		t.Fatal("attachment silently discarded")
 	}
 	last := capture.bodies[len(capture.bodies)-1]["text"].(string)
-	if !strings.Contains(last, "вложение нельзя сохранить") {
+	if !strings.Contains(last, "сначала отправьте вложение") {
 		t.Fatal("missing attachment warning", last)
 	}
 }

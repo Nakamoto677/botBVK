@@ -106,7 +106,7 @@ func (s *Scheduler) prepareCleanup(ctx context.Context, t domain.Ticket, events 
 		return fmt.Errorf("accepted message deliveries or attachments are still pending or failed")
 	}
 	for _, event := range events {
-		if event.Kind == "media_edit_unsupported" && !event.CreatedAt.After(completion.CreatedAt) {
+		if event.Kind == "media_edit_unsupported" {
 			return fmt.Errorf("message media was edited without a preserved archive; administrator must restore the missing original attachment")
 		}
 	}

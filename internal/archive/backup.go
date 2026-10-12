@@ -351,10 +351,15 @@ func (m Manifest) CoversCompletion(t domain.Ticket, msgs []domain.Message, event
 		if housekeeping(event.Kind) {
 			continue
 		}
+		// A replacement of old media may arrive after completion without
+		// changing its saved Message. Never discard that loss signal by time.
+		if event.Kind == "media_edit_unsupported" {
+			return false
+		}
 		if event.CreatedAt.After(completion.CreatedAt) {
 			continue
 		}
-		if event.Kind == "media_edit_unsupported" || event.ID > snap.EventID {
+		if event.ID > snap.EventID {
 			return false
 		}
 	}
