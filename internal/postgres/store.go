@@ -18,6 +18,9 @@ import (
 //go:embed schema.sql
 var schema string
 
+//go:embed queue_on_claim.sql
+var queueOnClaimMigration string
+
 type Store struct{ pool *pgxpool.Pool }
 type transaction struct{ tx pgx.Tx }
 
@@ -43,7 +46,17 @@ func (s *Store) Migrate(ctx context.Context) error {
 		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(731901)"); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, schema)
+		if _, err := tx.Exec(ctx, schema); err != nil {
+			return err
+		}
+		marker, err := tx.Exec(ctx, "INSERT INTO bvk_migrations(version) VALUES('002_queue_on_claim') ON CONFLICT(version) DO NOTHING")
+		if err != nil {
+			return err
+		}
+		if marker.RowsAffected() == 0 {
+			return nil
+		}
+		_, err = tx.Exec(ctx, queueOnClaimMigration)
 		return err
 	})
 }

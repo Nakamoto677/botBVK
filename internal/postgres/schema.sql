@@ -26,3 +26,7 @@ CREATE TABLE IF NOT EXISTS bvk_drafts (
  created_at timestamptz NOT NULL DEFAULT now(),
  updated_at timestamptz NOT NULL DEFAULT now()
 );
+CREATE TABLE IF NOT EXISTS bvk_migrations (
+ version text PRIMARY KEY,
+ applied_at timestamptz NOT NULL DEFAULT now()
+);
