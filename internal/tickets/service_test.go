@@ -333,3 +333,66 @@ func TestCancellationAuthorizationAndAllowsNewTicket(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+func TestAssignScopeOwnerAndDispatcher(t *testing.T) {
+	s, f := setup()
+	f.users[6] = domain.User{ID: 6, Role: "engineer", Approved: true, Departments: []domain.Department{domain.IT}}
+	ticket, _ := s.Create(t.Context(), 1, domain.IT, "help")
+	if err := s.Assign(t.Context(), 2, ticket.ID, 6); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatal(err)
+	}
+	if err := s.Assign(t.Context(), 4, ticket.ID, 3); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatal(err)
+	}
+	if err := s.Assign(t.Context(), 4, ticket.ID, 2); err != nil {
+		t.Fatal(err)
+	}
+	if f.tickets[ticket.ID].Status != domain.InProgress {
+		t.Fatal("new not started")
+	}
+	if err := s.Assign(t.Context(), 2, ticket.ID, 6); err != nil {
+		t.Fatal(err)
+	}
+	if f.tickets[ticket.ID].AssigneeID != 6 {
+		t.Fatal("owner cannot reassign")
+	}
+	if err := s.Assign(t.Context(), 2, ticket.ID, 2); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatal(err)
+	}
+	if err := s.Assign(t.Context(), 6, ticket.ID, 6); !errors.Is(err, domain.ErrConflict) {
+		t.Fatal(err)
+	}
+}
+func TestInboundRoutingSnapshotAndCorrection(t *testing.T) {
+	s, f := setup()
+	ticket, _ := s.Create(t.Context(), 1, domain.IT, "help")
+	v := f.tickets[ticket.ID]
+	v.RoutingPending = false
+	v.TopicChatID = -100
+	v.TopicID = 42
+	f.tickets[v.ID] = v
+	if err := s.AddMessage(t.Context(), 1, v.ID, domain.Message{Text: "before", TelegramChatID: 1, TelegramMessageID: 42}, false); err != nil {
+		t.Fatal(err)
+	}
+	if f.messages[0].RoutingDepartment != domain.IT {
+		t.Fatal("snapshot missing")
+	}
+	if err := s.Transfer(t.Context(), 2, v.ID, domain.OneC, "wrong"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddMessage(t.Context(), 1, v.ID, domain.Message{Text: "after", TelegramChatID: 1, TelegramMessageID: 43}, false); err != nil {
+		t.Fatal(err)
+	}
+	if f.messages[1].RoutingDepartment != domain.OneC {
+		t.Fatal("new route missing")
+	}
+	if err := s.EditMessage(t.Context(), 1, v.ID, domain.Message{Text: "corrected", TelegramChatID: 1, TelegramMessageID: 42}); err != nil {
+		t.Fatal(err)
+	}
+	var payload domain.Message
+	if err := json.Unmarshal(f.ops[len(f.ops)-1].Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.RoutingDepartment != domain.OneC {
+		t.Fatal("correction route stale")
+	}
+}
