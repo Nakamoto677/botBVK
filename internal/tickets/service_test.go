@@ -347,14 +347,14 @@ func TestAssignScopeOwnerAndDispatcher(t *testing.T) {
 	if err := s.Assign(t.Context(), 2, ticket.ID, 6); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatal(err)
 	}
+	if err := s.Assign(t.Context(), 4, ticket.ID, 2); !errors.Is(err, domain.ErrConflict) {
+		t.Fatal(err)
+	}
+	if err := s.Claim(t.Context(), 2, ticket.ID); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.Assign(t.Context(), 4, ticket.ID, 3); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatal(err)
-	}
-	if err := s.Assign(t.Context(), 4, ticket.ID, 2); err != nil {
-		t.Fatal(err)
-	}
-	if f.tickets[ticket.ID].Status != domain.InProgress {
-		t.Fatal("new not started")
 	}
 	if err := s.Assign(t.Context(), 2, ticket.ID, 6); err != nil {
 		t.Fatal(err)
@@ -459,26 +459,19 @@ func TestTransferUnclaimedQueueNeverCreatesOrClosesTopic(t *testing.T) {
 		t.Fatal(err)
 	}
 }
-func TestAssignQueuedTicketCreatesOneTopic(t *testing.T) {
+func TestAssignQueuedTicketRejectedWithoutCreatingTopic(t *testing.T) {
 	s, f := setup()
 	ticket, _ := s.Create(t.Context(), 1, domain.IT, "help")
 	before := len(f.ops)
-	if err := s.Assign(t.Context(), 4, ticket.ID, 2); err != nil {
-		t.Fatal(err)
-	}
-	if !f.tickets[ticket.ID].RoutingPending || f.tickets[ticket.ID].Status != domain.InProgress || f.ops[before].Kind != "create_topic" {
-		t.Fatal("assignment did not take request")
-	}
 	if err := s.Assign(t.Context(), 4, ticket.ID, 2); !errors.Is(err, domain.ErrConflict) {
 		t.Fatal(err)
 	}
-	count := 0
-	for _, op := range f.ops {
-		if op.Kind == "create_topic" {
-			count++
-		}
+	if f.tickets[ticket.ID].RoutingPending || f.tickets[ticket.ID].Status != domain.New || len(f.ops) != before {
+		t.Fatal("assign took queued request")
 	}
-	if count != 1 {
-		t.Fatal(count)
+	for _, op := range f.ops {
+		if op.Kind == "create_topic" || op.Kind == "reopen_topic" {
+			t.Fatal("assign provisioned topic")
+		}
 	}
 }

@@ -453,7 +453,7 @@ func (s *Service) Assign(ctx context.Context, actorID, ticketID, engineerID int6
 		if !canAct(u, *t) {
 			return domain.ErrForbidden
 		}
-		if !t.Status.Active() {
+		if t.Status != domain.InProgress && t.Status != domain.Waiting {
 			return domain.ErrConflict
 		}
 		target, err := tx.GetUser(ctx, engineerID)
@@ -468,18 +468,8 @@ func (s *Service) Assign(ctx context.Context, actorID, ticketID, engineerID int6
 		}
 		old := t.AssigneeID
 		t.AssigneeID = engineerID
-		taking := t.Status == domain.New
-		if taking {
-			t.Status = domain.InProgress
-			t.RoutingPending = true
-		}
 		if err := s.save(ctx, tx, t, actorID, "reassigned", map[string]int64{"from": old, "to": engineerID}); err != nil {
 			return err
-		}
-		if taking {
-			if err := s.activateTopic(ctx, tx, *t); err != nil {
-				return err
-			}
 		}
 		if err := s.enqueue(ctx, tx, *t, "refresh_card", nil); err != nil {
 			return err
