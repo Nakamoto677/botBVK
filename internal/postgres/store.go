@@ -473,3 +473,23 @@ func (s *Store) DeleteDraft(ctx context.Context, userID int64) error {
 	_, err := s.pool.Exec(ctx, "DELETE FROM bvk_drafts WHERE user_id=$1", userID)
 	return err
 }
+
+// MessageTicket resolves an archived Telegram source even after its ticket has
+// closed or the client has opened a different ticket. Ambiguous sources fail
+// rather than attach edits to the wrong conversation.
+func (s *Store) MessageTicket(ctx context.Context, telegramChatID, telegramMessageID int64) (domain.Ticket, error) {
+	if telegramMessageID == 0 {
+		return domain.Ticket{}, domain.ErrInvalid
+	}
+	matches, err := listJSON[domain.Ticket](ctx, s.pool, `SELECT t.payload FROM bvk_tickets t JOIN (SELECT DISTINCT ticket_id FROM bvk_messages WHERE telegram_chat_id=$1 AND telegram_message_id=$2) source ON source.ticket_id=t.id ORDER BY t.id LIMIT 2`, telegramChatID, telegramMessageID)
+	if err != nil {
+		return domain.Ticket{}, err
+	}
+	if len(matches) == 0 {
+		return domain.Ticket{}, domain.ErrNotFound
+	}
+	if len(matches) > 1 {
+		return domain.Ticket{}, domain.ErrConflict
+	}
+	return matches[0], nil
+}
