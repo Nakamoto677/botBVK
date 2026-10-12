@@ -451,3 +451,25 @@ func (s *Store) QueueHealth(ctx context.Context) (pending int, failed int, oldes
 	}
 	return
 }
+
+// SaveDraft persists the client's in-progress ticket form across restarts.
+// User approval and authorization are checked by the Telegram adapter.
+func (s *Store) SaveDraft(ctx context.Context, userID int64, department domain.Department, text string) error {
+	if userID == 0 || !department.Valid() {
+		return domain.ErrInvalid
+	}
+	_, err := s.pool.Exec(ctx, `INSERT INTO bvk_drafts(user_id,department,body) VALUES($1,$2,$3) ON CONFLICT(user_id) DO UPDATE SET department=EXCLUDED.department,body=EXCLUDED.body,updated_at=now()`, userID, department, text)
+	return mapError(err)
+}
+func (s *Store) Draft(ctx context.Context, userID int64) (domain.Department, string, error) {
+	var department domain.Department
+	var text string
+	err := s.pool.QueryRow(ctx, "SELECT department,body FROM bvk_drafts WHERE user_id=$1", userID).Scan(&department, &text)
+	return department, text, mapError(err)
+}
+
+// DeleteDraft is idempotent so a repeated confirmation can safely clean up.
+func (s *Store) DeleteDraft(ctx context.Context, userID int64) error {
+	_, err := s.pool.Exec(ctx, "DELETE FROM bvk_drafts WHERE user_id=$1", userID)
+	return err
+}
