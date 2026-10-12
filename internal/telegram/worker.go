@@ -101,6 +101,7 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 	var payload struct {
 		Text       string `json:"text"`
 		UserID     int64  `json:"user_id"`
+		TicketID   int64  `json:"ticket_id"`
 		ChatID     int64  `json:"chat_id"`
 		TopicID    int64  `json:"topic_id"`
 		OldChatID  int64  `json:"old_chat_id"`
@@ -133,9 +134,24 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 		return err
 	}
 	if op.Kind == "dispatcher_message" {
-		_, err := w.send(ctx, w.cfg.DispatcherChatID, 0, payload.Text, nil)
+		var buttons [][]Button
+		if payload.TicketID > 0 {
+			t, err := w.store.Ticket(ctx, payload.TicketID)
+			if err != nil {
+				return err
+			}
+			if t.Status.Active() {
+				buttons = [][]Button{{{Text: "Авария", Data: fmt.Sprintf("emergency:%d", t.ID)}}}
+			}
+			if t.TopicChatID < 0 && t.TopicID != 0 && !t.RoutingPending {
+				chat := strings.TrimPrefix(fmt.Sprint(t.TopicChatID), "-100")
+				buttons = append(buttons, []Button{{Text: "Открыть", URL: fmt.Sprintf("https://t.me/c/%s/%d", chat, t.TopicID)}})
+			}
+		}
+		_, err := w.send(ctx, w.cfg.DispatcherChatID, 0, payload.Text, buttons)
 		return err
 	}
+
 	t, err := w.store.Ticket(ctx, op.TicketID)
 	if err != nil {
 		return err
@@ -316,7 +332,7 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 		if t.TopicID == 0 || !t.Status.Active() {
 			return nil
 		}
-		if err = w.client.Call(ctx, "reopenForumTopic", map[string]any{"chat_id": t.TopicChatID, "message_thread_id": t.TopicID}, nil); err != nil {
+		if err = w.client.ReopenTopic(ctx, t.TopicChatID, t.TopicID); err != nil {
 			return err
 		}
 		return w.refresh(ctx, t)

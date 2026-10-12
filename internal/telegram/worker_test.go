@@ -178,3 +178,27 @@ func TestInitialTopicCardSupportsPublicReplyAndRetry(t *testing.T) {
 		t.Fatal("cannot reply to initial card")
 	}
 }
+
+func TestDispatcherCardHasEmergencyButtonBeforeTopicCreation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var p struct {
+			ChatID int64  `json:"chat_id"`
+			Markup Markup `json:"reply_markup"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+			t.Fatal(err)
+		}
+		if p.ChatID != -300 || len(p.Markup.Buttons) != 1 || p.Markup.Buttons[0][0].Data != "emergency:7" {
+			t.Fatal("dispatcher emergency button missing", p)
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":11}}`))
+	}))
+	defer server.Close()
+	client := NewClient("test")
+	client.BaseURL = server.URL
+	store := &workerStore{ticket: domain.Ticket{ID: 7, Department: domain.IT, Status: domain.New, RoutingPending: true}}
+	worker := NewWorker(client, store, Config{DispatcherChatID: -300})
+	if err := worker.Handle(context.Background(), domain.Operation{Kind: "dispatcher_message", Payload: json.RawMessage(`{"ticket_id":7,"text":"Новая заявка"}`)}); err != nil {
+		t.Fatal(err)
+	}
+}
