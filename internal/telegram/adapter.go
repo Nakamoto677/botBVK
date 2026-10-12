@@ -273,7 +273,11 @@ func (a *Adapter) callback(ctx context.Context, c *Callback) error {
 		if e != nil {
 			return e
 		}
-		if c.Message == nil || !a.currentSource(c.Message, t) {
+		dispatcherEmergency := action == "emergency" && c.Message != nil && a.cfg.DispatcherChatID != 0 && c.Message.Chat.ID == a.cfg.DispatcherChatID
+		if c.Message == nil || (!dispatcherEmergency && !a.currentSource(c.Message, t)) {
+			return domain.ErrConflict
+		}
+		if dispatcherEmergency && !t.Status.Active() {
 			return domain.ErrConflict
 		}
 	}

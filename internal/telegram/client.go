@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -153,7 +154,7 @@ func (c *Client) Topic(ctx context.Context, chat int64, name string) (int64, err
 	return result.ID, err
 }
 func (c *Client) CloseTopic(ctx context.Context, chat, topic int64) error {
-	return c.Call(ctx, "closeForumTopic", map[string]any{"chat_id": chat, "message_thread_id": topic}, nil)
+	return topicLifecycleError(c.Call(ctx, "closeForumTopic", map[string]any{"chat_id": chat, "message_thread_id": topic}, nil))
 }
 func (c *Client) GetFile(ctx context.Context, id string) (File, error) {
 	var f File
@@ -245,4 +246,15 @@ func (c *Client) Check(ctx context.Context, cfg Config) error {
 		}
 	}
 	return nil
+}
+
+func (c *Client) ReopenTopic(ctx context.Context, chat, topic int64) error {
+	return topicLifecycleError(c.Call(ctx, "reopenForumTopic", map[string]any{"chat_id": chat, "message_thread_id": topic}, nil))
+}
+func topicLifecycleError(err error) error {
+	var api *APIError
+	if errors.As(err, &api) && api.Code == 400 && strings.Contains(strings.ToUpper(api.Description), "TOPIC_NOT_MODIFIED") {
+		return nil
+	}
+	return err
 }

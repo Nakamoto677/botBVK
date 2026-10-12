@@ -81,3 +81,21 @@ func TestCurrentSourceRejectsRetiredQueueAndTopics(t *testing.T) {
 		}
 	}
 }
+
+func TestTopicLifecycleRetriesAreIdempotent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":false,"error_code":400,"description":"Bad Request: TOPIC_NOT_MODIFIED"}`))
+	}))
+	defer server.Close()
+	client := NewClient("test")
+	client.BaseURL = server.URL
+	if err := client.CloseTopic(context.Background(), -100, 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.ReopenTopic(context.Background(), -100, 10); err != nil {
+		t.Fatal(err)
+	}
+	if topicLifecycleError(&APIError{Code: 403, Description: "Forbidden"}) == nil {
+		t.Fatal("permission failure hidden")
+	}
+}
