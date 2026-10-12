@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -394,5 +395,46 @@ func TestInboundRoutingSnapshotAndCorrection(t *testing.T) {
 	}
 	if payload.RoutingDepartment != domain.OneC {
 		t.Fatal("correction route stale")
+	}
+}
+func TestNewTicketAlwaysNotifiesDispatcherWithoutTopicDependency(t *testing.T) {
+	s, f := setup()
+	ticket, err := s.Create(t.Context(), 1, domain.IT, strings.Repeat("я", 5000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := 0
+	for _, op := range f.ops {
+		if op.Kind == "dispatcher_message" {
+			found++
+			if op.TicketID != 0 {
+				t.Fatal("dispatcher waits for topic")
+			}
+			var payload struct {
+				TicketID int64  `json:"ticket_id"`
+				Text     string `json:"text"`
+			}
+			if err := json.Unmarshal(op.Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload.TicketID != ticket.ID || len([]rune(payload.Text)) > 3000 {
+				t.Fatal("bad notification")
+			}
+		}
+	}
+	if found != 1 {
+		t.Fatal("missing dispatcher notification")
+	}
+	if _, err := s.Create(t.Context(), 1, domain.IT, "duplicate"); !errors.Is(err, domain.ErrConflict) {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, op := range f.ops {
+		if op.Kind == "dispatcher_message" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatal("duplicate notification")
 	}
 }
