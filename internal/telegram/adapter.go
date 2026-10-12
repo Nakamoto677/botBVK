@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"bot-bvk/internal/domain"
@@ -23,6 +24,7 @@ type Config struct {
 	AdminIDs         []int64
 	ArchiveDir       string
 	ReportCSV        func(context.Context) (string, error)
+	BeforeDelete     func(context.Context, domain.Tx, domain.Ticket, int64, int64) error
 }
 type Service interface {
 	Register(context.Context, int64, string, int64) error
@@ -46,15 +48,16 @@ type draft struct {
 	Text       string
 }
 type Adapter struct {
-	client  *Client
-	store   domain.Store
-	service Service
-	cfg     Config
-	drafts  map[int64]draft
+	client   *Client
+	store    domain.Store
+	service  Service
+	cfg      Config
+	drafts   map[int64]draft
+	lastPoll atomic.Int64
 }
 
 func NewAdapter(c *Client, s domain.Store, v Service, cfg Config) *Adapter {
-	return &Adapter{c, s, v, cfg, make(map[int64]draft)}
+	return &Adapter{client: c, store: s, service: v, cfg: cfg, drafts: make(map[int64]draft)}
 }
 func (a *Adapter) Run(ctx context.Context) error {
 	last, err := a.store.LastUpdateID(ctx)
@@ -102,6 +105,7 @@ func (a *Adapter) Run(ctx context.Context) error {
 			}
 			continue
 		}
+		a.lastPoll.Store(time.Now().UTC().UnixNano())
 		for _, u := range updates {
 			raw, e := json.Marshal(u)
 			if e != nil {
@@ -180,8 +184,11 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 	if !user.Approved {
 		return domain.ErrForbidden
 	}
-	if text == "/requests" || strings.HasPrefix(text, "/revoke ") || strings.HasPrefix(text, "/staff ") {
+	if text == "/requests" || strings.HasPrefix(text, "/bind ") || strings.HasPrefix(text, "/retry ") || strings.HasPrefix(text, "/revoke ") || strings.HasPrefix(text, "/staff ") {
 		return a.admin(ctx, m, user)
+	}
+	if strings.HasPrefix(text, "/cancel ") || strings.HasPrefix(text, "/assign ") {
+		return a.ticketCommand(ctx, m)
 	}
 	if text == "/report" {
 		return a.report(ctx, m, user)
@@ -395,6 +402,9 @@ func (a *Adapter) staff(ctx context.Context, m *Message) error {
 		return err
 	}
 	text := strings.TrimSpace(m.Text)
+	if strings.HasPrefix(text, "/cancel ") || strings.HasPrefix(text, "/assign ") {
+		return a.ticketCommand(ctx, m)
+	}
 	if text == "/report" {
 		return a.report(ctx, m, user)
 	}
@@ -485,6 +495,10 @@ func messageText(m *Message) string {
 }
 func normalise(m *Message, public bool) domain.Message {
 	msg := domain.Message{AuthorID: m.From.ID, Text: messageText(m), TelegramChatID: m.Chat.ID, TelegramMessageID: m.ID, MediaGroupID: m.MediaGroupID, CreatedAt: time.Now().UTC()}
+	if m.EditDate != 0 {
+		at := time.Unix(m.EditDate, 0).UTC()
+		msg.EditedAt = &at
+	}
 	if m.Reply != nil {
 		msg.ReplyToMessageID = m.Reply.ID
 	}
@@ -665,4 +679,12 @@ func (a *Adapter) deleteDraft(ctx context.Context, id int64) error {
 	}
 	delete(a.drafts, id)
 	return nil
+}
+
+func (a *Adapter) LastPoll() time.Time {
+	n := a.lastPoll.Load()
+	if n == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, n).UTC()
 }

@@ -147,7 +147,7 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 	switch op.Kind {
 	case "create_topic":
 		// A binding matching this department makes a retried operation safe after a crash.
-		if t.TopicID != 0 && t.TopicChatID == team.ChatID {
+		if t.TopicID != 0 && t.TopicChatID == team.ChatID && !t.RoutingPending {
 			if payload.OldChatID != 0 && payload.OldTopicID != 0 {
 				if err = w.client.CloseTopic(ctx, payload.OldChatID, payload.OldTopicID); err != nil {
 					return err
@@ -177,6 +177,7 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 			if current.Department != t.Department || !current.Status.Active() || current.TopicID != t.TopicID || current.TopicChatID != t.TopicChatID {
 				return domain.ErrConflict
 			}
+			current.RoutingPending = false
 			current.TopicChatID = team.ChatID
 			current.TopicID = topic
 			current.QueueMessageID = 0
@@ -242,6 +243,27 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 		}
 		chat, topic := t.ClientID, int64(0)
 		if op.Kind == "team_message" {
+			if t.RoutingPending && t.TopicChatID != team.ChatID {
+				if msg.RoutingDepartment == t.Department {
+					return fmt.Errorf("new department topic pending")
+				}
+				if msg.RoutingDepartment == "" {
+					events, e := w.store.Events(ctx, t.ID)
+					if e != nil {
+						return e
+					}
+					var transferAt time.Time
+					for _, event := range events {
+						if event.Kind == "transferred" && event.CreatedAt.After(transferAt) {
+							transferAt = event.CreatedAt
+						}
+					}
+					if transferAt.IsZero() || msg.CreatedAt.IsZero() || !msg.CreatedAt.Before(transferAt) {
+						return fmt.Errorf("new department topic pending")
+					}
+				}
+			}
+
 			chat, topic = t.TopicChatID, t.TopicID
 			if topic == 0 {
 				return fmt.Errorf("topic pending")
@@ -298,7 +320,7 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 			return domain.ErrInvalid
 		}
 		current := payload.ChatID == t.TopicChatID && payload.TopicID == t.TopicID
-		if current && t.Status != domain.Closed {
+		if current && t.Status != domain.Closed && t.Status != domain.Cancelled {
 			return nil
 		}
 		if !current {
@@ -322,20 +344,30 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 				return domain.ErrForbidden
 			}
 		}
-		data, _ := json.Marshal(map[string]int64{"chat_id": payload.ChatID, "topic_id": payload.TopicID})
+		data, _ := json.Marshal(map[string]any{"chat_id": payload.ChatID, "topic_id": payload.TopicID, "key": fmt.Sprintf("cleanup:%d:%d", payload.ChatID, payload.TopicID)})
 		return w.store.Transact(ctx, func(tx domain.Tx) error {
 			now, e := tx.GetTicket(ctx, t.ID)
 			if e != nil {
 				return e
 			}
 			// Keep the ticket lock through deletion so Reopen cannot race the destructive API call.
-			if now.TopicChatID == payload.ChatID && now.TopicID == payload.TopicID && now.Status != domain.Closed {
+			if now.TopicChatID == payload.ChatID && now.TopicID == payload.TopicID && now.Status != domain.Closed && now.Status != domain.Cancelled {
 				return nil
+			}
+			if w.cfg.BeforeDelete == nil {
+				return domain.ErrForbidden
+			}
+			if e = w.cfg.BeforeDelete(ctx, tx, now, payload.ChatID, payload.TopicID); e != nil {
+				if errors.Is(e, domain.ErrConflict) {
+					proofData, _ := json.Marshal(map[string]any{"chat_id": payload.ChatID, "topic_id": payload.TopicID, "key": fmt.Sprintf("cleanup:%d:%d", payload.ChatID, payload.TopicID)})
+					return tx.AddEvent(ctx, domain.Event{TicketID: t.ID, Kind: "cleanup_deferred", Data: proofData, CreatedAt: time.Now().UTC()})
+				}
+				return e
 			}
 			if e = w.client.Call(ctx, "deleteForumTopic", map[string]any{"chat_id": payload.ChatID, "message_thread_id": payload.TopicID}, nil); e != nil {
 				return e
 			}
-			if now.TopicChatID == payload.ChatID && now.TopicID == payload.TopicID && now.Status == domain.Closed {
+			if now.TopicChatID == payload.ChatID && now.TopicID == payload.TopicID && (now.Status == domain.Closed || now.Status == domain.Cancelled) {
 				now.TopicChatID = 0
 				now.TopicID = 0
 				now.QueueMessageID = 0
@@ -357,6 +389,9 @@ func (w *Worker) retire(ctx context.Context, id, chat, topic int64) error {
 }
 func (w *Worker) refresh(ctx context.Context, t domain.Ticket) error {
 	team := w.cfg.Departments[t.Department]
+	if t.RoutingPending && t.TopicChatID != team.ChatID {
+		return nil
+	}
 	if t.QueueMessageID != 0 {
 		err := w.client.Call(ctx, "editMessageText", map[string]any{"chat_id": team.ChatID, "message_id": t.QueueMessageID, "text": card(t), "reply_markup": Markup{cardButtons(t)}}, nil)
 		var api *APIError
