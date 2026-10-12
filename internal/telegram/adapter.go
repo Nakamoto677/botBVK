@@ -19,12 +19,13 @@ type Team struct {
 	QueueTopicID int64
 }
 type Config struct {
-	Departments      map[domain.Department]Team
-	DispatcherChatID int64
-	AdminIDs         []int64
-	ArchiveDir       string
-	ReportCSV        func(context.Context) (string, error)
-	BeforeDelete     func(context.Context, domain.Tx, domain.Ticket, int64, int64) error
+	Departments       map[domain.Department]Team
+	DispatcherChatID  int64
+	AdminIDs          []int64
+	ArchiveDir        string
+	ReportCSV         func(context.Context) (string, error)
+	BeforeDelete      func(context.Context, domain.Tx, domain.Ticket, int64, int64) error
+	BusinessHoursText string
 }
 type Service interface {
 	Register(context.Context, int64, string, int64) error
@@ -337,7 +338,11 @@ func (a *Adapter) callback(ctx context.Context, c *Callback) error {
 			if err = a.deleteDraft(ctx, c.From.ID); err != nil {
 				return err
 			}
-			_, err = a.client.Send(ctx, c.From.ID, 0, fmt.Sprintf("Заявка #%d сохранена. Пишите дополнения здесь. Обычная обработка: Пн–Пт, 09:00–18:00 по Иркутску. Срочность вне графика определяет диспетчер.", t.ID), nil)
+			hours := a.cfg.BusinessHoursText
+			if hours == "" {
+				hours = "Пн–Пт, 09:00–18:00 по Иркутску"
+			}
+			_, err = a.client.Send(ctx, c.From.ID, 0, fmt.Sprintf("Заявка #%d сохранена. Пишите дополнения здесь. Обычная обработка: %s. Срочность вне графика определяет диспетчер.", t.ID, hours), nil)
 		}
 	case "cancel":
 		err = a.deleteDraft(ctx, c.From.ID)
