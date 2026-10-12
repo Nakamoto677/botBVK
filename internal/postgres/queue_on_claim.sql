@@ -31,6 +31,14 @@ INSERT INTO bvk_outbox(kind,ticket_id,payload,available_at)
 SELECT 'close_topic',id,jsonb_build_object('chat_id',topic_chat_id,'topic_id',topic_id,'pause',true),now()
 FROM bvk_tickets WHERE status='new' AND COALESCE((payload->>'assignee_id')::bigint,0)=0 AND topic_id<>0;
 
+-- Replace stale card labels and emergency buttons for active and terminal
+-- tickets. The enclosing migration marker protects this enqueue on restart.
+INSERT INTO bvk_outbox(kind,ticket_id,payload,available_at)
+SELECT 'refresh_card',id,'{}'::jsonb,now()
+FROM bvk_tickets
+WHERE COALESCE((payload->>'queue_message_id')::bigint,0)>0
+ OR COALESCE((payload->>'topic_message_id')::bigint,0)>0;
+
 -- Update both optimistic-lock representations only when the current payload
 -- changes. Emergency events and messages intentionally remain historical data.
 UPDATE bvk_tickets

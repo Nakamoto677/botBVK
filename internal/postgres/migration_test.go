@@ -202,3 +202,68 @@ func TestLegacyAssignedRoutingPreserved(t *testing.T) {
 		t.Fatalf("assigned message was deferred: %v %v", deferred, err)
 	}
 }
+
+func TestLegacyCardsRefreshedOnceIncludingClosed(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	first := seed(t, s)
+	if _, err := s.pool.Exec(ctx, "DELETE FROM bvk_migrations WHERE version='002_queue_on_claim'"); err != nil {
+		t.Fatal(err)
+	}
+	first.QueueMessageID = 10
+	var assigned, closed, invisible domain.Ticket
+	if err := s.Transact(ctx, func(tx domain.Tx) error {
+		if err := tx.SaveTicket(ctx, &first); err != nil {
+			return err
+		}
+		for _, id := range []int64{2, 3, 4} {
+			if err := tx.SaveUser(ctx, domain.User{ID: id, Role: "client", Approved: true, CompanyID: first.CompanyID}); err != nil {
+				return err
+			}
+		}
+		assigned = domain.Ticket{ClientID: 2, CompanyID: first.CompanyID, Department: domain.IT, Status: domain.InProgress, AssigneeID: 99, TopicMessageID: 20}
+		closed = domain.Ticket{ClientID: 3, CompanyID: first.CompanyID, Department: domain.IT, Status: domain.Closed, QueueMessageID: 30, TopicMessageID: 31}
+		invisible = domain.Ticket{ClientID: 4, CompanyID: first.CompanyID, Department: domain.IT, Status: domain.New}
+		for _, ticket := range []*domain.Ticket{&assigned, &closed, &invisible} {
+			if err := tx.SaveTicket(ctx, ticket); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.pool.Query(ctx, "SELECT ticket_id,state FROM bvk_outbox WHERE kind='refresh_card' ORDER BY ticket_id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[int64]string{}
+	for rows.Next() {
+		var id int64
+		var state string
+		if err := rows.Scan(&id, &state); err != nil {
+			t.Fatal(err)
+		}
+		got[id] = state
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	rows.Close()
+	if len(got) != 3 || got[first.ID] != "pending" || got[assigned.ID] != "pending" || got[closed.ID] != "pending" {
+		t.Fatalf("legacy refresh selection: %#v", got)
+	}
+	if _, exists := got[invisible.ID]; exists {
+		t.Fatal("ticket without existing cards refreshed")
+	}
+	if err = s.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err = s.pool.QueryRow(ctx, "SELECT count(*) FROM bvk_outbox WHERE kind='refresh_card'").Scan(&count); err != nil || count != 3 {
+		t.Fatalf("card refresh repeated: %d %v", count, err)
+	}
+}
