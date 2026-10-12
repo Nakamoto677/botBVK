@@ -349,3 +349,40 @@ func TestDraftPersistenceAndValidation(t *testing.T) {
 		t.Fatalf("removed draft: %v", err)
 	}
 }
+
+func TestMessageTicketAfterClosure(t *testing.T) {
+	s := testStore(t)
+	ticket := seed(t, s)
+	ctx := context.Background()
+	source := domain.Message{TicketID: ticket.ID, AuthorID: 1, Direction: "inbound", Text: "original", TelegramChatID: 1, TelegramMessageID: 321}
+	if err := s.Transact(ctx, func(tx domain.Tx) error {
+		if err := tx.AddMessage(ctx, &source); err != nil {
+			return err
+		}
+		ticket.Status = domain.Closed
+		return tx.SaveTicket(ctx, &ticket)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	replacement := domain.Ticket{ClientID: 1, CompanyID: ticket.CompanyID, Department: domain.IT, Status: domain.New}
+	if err := s.Transact(ctx, func(tx domain.Tx) error { return tx.SaveTicket(ctx, &replacement) }); err != nil {
+		t.Fatal(err)
+	}
+	found, err := s.MessageTicket(ctx, 1, 321)
+	if err != nil || found.ID != ticket.ID || found.Status != domain.Closed {
+		t.Fatalf("original ticket: %#v %v", found, err)
+	}
+	if _, err = s.MessageTicket(ctx, 1, 999); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("missing source: %v", err)
+	}
+	duplicate := source
+	duplicate.ID = 0
+	duplicate.TicketID = replacement.ID
+	duplicate.Direction = "internal"
+	if err = s.Transact(ctx, func(tx domain.Tx) error { return tx.AddMessage(ctx, &duplicate) }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.MessageTicket(ctx, 1, 321); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("ambiguous source: %v", err)
+	}
+}
