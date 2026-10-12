@@ -1,0 +1,6 @@
+.env
+config.json
+data/
+bin/
+*.exe
+coverage.out

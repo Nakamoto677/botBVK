@@ -1,0 +1,555 @@
+package telegram
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"bot-bvk/internal/domain"
+)
+
+type Worker struct {
+	client   *Client
+	store    domain.Store
+	cfg      Config
+	lastChat map[int64]time.Time
+}
+
+func NewWorker(c *Client, s domain.Store, cfg Config) *Worker {
+	return &Worker{c, s, cfg, make(map[int64]time.Time)}
+}
+func (w *Worker) Run(ctx context.Context) error {
+	for ctx.Err() == nil {
+		op, err := w.store.NextOperation(ctx)
+		if errors.Is(err, domain.ErrNotFound) {
+			if !pause(ctx, time.Second) {
+				break
+			}
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if err = w.Handle(ctx, op); err != nil {
+			dead := false
+			delay := time.Duration(1<<min(op.Attempts, 8)) * time.Second
+			var api *APIError
+			if errors.As(err, &api) {
+				if api.RetryAfter > 0 {
+					delay = time.Duration(api.RetryAfter) * time.Second
+				}
+				dead = (api.Code >= 400 && api.Code < 500 && api.Code != 429) || (op.Kind == "create_topic" && api.Ambiguous)
+			}
+			if errors.Is(err, domain.ErrInvalid) || errors.Is(err, domain.ErrForbidden) {
+				dead = true
+			}
+			dead = dead || op.Attempts >= 12
+			if e := w.store.RetryOperation(ctx, op.ID, err.Error(), delay, dead); e != nil {
+				return e
+			}
+			if dead && w.cfg.DispatcherChatID != 0 {
+				_, _ = w.client.Send(ctx, w.cfg.DispatcherChatID, 0, fmt.Sprintf("Ошибка операции %d (%s), заявка #%d. Требуется проверка: %s", op.ID, op.Kind, op.TicketID, err), nil)
+			}
+		} else if err = w.store.FinishOperation(ctx, op.ID); err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
+}
+func (w *Worker) rate(ctx context.Context, chat int64) error {
+	wait := time.Until(w.lastChat[chat].Add(3100 * time.Millisecond))
+	if wait > 0 && !pause(ctx, wait) {
+		return ctx.Err()
+	}
+	w.lastChat[chat] = time.Now()
+	return nil
+}
+func (w *Worker) send(ctx context.Context, chat, topic int64, text string, buttons [][]Button) (Message, error) {
+	if err := w.rate(ctx, chat); err != nil {
+		return Message{}, err
+	}
+	return w.client.Send(ctx, chat, topic, text, buttons)
+}
+func card(t domain.Ticket) string {
+	description := []rune(t.Description)
+	if len(description) > 2800 {
+		description = append(description[:2800], []rune("… /history")...)
+	}
+	return fmt.Sprintf("Заявка #%d · компания %d\n%s\nОтдел: %s · статус: %s\nИсполнитель: %d", t.ID, t.CompanyID, string(description), t.Department, t.Status, t.AssigneeID)
+}
+func cardButtons(t domain.Ticket) [][]Button {
+	if !t.Status.Active() {
+		return nil
+	}
+	id := fmt.Sprint(t.ID)
+	buttons := [][]Button{{{Text: "Взять", Data: "claim:" + id}, {Text: "Передать", Data: "transfer:" + id}}, {{Text: "Закрыть", Data: "close:" + id}, {Text: "Ждём клиента", Data: "waiting:" + id}, {Text: "Продолжить", Data: "resume:" + id}}, {{Text: "Авария", Data: "emergency:" + id}}}
+	chat := strings.TrimPrefix(fmt.Sprint(t.TopicChatID), "-100")
+	if t.TopicID != 0 && t.TopicChatID < 0 {
+		buttons = append(buttons, []Button{{Text: "Открыть топик", URL: fmt.Sprintf("https://t.me/c/%s/%d", chat, t.TopicID)}})
+	}
+	return buttons
+}
+func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
+	var payload struct {
+		Text       string `json:"text"`
+		UserID     int64  `json:"user_id"`
+		TicketID   int64  `json:"ticket_id"`
+		ChatID     int64  `json:"chat_id"`
+		TopicID    int64  `json:"topic_id"`
+		OldChatID  int64  `json:"old_chat_id"`
+		OldTopicID int64  `json:"old_topic_id"`
+		Reason     string `json:"reason"`
+	}
+	if len(op.Payload) > 0 {
+		if err := json.Unmarshal(op.Payload, &payload); err != nil {
+			return fmt.Errorf("%w: operation payload", domain.ErrInvalid)
+		}
+	}
+	if op.Kind == "access_request_notification" {
+		var request struct {
+			RequestID int64 `json:"request_id"`
+			UserID    int64 `json:"user_id"`
+			CompanyID int64 `json:"company_id"`
+		}
+		if err := json.Unmarshal(op.Payload, &request); err != nil {
+			return domain.ErrInvalid
+		}
+		for _, id := range w.cfg.AdminIDs {
+			if _, err := w.send(ctx, id, 0, fmt.Sprintf("Заявка на доступ #%d. Аккаунт %d, компания %d", request.RequestID, request.UserID, request.CompanyID), [][]Button{{{Text: "Одобрить", Data: fmt.Sprintf("approve:%d", request.RequestID)}, {Text: "Отклонить", Data: fmt.Sprintf("reject:%d", request.RequestID)}}}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if op.Kind == "access_notification" {
+		_, err := w.send(ctx, payload.UserID, 0, payload.Text, nil)
+		return err
+	}
+	if op.Kind == "dispatcher_message" {
+		var buttons [][]Button
+		if payload.TicketID > 0 {
+			t, err := w.store.Ticket(ctx, payload.TicketID)
+			if err != nil {
+				return err
+			}
+			if t.Status.Active() {
+				buttons = [][]Button{{{Text: "Авария", Data: fmt.Sprintf("emergency:%d", t.ID)}}}
+			}
+			if t.TopicChatID < 0 && t.TopicID != 0 && !t.RoutingPending {
+				chat := strings.TrimPrefix(fmt.Sprint(t.TopicChatID), "-100")
+				buttons = append(buttons, []Button{{Text: "Открыть", URL: fmt.Sprintf("https://t.me/c/%s/%d", chat, t.TopicID)}})
+			}
+		}
+		_, err := w.send(ctx, w.cfg.DispatcherChatID, 0, payload.Text, buttons)
+		return err
+	}
+
+	t, err := w.store.Ticket(ctx, op.TicketID)
+	if err != nil {
+		return err
+	}
+	team, ok := w.cfg.Departments[t.Department]
+	if !ok {
+		return domain.ErrInvalid
+	}
+	switch op.Kind {
+	case "create_topic":
+		// A binding matching this department makes a retried operation safe after a crash.
+		if t.TopicID != 0 && t.TopicChatID == team.ChatID && !t.RoutingPending {
+			t, err = w.ensureTopicCard(ctx, t)
+			if err != nil {
+				return err
+			}
+			if payload.OldChatID != 0 && payload.OldTopicID != 0 {
+				if err = w.client.CloseTopic(ctx, payload.OldChatID, payload.OldTopicID); err != nil {
+					return err
+				}
+				if err = w.retire(ctx, t.ID, payload.OldChatID, payload.OldTopicID); err != nil {
+					return err
+				}
+			}
+			return w.refresh(ctx, t)
+		}
+		if !t.Status.Active() {
+			return nil
+		}
+		if err = w.rate(ctx, team.ChatID); err != nil {
+			return err
+		}
+		topic, err := w.client.Topic(ctx, team.ChatID, fmt.Sprintf("#%d · компания %d", t.ID, t.CompanyID))
+		if err != nil {
+			return err
+		}
+		bound := false
+		err = w.store.Transact(ctx, func(tx domain.Tx) error {
+			current, e := tx.GetTicket(ctx, t.ID)
+			if e != nil {
+				return e
+			}
+			if current.Department != t.Department || !current.Status.Active() || current.TopicID != t.TopicID || current.TopicChatID != t.TopicChatID {
+				return domain.ErrConflict
+			}
+			current.RoutingPending = false
+			current.TopicChatID = team.ChatID
+			current.TopicID = topic
+			current.QueueMessageID = 0
+			current.TopicMessageID = 0
+			if e = tx.SaveTicket(ctx, &current); e != nil {
+				return e
+			}
+			t = current
+			bound = true
+			return nil
+		})
+		if err != nil {
+			_ = w.client.CloseTopic(ctx, team.ChatID, topic)
+			return err
+		}
+		if !bound {
+			return domain.ErrConflict
+		}
+		t, err = w.ensureTopicCard(ctx, t)
+		if err != nil {
+			return err
+		}
+		if payload.Reason != "" {
+			if _, err = w.send(ctx, t.TopicChatID, t.TopicID, "Причина передачи: "+payload.Reason, nil); err != nil {
+				return err
+			}
+		}
+		if payload.OldChatID != 0 && payload.OldTopicID != 0 {
+			if err = w.client.CloseTopic(ctx, payload.OldChatID, payload.OldTopicID); err != nil {
+				return err
+			}
+			if err = w.retire(ctx, t.ID, payload.OldChatID, payload.OldTopicID); err != nil {
+				return err
+			}
+		}
+		return w.refresh(ctx, t)
+	case "refresh_card":
+		return w.refresh(ctx, t)
+	case "team_notification":
+		_, err = w.send(ctx, team.ChatID, team.QueueTopicID, payload.Text, nil)
+		return err
+	case "notify_client":
+		buttons := [][]Button(nil)
+		if t.Status == domain.Closed {
+			buttons = [][]Button{{{Text: "Открыть повторно", Data: fmt.Sprintf("reopen:%d", t.ID)}}}
+		}
+		_, err = w.send(ctx, t.ClientID, 0, payload.Text, buttons)
+		return err
+	case "archive_message":
+		var msg domain.Message
+		if err = json.Unmarshal(op.Payload, &msg); err != nil {
+			return domain.ErrInvalid
+		}
+		return w.archive(ctx, t, msg)
+	case "client_message", "team_message":
+		var msg domain.Message
+		if err = json.Unmarshal(op.Payload, &msg); err != nil {
+			return domain.ErrInvalid
+		}
+		if msg.FileID != "" {
+			if err = w.archive(ctx, t, msg); err != nil {
+				return err
+			}
+		}
+		chat, topic := t.ClientID, int64(0)
+		if op.Kind == "team_message" {
+			if t.RoutingPending && t.TopicChatID != team.ChatID {
+				if msg.RoutingDepartment == t.Department {
+					return fmt.Errorf("new department topic pending")
+				}
+				if msg.RoutingDepartment == "" {
+					events, e := w.store.Events(ctx, t.ID)
+					if e != nil {
+						return e
+					}
+					var transferAt time.Time
+					for _, event := range events {
+						if event.Kind == "transferred" && event.CreatedAt.After(transferAt) {
+							transferAt = event.CreatedAt
+						}
+					}
+					if transferAt.IsZero() || msg.CreatedAt.IsZero() || !msg.CreatedAt.Before(transferAt) {
+						return fmt.Errorf("new department topic pending")
+					}
+				}
+			}
+
+			chat, topic = t.TopicChatID, t.TopicID
+			if topic == 0 {
+				return fmt.Errorf("topic pending")
+			}
+		}
+		sent, e := w.deliver(ctx, chat, topic, msg, op.Kind == "team_message")
+		if e != nil {
+			return e
+		}
+		data, _ := json.Marshal(map[string]any{"source_message_id": msg.ID, "telegram_chat_id": chat, "telegram_message_id": sent.ID, "direction": msg.Direction})
+		return w.store.Transact(ctx, func(tx domain.Tx) error {
+			if op.Kind == "client_message" {
+				current, e := tx.GetTicket(ctx, t.ID)
+				if e != nil {
+					return e
+				}
+				if current.FirstResponseAt == nil {
+					now := time.Now().UTC()
+					current.FirstResponseAt = &now
+					if e = tx.SaveTicket(ctx, &current); e != nil {
+						return e
+					}
+					if e = tx.AddEvent(ctx, domain.Event{TicketID: t.ID, ActorID: msg.AuthorID, Kind: "first_response", CreatedAt: now, Data: json.RawMessage(`{}`)}); e != nil {
+						return e
+					}
+				}
+			}
+			return tx.AddEvent(ctx, domain.Event{TicketID: t.ID, ActorID: msg.AuthorID, Kind: "message_delivered", Data: data, CreatedAt: time.Now().UTC()})
+		})
+	case "close_topic":
+		if payload.ChatID == 0 {
+			payload.ChatID = t.TopicChatID
+		}
+		if payload.TopicID == 0 {
+			payload.TopicID = t.TopicID
+		}
+		if payload.TopicID == 0 {
+			return nil
+		}
+		if payload.ChatID == t.TopicChatID && payload.TopicID == t.TopicID && t.Status.Active() {
+			return nil
+		}
+		return w.client.CloseTopic(ctx, payload.ChatID, payload.TopicID)
+	case "reopen_topic":
+		if t.TopicID == 0 || !t.Status.Active() {
+			return nil
+		}
+		if err = w.client.ReopenTopic(ctx, t.TopicChatID, t.TopicID); err != nil {
+			return err
+		}
+		return w.refresh(ctx, t)
+	case "delete_topic":
+		if payload.ChatID == 0 || payload.TopicID == 0 {
+			return domain.ErrInvalid
+		}
+		current := payload.ChatID == t.TopicChatID && payload.TopicID == t.TopicID
+		if current && t.Status != domain.Closed && t.Status != domain.Cancelled {
+			return nil
+		}
+		if !current {
+			events, e := w.store.Events(ctx, t.ID)
+			if e != nil {
+				return e
+			}
+			retired := false
+			for _, event := range events {
+				if event.Kind == "topic_retired" {
+					var binding struct {
+						ChatID  int64 `json:"chat_id"`
+						TopicID int64 `json:"topic_id"`
+					}
+					if json.Unmarshal(event.Data, &binding) == nil && binding.ChatID == payload.ChatID && binding.TopicID == payload.TopicID {
+						retired = true
+					}
+				}
+			}
+			if !retired {
+				return domain.ErrForbidden
+			}
+		}
+		data, _ := json.Marshal(map[string]any{"chat_id": payload.ChatID, "topic_id": payload.TopicID, "key": fmt.Sprintf("cleanup:%d:%d", payload.ChatID, payload.TopicID)})
+		return w.store.Transact(ctx, func(tx domain.Tx) error {
+			now, e := tx.GetTicket(ctx, t.ID)
+			if e != nil {
+				return e
+			}
+			// Keep the ticket lock through deletion so Reopen cannot race the destructive API call.
+			if now.TopicChatID == payload.ChatID && now.TopicID == payload.TopicID && now.Status != domain.Closed && now.Status != domain.Cancelled {
+				return nil
+			}
+			if w.cfg.BeforeDelete == nil {
+				return domain.ErrForbidden
+			}
+			if e = w.cfg.BeforeDelete(ctx, tx, now, payload.ChatID, payload.TopicID); e != nil {
+				if errors.Is(e, domain.ErrConflict) {
+					proofData, _ := json.Marshal(map[string]any{"chat_id": payload.ChatID, "topic_id": payload.TopicID, "key": fmt.Sprintf("cleanup:%d:%d", payload.ChatID, payload.TopicID)})
+					return tx.AddEvent(ctx, domain.Event{TicketID: t.ID, Kind: "cleanup_deferred", Data: proofData, CreatedAt: time.Now().UTC()})
+				}
+				return e
+			}
+			if e = w.client.Call(ctx, "deleteForumTopic", map[string]any{"chat_id": payload.ChatID, "message_thread_id": payload.TopicID}, nil); e != nil {
+				return e
+			}
+			if now.TopicChatID == payload.ChatID && now.TopicID == payload.TopicID && (now.Status == domain.Closed || now.Status == domain.Cancelled) {
+				now.TopicChatID = 0
+				now.TopicID = 0
+				now.QueueMessageID = 0
+				now.TopicMessageID = 0
+				if e = tx.SaveTicket(ctx, &now); e != nil {
+					return e
+				}
+			}
+			return tx.AddEvent(ctx, domain.Event{TicketID: t.ID, Kind: "topic_deleted", Data: data, CreatedAt: time.Now().UTC()})
+		})
+	default:
+		return domain.ErrInvalid
+	}
+}
+func (w *Worker) retire(ctx context.Context, id, chat, topic int64) error {
+	data, _ := json.Marshal(map[string]int64{"chat_id": chat, "topic_id": topic})
+	return w.store.Transact(ctx, func(tx domain.Tx) error {
+		return tx.AddEvent(ctx, domain.Event{TicketID: id, Kind: "topic_retired", Data: data, CreatedAt: time.Now().UTC()})
+	})
+}
+func (w *Worker) refresh(ctx context.Context, t domain.Ticket) error {
+	team := w.cfg.Departments[t.Department]
+	if t.RoutingPending && t.TopicChatID != team.ChatID {
+		return nil
+	}
+	if t.QueueMessageID != 0 {
+		err := w.client.Call(ctx, "editMessageText", map[string]any{"chat_id": team.ChatID, "message_id": t.QueueMessageID, "text": card(t), "reply_markup": Markup{cardButtons(t)}}, nil)
+		var api *APIError
+		if errors.As(err, &api) && strings.Contains(api.Description, "message is not modified") {
+			return nil
+		}
+		return err
+	}
+	sent, err := w.send(ctx, team.ChatID, team.QueueTopicID, card(t), cardButtons(t))
+	if err != nil {
+		return err
+	}
+	return w.store.Transact(ctx, func(tx domain.Tx) error {
+		now, e := tx.GetTicket(ctx, t.ID)
+		if e != nil {
+			return e
+		}
+		if now.TopicID != t.TopicID || now.Department != t.Department {
+			return nil
+		}
+		now.QueueMessageID = sent.ID
+		return tx.SaveTicket(ctx, &now)
+	})
+}
+func (w *Worker) deliver(ctx context.Context, chat, topic int64, msg domain.Message, toTeam bool) (Message, error) {
+	text := msg.Text
+	if toTeam && msg.FileID == "" && len([]rune(text)) < 4000 {
+		text = fmt.Sprintf("Клиент %d:\n%s", msg.AuthorID, text)
+	}
+	if msg.FileID == "" {
+		return w.send(ctx, chat, topic, text, nil)
+	}
+	if err := w.rate(ctx, chat); err != nil {
+		return Message{}, err
+	}
+	method := map[string]string{"document": "sendDocument", "photo": "sendPhoto", "voice": "sendVoice", "video": "sendVideo", "audio": "sendAudio"}[msg.MediaType]
+	if method == "" {
+		return Message{}, domain.ErrInvalid
+	}
+	p := map[string]any{"chat_id": chat, msg.MediaType: msg.FileID, "caption": text}
+	if topic != 0 {
+		p["message_thread_id"] = topic
+	}
+	var result Message
+	err := w.client.Call(ctx, method, p, &result)
+	return result, err
+}
+func (w *Worker) archive(ctx context.Context, t domain.Ticket, msg domain.Message) error {
+	if w.cfg.ArchiveDir == "" || msg.FileSize > 20<<20 {
+		return nil
+	}
+	messages, err := w.store.Messages(ctx, t.ID)
+	if err != nil {
+		return err
+	}
+	for _, m := range messages {
+		if m.TelegramChatID == msg.TelegramChatID && m.TelegramMessageID == msg.TelegramMessageID {
+			msg = m
+			break
+		}
+	}
+	if msg.ID == 0 {
+		return fmt.Errorf("message missing for archive")
+	}
+	if msg.ArchivePath != "" && msg.SHA256 != "" {
+		return nil
+	}
+	file, err := w.client.GetFile(ctx, msg.FileID)
+	if err != nil {
+		return err
+	}
+	if file.Size > 20<<20 {
+		return nil
+	}
+	r, err := w.client.Download(ctx, file.Path)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	dir := filepath.Join(w.cfg.ArchiveDir, fmt.Sprint(t.ID))
+	if err = os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(dir, "archive-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	hash := sha256.New()
+	n, err := io.Copy(io.MultiWriter(f, hash), io.LimitReader(r, (20<<20)+1))
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	if n > 20<<20 {
+		return nil
+	}
+	path := filepath.Join(dir, fmt.Sprintf("%d.bin", msg.ID))
+	if err = os.Rename(tmp, path); err != nil {
+		return err
+	}
+	return w.store.SaveArchive(ctx, msg.ID, path, hex.EncodeToString(hash.Sum(nil)))
+}
+
+func (w *Worker) ensureTopicCard(ctx context.Context, t domain.Ticket) (domain.Ticket, error) {
+	if t.TopicMessageID != 0 {
+		return t, nil
+	}
+	if t.TopicID == 0 {
+		return t, domain.ErrConflict
+	}
+	sent, err := w.send(ctx, t.TopicChatID, t.TopicID, card(t)+"\nИстория: /history", cardButtons(t))
+	if err != nil {
+		return t, err
+	}
+	err = w.store.Transact(ctx, func(tx domain.Tx) error {
+		current, e := tx.GetTicket(ctx, t.ID)
+		if e != nil {
+			return e
+		}
+		if current.TopicChatID != t.TopicChatID || current.TopicID != t.TopicID || current.Department != t.Department {
+			return domain.ErrConflict
+		}
+		current.TopicMessageID = sent.ID
+		if e = tx.SaveTicket(ctx, &current); e != nil {
+			return e
+		}
+		data, _ := json.Marshal(map[string]any{"source_message_id": 0, "telegram_chat_id": t.TopicChatID, "telegram_message_id": sent.ID, "direction": "inbound", "initial_description": true})
+		if e = tx.AddEvent(ctx, domain.Event{TicketID: t.ID, ActorID: t.ClientID, Kind: "message_delivered", Data: data, CreatedAt: time.Now().UTC()}); e != nil {
+			return e
+		}
+		t = current
+		return nil
+	})
+	return t, err
+}
