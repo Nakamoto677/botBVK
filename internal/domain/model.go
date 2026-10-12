@@ -67,12 +67,15 @@ type Ticket struct {
 	TopicChatID     int64      `json:"topic_chat_id"`
 	TopicID         int64      `json:"topic_id"`
 	QueueMessageID  int64      `json:"queue_message_id"`
+	TopicMessageID  int64      `json:"topic_message_id"`
+	RoutingPending  bool       `json:"routing_pending"`
 }
 type MessageRevision struct {
 	Text     string
 	EditedAt time.Time
 }
 type Message struct {
+	RoutingDepartment Department `json:"routing_department"`
 	ID                int64
 	TicketID          int64
 	AuthorID          int64
