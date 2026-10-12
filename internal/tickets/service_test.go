@@ -78,6 +78,13 @@ func (tx fakeTx) SaveTicket(_ context.Context, t *domain.Ticket) error {
 	return nil
 }
 func (tx fakeTx) AddMessage(_ context.Context, m *domain.Message) error {
+	if m.TelegramChatID != 0 && m.TelegramMessageID != 0 {
+		for _, old := range tx.f.messages {
+			if old.TelegramChatID == m.TelegramChatID && old.TelegramMessageID == m.TelegramMessageID && old.Direction == m.Direction {
+				return domain.ErrConflict
+			}
+		}
+	}
 	m.ID = int64(len(tx.f.messages) + 1)
 	tx.f.messages = append(tx.f.messages, *m)
 	return nil
@@ -527,5 +534,80 @@ func TestClaimGenerationSurvivesCloseReopenAndRejectsOldProvision(t *testing.T) 
 	_ = json.Unmarshal(f.ops[before].Payload, &secondPayload)
 	if f.ops[before].Kind != "reopen_topic" || secondPayload["routing_generation"] != float64(current.RoutingGeneration) {
 		t.Fatal(secondPayload)
+	}
+}
+func TestCloseAttachmentPreservesSourceAndArchivesAtomically(t *testing.T) {
+	s, f := setup()
+	ticket, _ := s.Create(t.Context(), 1, domain.IT, "help")
+	_ = s.Claim(t.Context(), 2, ticket.ID)
+	before := len(f.ops)
+	msg := domain.Message{ID: 99, AuthorID: 999, TicketID: 999, Text: "result screenshot", FileID: "file", MediaType: "photo", TelegramChatID: -100, TelegramMessageID: 123, ArchivePath: "spoof", SHA256: "spoof", DeferredDelivery: true}
+	if err := s.CloseWithMessage(t.Context(), 2, ticket.ID, "fixed", msg); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.messages) != 1 {
+		t.Fatal(f.messages)
+	}
+	got := f.messages[0]
+	if got.ID == 99 || got.AuthorID != 2 || got.TicketID != ticket.ID || got.Direction != "internal" || got.TelegramChatID != -100 || got.TelegramMessageID != 123 || got.FileID != "file" || got.Text != msg.Text || got.ArchivePath != "" || got.SHA256 != "" || got.DeferredDelivery || !got.CreatedAt.Equal(s.now()) {
+		t.Fatal(got)
+	}
+	if f.ops[before].Kind != "archive_message" || f.ops[before+1].Kind != "close_topic" || f.tickets[ticket.ID].Status != domain.Closed {
+		t.Fatal("action order")
+	}
+}
+func TestActionAttachmentRollbackOnForbiddenOrOutboxFailure(t *testing.T) {
+	s, f := setup()
+	ticket, _ := s.Create(t.Context(), 1, domain.IT, "help")
+	_ = s.Claim(t.Context(), 2, ticket.ID)
+	msg := domain.Message{FileID: "file", TelegramChatID: -100, TelegramMessageID: 123}
+	beforeEvents, beforeOps := len(f.events), len(f.ops)
+	if err := s.CloseWithMessage(t.Context(), 3, ticket.ID, "fixed", msg); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatal(err)
+	}
+	if len(f.messages) != 0 || len(f.events) != beforeEvents || len(f.ops) != beforeOps {
+		t.Fatal("forbidden file accepted")
+	}
+	f.failEnqueue = true
+	if err := s.CloseWithMessage(t.Context(), 2, ticket.ID, "fixed", msg); err == nil {
+		t.Fatal("expected outbox error")
+	}
+	if len(f.messages) != 0 || len(f.events) != beforeEvents || len(f.ops) != beforeOps || f.tickets[ticket.ID].Status != domain.InProgress {
+		t.Fatal("partial close")
+	}
+	f.failEnqueue = false
+	v := f.tickets[ticket.ID]
+	v.RoutingPending = false
+	f.tickets[v.ID] = v
+	f.failEnqueue = true
+	if err := s.TransferWithMessage(t.Context(), 2, v.ID, domain.OneC, "wrong team", msg); err == nil {
+		t.Fatal("expected transfer failure")
+	}
+	if len(f.messages) != 0 || len(f.events) != beforeEvents || len(f.ops) != beforeOps || f.tickets[ticket.ID].Department != domain.IT {
+		t.Fatal("partial transfer")
+	}
+}
+func TestTransferAttachmentAndDuplicateSourceRollback(t *testing.T) {
+	s, f := setup()
+	ticket, _ := s.Create(t.Context(), 1, domain.IT, "help")
+	msg := domain.Message{Text: "diagnostics", FileID: "file", TelegramChatID: -100, TelegramMessageID: 123}
+	if err := s.TransferWithMessage(t.Context(), 2, ticket.ID, domain.OneC, "wrong team", msg); err != nil {
+		t.Fatal(err)
+	}
+	if f.tickets[ticket.ID].Department != domain.OneC || f.messages[0].AuthorID != 2 || f.messages[0].FileID != "file" {
+		t.Fatal("transfer lost attachment")
+	}
+	beforeEvents, beforeOps := len(f.events), len(f.ops)
+	if err := s.TransferWithMessage(t.Context(), 3, ticket.ID, domain.IT, "return", msg); !errors.Is(err, domain.ErrConflict) {
+		t.Fatal(err)
+	}
+	if len(f.messages) != 1 || len(f.events) != beforeEvents || len(f.ops) != beforeOps || f.tickets[ticket.ID].Department != domain.OneC {
+		t.Fatal("duplicate source committed transfer")
+	}
+	if err := s.TransferWithMessage(t.Context(), 3, ticket.ID, domain.IT, "return", domain.Message{Text: "plain reason"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.messages) != 1 {
+		t.Fatal("plain reason duplicated row")
 	}
 }

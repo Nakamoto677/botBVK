@@ -182,6 +182,14 @@ func (s *Service) Claim(ctx context.Context, actorID, ticketID int64) error {
 	})
 }
 func (s *Service) Transfer(ctx context.Context, actorID, ticketID int64, department domain.Department, reason string) error {
+	return s.transfer(ctx, actorID, ticketID, department, reason, nil)
+}
+
+func (s *Service) TransferWithMessage(ctx context.Context, actorID, ticketID int64, department domain.Department, reason string, msg domain.Message) error {
+	return s.transfer(ctx, actorID, ticketID, department, reason, &msg)
+}
+
+func (s *Service) transfer(ctx context.Context, actorID, ticketID int64, department domain.Department, reason string, msg *domain.Message) error {
 	if !department.Valid() || strings.TrimSpace(reason) == "" {
 		return domain.ErrInvalid
 	}
@@ -191,6 +199,9 @@ func (s *Service) Transfer(ctx context.Context, actorID, ticketID int64, departm
 		}
 		if !t.Status.Active() || t.Department == department || t.RoutingPending {
 			return domain.ErrConflict
+		}
+		if err := s.actionAttachment(ctx, tx, *t, u, msg); err != nil {
+			return err
 		}
 		oldDept := t.Department
 		oldChat, oldTopic, oldQueue := t.TopicChatID, t.TopicID, t.QueueMessageID
@@ -222,6 +233,14 @@ func (s *Service) Transfer(ctx context.Context, actorID, ticketID int64, departm
 	})
 }
 func (s *Service) Close(ctx context.Context, actorID, ticketID int64, resolution string) error {
+	return s.close(ctx, actorID, ticketID, resolution, nil)
+}
+
+func (s *Service) CloseWithMessage(ctx context.Context, actorID, ticketID int64, resolution string, msg domain.Message) error {
+	return s.close(ctx, actorID, ticketID, resolution, &msg)
+}
+
+func (s *Service) close(ctx context.Context, actorID, ticketID int64, resolution string, msg *domain.Message) error {
 	if strings.TrimSpace(resolution) == "" {
 		return domain.ErrInvalid
 	}
@@ -231,6 +250,9 @@ func (s *Service) Close(ctx context.Context, actorID, ticketID int64, resolution
 		}
 		if !t.Status.Active() {
 			return domain.ErrConflict
+		}
+		if err := s.actionAttachment(ctx, tx, *t, u, msg); err != nil {
+			return err
 		}
 		now := s.now()
 		t.Status = domain.Closed
@@ -490,4 +512,31 @@ func (s *Service) activateTopic(ctx context.Context, tx domain.Tx, t domain.Tick
 		return s.enqueue(ctx, tx, t, "reopen_topic", map[string]any{"routing_generation": t.RoutingGeneration})
 	}
 	return s.enqueue(ctx, tx, t, "create_topic", map[string]any{"old_chat_id": 0, "old_topic_id": 0, "reason": "", "routing_generation": t.RoutingGeneration})
+}
+
+// actionAttachment retains a prompt attachment as an internal note in the same
+// transaction as its state change. Text-only reasons are already captured in events.
+func (s *Service) actionAttachment(ctx context.Context, tx domain.Tx, t domain.Ticket, u domain.User, input *domain.Message) error {
+	if input == nil || input.FileID == "" {
+		return nil
+	}
+	msg := *input
+	msg.ID = 0
+	msg.TicketID = t.ID
+	msg.AuthorID = u.ID
+	msg.Direction = "internal"
+	msg.CreatedAt = s.now()
+	msg.EditedAt = nil
+	msg.Revisions = nil
+	msg.ArchivePath = ""
+	msg.SHA256 = ""
+	msg.DeferredDelivery = false
+	msg.RoutingDepartment = t.Department
+	if err := tx.AddMessage(ctx, &msg); err != nil {
+		return err
+	}
+	if err := s.event(ctx, tx, t, u.ID, "message", map[string]any{"message_id": msg.ID, "direction": msg.Direction, "action_attachment": true}); err != nil {
+		return err
+	}
+	return s.enqueue(ctx, tx, t, "archive_message", msg)
 }
