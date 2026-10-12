@@ -13,7 +13,7 @@ func TestLegacyQueueOnClaimMigration(t *testing.T) {
 	ctx := context.Background()
 	ticket := seed(t, s)
 	// Recreate pre-upgrade state after the fixture's initial schema setup.
-	if _, err := s.pool.Exec(ctx, "DELETE FROM bvk_migrations WHERE version='002_queue_on_claim'"); err != nil {
+	if _, err := s.pool.Exec(ctx, "DELETE FROM bvk_migrations WHERE version IN ('002_queue_on_claim','003_refresh_cards')"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.pool.Exec(ctx, `UPDATE bvk_tickets SET topic_chat_id=-100,topic_id=22,payload=payload||'{"topic_chat_id":-100,"topic_id":22,"routing_pending":true,"emergency":true}'::jsonb WHERE id=$1`, ticket.ID); err != nil {
@@ -171,7 +171,7 @@ func TestLegacyAssignedRoutingPreserved(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	ticket := seed(t, s)
-	if _, err := s.pool.Exec(ctx, "DELETE FROM bvk_migrations WHERE version='002_queue_on_claim'"); err != nil {
+	if _, err := s.pool.Exec(ctx, "DELETE FROM bvk_migrations WHERE version IN ('002_queue_on_claim','003_refresh_cards')"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.pool.Exec(ctx, `UPDATE bvk_tickets SET status='in_progress',payload=payload||'{"status":"in_progress","assignee_id":99,"routing_pending":true,"emergency":false}'::jsonb WHERE id=$1`, ticket.ID); err != nil {
@@ -207,7 +207,7 @@ func TestLegacyCardsRefreshedOnceIncludingClosed(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	first := seed(t, s)
-	if _, err := s.pool.Exec(ctx, "DELETE FROM bvk_migrations WHERE version='002_queue_on_claim'"); err != nil {
+	if _, err := s.pool.Exec(ctx, "DELETE FROM bvk_migrations WHERE version IN ('002_queue_on_claim','003_refresh_cards')"); err != nil {
 		t.Fatal(err)
 	}
 	first.QueueMessageID = 10
@@ -265,5 +265,36 @@ func TestLegacyCardsRefreshedOnceIncludingClosed(t *testing.T) {
 	var count int
 	if err = s.pool.QueryRow(ctx, "SELECT count(*) FROM bvk_outbox WHERE kind='refresh_card'").Scan(&count); err != nil || count != 3 {
 		t.Fatalf("card refresh repeated: %d %v", count, err)
+	}
+}
+
+func TestCardRefreshMigrationRunsAfterRoutingUpgrade(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	v := seed(t, s)
+	if err := s.Transact(ctx, func(tx domain.Tx) error {
+		t, err := tx.GetTicket(ctx, v.ID)
+		if err != nil {
+			return err
+		}
+		t.QueueMessageID = 88
+		return tx.SaveTicket(ctx, &t)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, "DELETE FROM bvk_migrations WHERE version='003_refresh_cards'"); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := s.Migrate(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var count int
+	if err := s.pool.QueryRow(ctx, "SELECT count(*) FROM bvk_outbox WHERE kind='refresh_card' AND ticket_id=$1", v.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("expected one card refresh after earlier routing upgrade, got %d", count)
 	}
 }

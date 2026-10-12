@@ -21,7 +21,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-func TestWorkflowPreservesQueuedMessagesAcrossTransfer(t *testing.T) {
+func TestWorkflowQueuesUntilClaimAndPreservesMessagesAcrossTransfer(t *testing.T) {
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
 		t.Skip("TEST_DATABASE_URL not set")
@@ -71,8 +71,13 @@ func TestWorkflowPreservesQueuedMessagesAcrossTransfer(t *testing.T) {
 	}
 	var mu sync.Mutex
 	var sends []map[string]any
+	createdTopics, reopenedTopics := 0, 0
 	counter := 100
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/file/") {
+			_, _ = w.Write([]byte("resolution-file"))
+			return
+		}
 		var p map[string]any
 		json.NewDecoder(r.Body).Decode(&p)
 		method := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
@@ -82,7 +87,12 @@ func TestWorkflowPreservesQueuedMessagesAcrossTransfer(t *testing.T) {
 		var result any = true
 		switch method {
 		case "createForumTopic":
+			createdTopics++
 			result = map[string]any{"message_thread_id": counter}
+		case "reopenForumTopic":
+			reopenedTopics++
+		case "getFile":
+			result = map[string]any{"file_id": "resolution-file", "file_path": "resolution.bin", "file_size": 15}
 		case "sendMessage":
 			sends = append(sends, p)
 			result = map[string]any{"message_id": counter, "chat": map[string]any{"id": p["chat_id"]}}
@@ -92,7 +102,7 @@ func TestWorkflowPreservesQueuedMessagesAcrossTransfer(t *testing.T) {
 	defer server.Close()
 	client := telegram.NewClient("test")
 	client.BaseURL = server.URL
-	cfg := telegram.Config{Departments: map[domain.Department]telegram.Team{domain.IT: {ChatID: -1001, QueueTopicID: 2}, domain.OneC: {ChatID: -1002, QueueTopicID: 2}}, DispatcherChatID: -1003, ArchiveDir: t.TempDir()}
+	cfg := telegram.Config{Departments: map[domain.Department]telegram.Team{domain.IT: {ChatID: -1001, QueueTopicID: 2}, domain.OneC: {ChatID: -1002, QueueTopicID: 2}}, ArchiveDir: t.TempDir()}
 	worker := telegram.NewWorker(client, store, cfg)
 	drain := func() {
 		t.Helper()
@@ -120,10 +130,24 @@ func TestWorkflowPreservesQueuedMessagesAcrossTransfer(t *testing.T) {
 		t.Fatal(err)
 	}
 	drain()
+	queued, _ := store.Ticket(ctx, ticket.ID)
+	if queued.TopicID != 0 || queued.QueueMessageID == 0 || createdTopics != 0 {
+		t.Fatalf("unclaimed ticket not queue-only: %+v, created=%d", queued, createdTopics)
+	}
+	if err = svc.AddMessage(ctx, 1, ticket.ID, domain.Message{Text: "before-claim", TelegramChatID: 1, TelegramMessageID: 9}, false); err != nil {
+		t.Fatal(err)
+	}
+	drain()
+	if createdTopics != 0 {
+		t.Fatal("client supplement created a topic before claim")
+	}
 	if err = svc.Claim(ctx, 2, ticket.ID); err != nil {
 		t.Fatal(err)
 	}
 	drain()
+	if createdTopics != 1 {
+		t.Fatalf("claim did not create exactly one topic: %d", createdTopics)
+	}
 	if err = svc.AddMessage(ctx, 1, ticket.ID, domain.Message{Text: "before-transfer", TelegramChatID: 1, TelegramMessageID: 10}, false); err != nil {
 		t.Fatal(err)
 	}
@@ -134,6 +158,17 @@ func TestWorkflowPreservesQueuedMessagesAcrossTransfer(t *testing.T) {
 		t.Fatal(err)
 	}
 	drain()
+	transferred, _ := store.Ticket(ctx, ticket.ID)
+	if transferred.TopicID != 0 || transferred.Status != domain.New || createdTopics != 1 {
+		t.Fatal("transfer created target topic before new team claimed")
+	}
+	if err = svc.Claim(ctx, 2, ticket.ID); err != nil {
+		t.Fatal(err)
+	}
+	drain()
+	if createdTopics != 2 {
+		t.Fatalf("second team claim created %d total topics", createdTopics)
+	}
 	for text, chat := range map[string]float64{"before-transfer": -1001, "after-transfer": -1002} {
 		found := false
 		mu.Lock()
@@ -151,10 +186,6 @@ func TestWorkflowPreservesQueuedMessagesAcrossTransfer(t *testing.T) {
 			t.Errorf("lost %s", text)
 		}
 	}
-	if err = svc.Claim(ctx, 2, ticket.ID); err != nil {
-		t.Fatal(err)
-	}
-	drain()
 	if err = svc.AddMessage(ctx, 2, ticket.ID, domain.Message{Text: "Password reset", TelegramChatID: -1002, TelegramMessageID: 20}, true); err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +198,7 @@ func TestWorkflowPreservesQueuedMessagesAcrossTransfer(t *testing.T) {
 	if delivered.FirstResponseAt == nil {
 		t.Fatal("delivered response missing timestamp")
 	}
-	if err = svc.Close(ctx, 2, ticket.ID, "Reset credentials"); err != nil {
+	if err = svc.CloseWithMessage(ctx, 2, ticket.ID, "Reset credentials", domain.Message{Text: "Reset credentials", TelegramChatID: -1002, TelegramMessageID: 21, FileID: "resolution-file", MediaType: "document", FileName: "resolution.txt", FileSize: 15}); err != nil {
 		t.Fatal(err)
 	}
 	drain()
@@ -180,11 +211,15 @@ func TestWorkflowPreservesQueuedMessagesAcrossTransfer(t *testing.T) {
 	}
 	drain()
 	reopened, _ := store.Ticket(ctx, ticket.ID)
-	if !reopened.Status.Active() {
-		t.Fatal("reopen failed")
+	if reopened.Status != domain.New || reopenedTopics != 0 {
+		t.Fatal("reopen must queue ticket without reopening topic before claim")
 	}
 	messages, _ := store.Messages(ctx, ticket.ID)
-	if len(messages) != 3 {
+	if len(messages) != 5 {
 		t.Fatalf("archive lost messages: %d", len(messages))
+	}
+	last := messages[len(messages)-1]
+	if last.FileID != "resolution-file" || last.ArchivePath == "" || len(last.SHA256) != 64 {
+		t.Fatalf("closure attachment was not archived: %+v", last)
 	}
 }

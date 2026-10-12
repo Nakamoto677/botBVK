@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -14,7 +15,6 @@ import (
 type Team struct {
 	ChatID       int64 `json:"chat_id"`
 	QueueTopicID int64 `json:"queue_topic_id"`
-	DutyUserID   int64 `json:"duty_user_id"`
 }
 type Staff struct {
 	ID          int64               `json:"id"`
@@ -29,7 +29,6 @@ type Config struct {
 	Companies            []string                   `json:"companies"`
 	Staff                []Staff                    `json:"staff"`
 	Departments          map[domain.Department]Team `json:"departments"`
-	DispatcherChatID     int64                      `json:"dispatcher_chat_id"`
 	ArchiveDir           string                     `json:"archive_dir"`
 	BackupDir            string                     `json:"backup_dir"`
 	HealthAddress        string                     `json:"health_address"`
@@ -49,7 +48,31 @@ func Load(path string) (Config, error) {
 		return c, e
 	}
 	defer f.Close()
-	d := json.NewDecoder(f)
+	var raw map[string]json.RawMessage
+	if e = json.NewDecoder(f).Decode(&raw); e != nil {
+		return c, fmt.Errorf("config: %w", e)
+	}
+	// Older installations may still have removed routing settings. Discard
+	// only those known obsolete keys; other unknown settings remain errors.
+	delete(raw, "dispatcher_chat_id")
+	if value, ok := raw["departments"]; ok {
+		var teams map[string]map[string]json.RawMessage
+		if e = json.Unmarshal(value, &teams); e != nil {
+			return c, e
+		}
+		for _, team := range teams {
+			delete(team, "duty_user_id")
+		}
+		raw["departments"], e = json.Marshal(teams)
+		if e != nil {
+			return c, e
+		}
+	}
+	encoded, e := json.Marshal(raw)
+	if e != nil {
+		return c, e
+	}
+	d := json.NewDecoder(bytes.NewReader(encoded))
 	d.DisallowUnknownFields()
 	if e = d.Decode(&c); e != nil {
 		return c, fmt.Errorf("config: %w", e)
@@ -105,9 +128,6 @@ func Load(path string) (Config, error) {
 func (c Config) ValidateTelegram() error {
 	if c.Token == "" {
 		return fmt.Errorf("TELEGRAM_BOT_TOKEN is required")
-	}
-	if c.DispatcherChatID == 0 {
-		return fmt.Errorf("dispatcher_chat_id is required")
 	}
 	seen := map[int64]bool{}
 	for _, dept := range []domain.Department{domain.IT, domain.OneC, domain.Installation, domain.Field} {

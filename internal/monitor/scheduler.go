@@ -56,7 +56,7 @@ func (s *Scheduler) Tick(ctx context.Context) error {
 		}
 		if t.Status.Active() {
 			if t.FirstResponseAt == nil && s.Calendar.WorkDuration(t.CreatedAt, now) >= time.Duration(s.Config.FirstResponseMinutes)*time.Minute {
-				if err = s.remind(ctx, t, events, "first_response", t.CreatedAt, "dispatcher_message", fmt.Sprintf("Заявка #%d: нет первого ответа поддержки за %d рабочих минут.", t.ID, s.Config.FirstResponseMinutes)); err != nil {
+				if err = s.remind(ctx, t, events, "first_response", t.CreatedAt, "team_notification", fmt.Sprintf("Заявка #%d: нет первого ответа поддержки за %d рабочих минут.", t.ID, s.Config.FirstResponseMinutes)); err != nil {
 					return err
 				}
 			}
@@ -90,25 +90,6 @@ func (s *Scheduler) Tick(ctx context.Context) error {
 					if err = s.remind(ctx, t, events, "waiting", baseline, "notify_client", fmt.Sprintf("По заявке #%d ожидаем ваш ответ. Напишите, пожалуйста, удалось ли проверить решение.", t.ID)); err != nil {
 						return err
 					}
-				}
-			}
-			if t.Emergency {
-				baseline := t.CreatedAt
-				for _, ev := range events {
-					if (ev.Kind == "emergency" || ev.Kind == "transferred" || ev.Kind == "reopened") && ev.CreatedAt.After(baseline) {
-						baseline = ev.CreatedAt
-					}
-				}
-				team := s.Config.Departments[t.Department]
-				kind := "access_notification"
-				payload := map[string]any{"user_id": team.DutyUserID, "text": fmt.Sprintf("Аварийная заявка #%d в отделе %s. Откройте очередь и возьмите в работу.", t.ID, t.Department)}
-				if team.DutyUserID == 0 {
-					kind = "dispatcher_message"
-					payload = map[string]any{"text": fmt.Sprintf("Авария #%d: для отдела %s не настроен дежурный! Назначьте инженера вручную.", t.ID, t.Department)}
-				}
-				label := fmt.Sprintf("emergency:%s:%d", t.Department, team.DutyUserID)
-				if err = s.once(ctx, t, events, label, baseline, kind, payload); err != nil {
-					return err
 				}
 			}
 		}

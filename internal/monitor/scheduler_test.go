@@ -67,22 +67,10 @@ func TestFirstResponseUsesWorkingClockAndDeduplicates(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if len(store.operations) != 1 || store.operations[0].Kind != "dispatcher_message" {
+	if len(store.operations) != 1 || store.operations[0].Kind != "team_notification" {
 		t.Fatalf("expected one reminder, got %+v", store.operations)
 	}
 }
-func TestEmergencyWithoutDutyNotifiesDispatcher(t *testing.T) {
-	now := time.Now()
-	store := &fakeStore{ticket: domain.Ticket{ID: 1, Version: 1, Department: domain.IT, Emergency: true, Status: domain.New, CreatedAt: now}}
-	s := &Scheduler{Store: store, Config: config.Config{BackupDir: t.TempDir(), FirstResponseMinutes: 30, TopicRetentionDays: 30}, Calendar: tickets.DefaultCalendar(), Now: func() time.Time { return now }}
-	if err := s.Tick(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if len(store.operations) != 1 || store.operations[0].Kind != "dispatcher_message" {
-		t.Fatalf("missing duty silently ignored: %+v", store.operations)
-	}
-}
-
 func TestCleanupProofRejectsLateEditsAndCanBeRequeued(t *testing.T) {
 	now := time.Now().UTC()
 	closed := now.Add(-31 * 24 * time.Hour)

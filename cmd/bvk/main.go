@@ -71,7 +71,7 @@ func run() error {
 	if err = cfg.ValidateTelegram(); err != nil {
 		return err
 	}
-	tc := telegram.Config{Departments: map[domain.Department]telegram.Team{}, DispatcherChatID: cfg.DispatcherChatID, AdminIDs: []int64{cfg.AdminID}, ArchiveDir: cfg.ArchiveDir}
+	tc := telegram.Config{Departments: map[domain.Department]telegram.Team{}, AdminIDs: []int64{cfg.AdminID}, ArchiveDir: cfg.ArchiveDir}
 	for dept, t := range cfg.Departments {
 		tc.Departments[dept] = telegram.Team{ChatID: t.ChatID, QueueTopicID: t.QueueTopicID}
 	}
@@ -110,7 +110,7 @@ func run() error {
 	service := tickets.New(store)
 	scheduler := &monitor.Scheduler{Store: store, Config: cfg, Calendar: calendar}
 	tc.BeforeDelete = scheduler.BeforeDelete
-	tc.BusinessHoursText = fmt.Sprintf("Обычная обработка: Пн–Пт, %02d:00–%02d:00 по Иркутску. Срочность вне графика определяет диспетчер.", cfg.StartHour, cfg.EndHour)
+	tc.BusinessHoursText = fmt.Sprintf("Обработка: Пн–Пт, %02d:00–%02d:00 по Иркутску. Заявки принимаются круглосуточно.", cfg.StartHour, cfg.EndHour)
 	tc.ReportCSV = func(ctx context.Context) (string, error) { return report.CSV(ctx, store, calendar) }
 	adapter := telegram.NewAdapter(client, store, service, tc)
 	worker := telegram.NewWorker(client, store, tc)

@@ -1,16 +1,39 @@
 {
   "admin_id": 123456789,
-  "companies": ["Тестовая компания"],
+  "companies": [
+    "Тестовая компания"
+  ],
   "staff": [
-    {"id": 123456789, "name": "Администратор", "role": "admin", "departments": ["it", "1c", "installation", "field"]}
+    {
+      "id": 123456789,
+      "name": "Администратор",
+      "role": "admin",
+      "departments": [
+        "it",
+        "1c",
+        "installation",
+        "field"
+      ]
+    }
   ],
   "departments": {
-    "it": {"chat_id": -1001111111111, "queue_topic_id": 2, "duty_user_id": 0},
-    "1c": {"chat_id": -1002222222222, "queue_topic_id": 2, "duty_user_id": 0},
-    "installation": {"chat_id": -1003333333333, "queue_topic_id": 2, "duty_user_id": 0},
-    "field": {"chat_id": -1004444444444, "queue_topic_id": 2, "duty_user_id": 0}
+    "it": {
+      "chat_id": -1001111111111,
+      "queue_topic_id": 2
+    },
+    "1c": {
+      "chat_id": -1002222222222,
+      "queue_topic_id": 2
+    },
+    "installation": {
+      "chat_id": -1003333333333,
+      "queue_topic_id": 2
+    },
+    "field": {
+      "chat_id": -1004444444444,
+      "queue_topic_id": 2
+    }
   },
-  "dispatcher_chat_id": -1005555555555,
   "archive_dir": "data/archive",
   "backup_dir": "data/backups",
   "health_address": "127.0.0.1:8080",

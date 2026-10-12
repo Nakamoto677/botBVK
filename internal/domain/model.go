@@ -49,32 +49,33 @@ type AccessRequest struct {
 	CreatedAt time.Time
 }
 type Ticket struct {
-	ID              int64      `json:"id"`
-	ClientID        int64      `json:"client_id"`
-	CompanyID       int64      `json:"company_id"`
-	Department      Department `json:"department"`
-	Description     string     `json:"description"`
-	Status          Status     `json:"status"`
-	AssigneeID      int64      `json:"assignee_id"`
-	Version         int64      `json:"version"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
-	FirstResponseAt *time.Time `json:"first_response_at,omitempty"`
-	ClosedAt        *time.Time `json:"closed_at,omitempty"`
-	ClosedBy        int64      `json:"closed_by"`
-	Resolution      string     `json:"resolution"`
-	Emergency       bool       `json:"emergency"`
-	TopicChatID     int64      `json:"topic_chat_id"`
-	TopicID         int64      `json:"topic_id"`
-	QueueMessageID  int64      `json:"queue_message_id"`
-	TopicMessageID  int64      `json:"topic_message_id"`
-	RoutingPending  bool       `json:"routing_pending"`
+	ID                int64      `json:"id"`
+	ClientID          int64      `json:"client_id"`
+	CompanyID         int64      `json:"company_id"`
+	Department        Department `json:"department"`
+	Description       string     `json:"description"`
+	Status            Status     `json:"status"`
+	AssigneeID        int64      `json:"assignee_id"`
+	Version           int64      `json:"version"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+	FirstResponseAt   *time.Time `json:"first_response_at,omitempty"`
+	ClosedAt          *time.Time `json:"closed_at,omitempty"`
+	ClosedBy          int64      `json:"closed_by"`
+	Resolution        string     `json:"resolution"`
+	TopicChatID       int64      `json:"topic_chat_id"`
+	TopicID           int64      `json:"topic_id"`
+	QueueMessageID    int64      `json:"queue_message_id"`
+	TopicMessageID    int64      `json:"topic_message_id"`
+	RoutingPending    bool       `json:"routing_pending"`
+	RoutingGeneration int64      `json:"routing_generation"`
 }
 type MessageRevision struct {
 	Text     string
 	EditedAt time.Time
 }
 type Message struct {
+	DeferredDelivery  bool       `json:"deferred_delivery,omitempty"`
 	RoutingDepartment Department `json:"routing_department"`
 	ID                int64
 	TicketID          int64

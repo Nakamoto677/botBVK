@@ -21,6 +21,9 @@ var schema string
 //go:embed queue_on_claim.sql
 var queueOnClaimMigration string
 
+//go:embed refresh_cards.sql
+var refreshCardsMigration string
+
 type Store struct{ pool *pgxpool.Pool }
 type transaction struct{ tx pgx.Tx }
 
@@ -53,10 +56,19 @@ func (s *Store) Migrate(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		if marker.RowsAffected() != 0 {
+			if _, err = tx.Exec(ctx, queueOnClaimMigration); err != nil {
+				return err
+			}
+		}
+		marker, err = tx.Exec(ctx, "INSERT INTO bvk_migrations(version) VALUES('003_refresh_cards') ON CONFLICT(version) DO NOTHING")
+		if err != nil {
+			return err
+		}
 		if marker.RowsAffected() == 0 {
 			return nil
 		}
-		_, err = tx.Exec(ctx, queueOnClaimMigration)
+		_, err = tx.Exec(ctx, refreshCardsMigration)
 		return err
 	})
 }
