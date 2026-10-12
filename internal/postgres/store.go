@@ -275,13 +275,16 @@ func (t *transaction) AddEvent(ctx context.Context, v domain.Event) error {
 	return mapError(err)
 }
 func (t *transaction) Enqueue(ctx context.Context, v domain.Operation) error {
-	if v.AvailableAt.IsZero() {
-		v.AvailableAt = time.Now().UTC()
+	// Scheduling and leasing must share the database clock. Even small host/DB
+	// clock skew can otherwise make an immediate operation appear in the future.
+	var available *time.Time
+	if !v.AvailableAt.IsZero() {
+		available = &v.AvailableAt
 	}
 	if len(v.Payload) == 0 {
 		v.Payload = json.RawMessage(`{}`)
 	}
-	_, err := t.tx.Exec(ctx, "INSERT INTO bvk_outbox(kind,ticket_id,payload,available_at) VALUES($1,$2,$3,$4)", v.Kind, v.TicketID, v.Payload, v.AvailableAt)
+	_, err := t.tx.Exec(ctx, "INSERT INTO bvk_outbox(kind,ticket_id,payload,available_at) VALUES($1,$2,$3,COALESCE($4::timestamptz,now()))", v.Kind, v.TicketID, v.Payload, available)
 	return err
 }
 func (t *transaction) RequestAccess(ctx context.Context, userID, companyID int64) error {
@@ -427,7 +430,7 @@ func (s *Store) RetryOperation(ctx context.Context, id int64, lastError string, 
 	if delay < 0 {
 		delay = 0
 	}
-	tag, err := s.pool.Exec(ctx, "UPDATE bvk_outbox SET state=$2,last_error=$3,available_at=$4,lease_until=NULL WHERE id=$1 AND state='processing'", id, state, lastError, time.Now().UTC().Add(delay))
+	tag, err := s.pool.Exec(ctx, "UPDATE bvk_outbox SET state=$2,last_error=$3,available_at=now()+($4::bigint * interval '1 microsecond'),lease_until=NULL WHERE id=$1 AND state='processing'", id, state, lastError, delay.Microseconds())
 	if err == nil && tag.RowsAffected() == 0 {
 		return domain.ErrConflict
 	}
