@@ -192,7 +192,17 @@ func TestInboxOutboxRollbackAndRecovery(t *testing.T) {
 		t.Fatalf("rollback: %v", err)
 	}
 	if err = s.Transact(ctx, func(tx domain.Tx) error {
-		return tx.Enqueue(ctx, domain.Operation{Kind: "send", Payload: json.RawMessage(`{"text":"hello"}`)})
+		if err := tx.Enqueue(ctx, domain.Operation{Kind: "send", Payload: json.RawMessage(`{"text":"hello"}`)}); err != nil {
+			return err
+		}
+		var immediatelyDue bool
+		if err := tx.(*transaction).tx.QueryRow(ctx, "SELECT available_at<=now() FROM bvk_outbox WHERE kind='send'").Scan(&immediatelyDue); err != nil {
+			return err
+		}
+		if !immediatelyDue {
+			t.Error("unscheduled operation must be due immediately on the database clock")
+		}
+		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
