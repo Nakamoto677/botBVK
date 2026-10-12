@@ -396,3 +396,47 @@ func TestMessageTicketAfterClosure(t *testing.T) {
 		t.Fatalf("ambiguous source: %v", err)
 	}
 }
+
+func TestFailedOperationRecovery(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if err := s.Transact(ctx, func(tx domain.Tx) error {
+		return tx.Enqueue(ctx, domain.Operation{Kind: "send", TicketID: 10, Payload: json.RawMessage(`{"text":"retry"}`)})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	op, err := s.NextOperation(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.RetryFailedOperation(ctx, op.ID); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("requeue active operation: %v", err)
+	}
+	if err = s.RetryOperation(ctx, op.ID, "permanent error", 0, true); err != nil {
+		t.Fatal(err)
+	}
+	failed, err := s.Operation(ctx, op.ID)
+	if err != nil || failed.State != "failed" || failed.LastError != "permanent error" {
+		t.Fatalf("failed operation: %#v %v", failed, err)
+	}
+	if err = s.RetryFailedOperation(ctx, op.ID); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := s.Operation(ctx, op.ID)
+	if err != nil || pending.ID != op.ID || pending.Attempts != 0 || pending.State != "pending" || pending.LastError != "" || string(pending.Payload) != string(failed.Payload) {
+		t.Fatalf("requeued operation: %#v %v", pending, err)
+	}
+	leased, err := s.NextOperation(ctx)
+	if err != nil || leased.ID != op.ID || leased.Attempts != 1 {
+		t.Fatalf("reclaimed operation: %#v %v", leased, err)
+	}
+	if err = s.FinishOperation(ctx, op.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.RetryFailedOperation(ctx, op.ID); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("requeue complete operation: %v", err)
+	}
+	if _, err = s.Operation(ctx, 999); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("unknown operation: %v", err)
+	}
+}

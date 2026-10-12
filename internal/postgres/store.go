@@ -496,3 +496,20 @@ func (s *Store) MessageTicket(ctx context.Context, telegramChatID, telegramMessa
 	}
 	return matches[0], nil
 }
+
+// Operation inspects a durable delivery operation for authorized diagnostics.
+func (s *Store) Operation(ctx context.Context, id int64) (domain.Operation, error) {
+	var v domain.Operation
+	err := s.pool.QueryRow(ctx, "SELECT id,kind,ticket_id,payload,attempts,available_at,last_error,state FROM bvk_outbox WHERE id=$1", id).Scan(&v.ID, &v.Kind, &v.TicketID, &v.Payload, &v.Attempts, &v.AvailableAt, &v.LastError, &v.State)
+	return v, mapError(err)
+}
+
+// RetryFailedOperation reuses the original queue position; authorization and
+// ambiguous Telegram side-effect checks belong to the administrative adapter.
+func (s *Store) RetryFailedOperation(ctx context.Context, id int64) error {
+	tag, err := s.pool.Exec(ctx, "UPDATE bvk_outbox SET state='pending',attempts=0,last_error='',available_at=now(),lease_until=NULL WHERE id=$1 AND state='failed'", id)
+	if err == nil && tag.RowsAffected() != 1 {
+		return domain.ErrConflict
+	}
+	return err
+}
