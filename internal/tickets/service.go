@@ -123,7 +123,7 @@ func (s *Service) Create(ctx context.Context, actorID int64, department domain.D
 			return err
 		}
 		now := s.now()
-		t = domain.Ticket{ClientID: u.ID, CompanyID: u.CompanyID, Department: department, Description: strings.TrimSpace(description), Status: domain.New, CreatedAt: now, UpdatedAt: now}
+		t = domain.Ticket{ClientID: u.ID, CompanyID: u.CompanyID, Department: department, Description: strings.TrimSpace(description), Status: domain.New, RoutingPending: true, CreatedAt: now, UpdatedAt: now}
 		if err := tx.SaveTicket(ctx, &t); err != nil {
 			return err
 		}
@@ -184,7 +184,7 @@ func (s *Service) Transfer(ctx context.Context, actorID, ticketID int64, departm
 		if !team(u, t.Department) {
 			return domain.ErrForbidden
 		}
-		if !t.Status.Active() || t.Department == department {
+		if !t.Status.Active() || t.Department == department || t.RoutingPending {
 			return domain.ErrConflict
 		}
 		oldDept := t.Department
@@ -192,9 +192,7 @@ func (s *Service) Transfer(ctx context.Context, actorID, ticketID int64, departm
 		t.Department = department
 		t.Status = domain.New
 		t.AssigneeID = 0
-		t.TopicChatID = 0
-		t.TopicID = 0
-		t.QueueMessageID = 0
+		t.RoutingPending = true
 		if err := s.save(ctx, tx, t, actorID, "transferred", map[string]any{"from": oldDept, "to": department, "reason": reason}); err != nil {
 			return err
 		}
@@ -257,12 +255,14 @@ func (s *Service) Reopen(ctx context.Context, actorID, ticketID int64) error {
 		t.ClosedAt = nil
 		t.ClosedBy = 0
 		t.Resolution = ""
-		if err := s.save(ctx, tx, t, actorID, "reopened", nil); err != nil {
-			return err
-		}
 		kind := "reopen_topic"
+		t.RoutingPending = false
 		if t.TopicID == 0 || t.TopicChatID == 0 {
 			kind = "create_topic"
+			t.RoutingPending = true
+		}
+		if err := s.save(ctx, tx, t, actorID, "reopened", nil); err != nil {
+			return err
 		}
 		if err := s.enqueue(ctx, tx, *t, kind, map[string]any{"old_chat_id": 0, "old_topic_id": 0, "reason": "Повторное открытие"}); err != nil {
 			return err
@@ -395,5 +395,39 @@ func (s *Service) EditMessage(ctx context.Context, actorID, ticketID int64, msg 
 			return s.enqueue(ctx, tx, *t, "team_message", msg)
 		}
 		return nil
+	})
+}
+
+// Cancel lets a client withdraw their own request, or a dispatcher cancel it
+// with an explicit reason; cancellation does not record a completed solution.
+func (s *Service) Cancel(ctx context.Context, actorID, ticketID int64, reason string) error {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return domain.ErrInvalid
+	}
+	return s.mutate(ctx, actorID, ticketID, func(tx domain.Tx, u domain.User, t *domain.Ticket) error {
+		owner := u.Approved && u.Role == "client" && u.ID == t.ClientID && u.CompanyID == t.CompanyID
+		if !owner && !privileged(u) {
+			return domain.ErrForbidden
+		}
+		if !t.Status.Active() {
+			return domain.ErrConflict
+		}
+		now := s.now()
+		t.Status = domain.Cancelled
+		t.ClosedAt = &now
+		t.ClosedBy = u.ID
+		t.Resolution = reason
+		t.RoutingPending = false
+		if err := s.save(ctx, tx, t, actorID, "cancelled", map[string]string{"reason": reason}); err != nil {
+			return err
+		}
+		if err := s.enqueue(ctx, tx, *t, "close_topic", map[string]int64{"chat_id": t.TopicChatID, "topic_id": t.TopicID}); err != nil {
+			return err
+		}
+		if err := s.enqueue(ctx, tx, *t, "refresh_card", nil); err != nil {
+			return err
+		}
+		return s.notify(ctx, tx, *t, "Заявка отменена. Причина: "+reason)
 	})
 }

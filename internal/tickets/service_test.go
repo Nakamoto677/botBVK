@@ -194,6 +194,7 @@ func TestTransferRetainsHistoryAndReopen(t *testing.T) {
 	v := f.tickets[ticket.ID]
 	v.TopicChatID = -100
 	v.TopicID = 5
+	v.RoutingPending = false
 	f.tickets[v.ID] = v
 	if err := s.Transfer(ctx, 2, v.ID, domain.OneC, "wrong team"); err != nil {
 		t.Fatal(err)
@@ -284,5 +285,51 @@ func TestInternalAttachmentArchival(t *testing.T) {
 	}
 	if f.ops[len(f.ops)-1].Kind != "archive_message" {
 		t.Fatal("internal file missing archive")
+	}
+}
+func TestRoutingPendingRetainsBindingAndBlocksSecondTransfer(t *testing.T) {
+	s, f := setup()
+	ticket, _ := s.Create(t.Context(), 1, domain.IT, "help")
+	if !ticket.RoutingPending {
+		t.Fatal("initial routing missing")
+	}
+	if err := s.Transfer(t.Context(), 2, ticket.ID, domain.OneC, "wrong"); !errors.Is(err, domain.ErrConflict) {
+		t.Fatal(err)
+	}
+	v := f.tickets[ticket.ID]
+	v.RoutingPending = false
+	v.TopicChatID = -100
+	v.TopicID = 42
+	v.QueueMessageID = 55
+	f.tickets[v.ID] = v
+	if err := s.Transfer(t.Context(), 2, v.ID, domain.OneC, "wrong"); err != nil {
+		t.Fatal(err)
+	}
+	v = f.tickets[v.ID]
+	if !v.RoutingPending || v.TopicChatID != -100 || v.TopicID != 42 || v.QueueMessageID != 55 {
+		t.Fatal("old binding lost", v)
+	}
+	if err := s.Transfer(t.Context(), 4, v.ID, domain.Field, "another"); !errors.Is(err, domain.ErrConflict) {
+		t.Fatal(err)
+	}
+}
+func TestCancellationAuthorizationAndAllowsNewTicket(t *testing.T) {
+	s, f := setup()
+	ticket, _ := s.Create(t.Context(), 1, domain.IT, "help")
+	if err := s.Cancel(t.Context(), 2, ticket.ID, "not my role"); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatal(err)
+	}
+	if err := s.Cancel(t.Context(), 1, ticket.ID, "withdrawn"); err != nil {
+		t.Fatal(err)
+	}
+	v := f.tickets[ticket.ID]
+	if v.Status != domain.Cancelled || v.RoutingPending {
+		t.Fatal(v)
+	}
+	if _, err := s.Create(t.Context(), 1, domain.IT, "next"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Reopen(t.Context(), 1, ticket.ID); !errors.Is(err, domain.ErrConflict) {
+		t.Fatal(err)
 	}
 }
