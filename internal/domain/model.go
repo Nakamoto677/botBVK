@@ -83,6 +83,7 @@ type Message struct {
 	Direction         string
 	Text              string
 	TelegramChatID    int64
+	TelegramTopicID   int64
 	TelegramMessageID int64
 	ReplyToMessageID  int64
 	FileID            string

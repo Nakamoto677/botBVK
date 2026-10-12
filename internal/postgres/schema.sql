@@ -30,3 +30,13 @@ CREATE TABLE IF NOT EXISTS bvk_migrations (
  version text PRIMARY KEY,
  applied_at timestamptz NOT NULL DEFAULT now()
 );
+CREATE TABLE IF NOT EXISTS bvk_auxiliary_messages (
+ user_id bigint NOT NULL, chat_id bigint NOT NULL, topic_id bigint NOT NULL,
+ scenario text NOT NULL, message_id bigint NOT NULL,
+ PRIMARY KEY(user_id,chat_id,topic_id,scenario,message_id)
+);
+CREATE TABLE IF NOT EXISTS bvk_workflows (
+ user_id bigint NOT NULL, chat_id bigint NOT NULL, topic_id bigint NOT NULL,
+ scenario text NOT NULL, payload jsonb NOT NULL,
+ PRIMARY KEY(user_id,chat_id,topic_id,scenario)
+);
