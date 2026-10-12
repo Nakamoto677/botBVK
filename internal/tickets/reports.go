@@ -2,7 +2,9 @@ package tickets
 
 import (
 	"encoding/csv"
+	"encoding/json"
 	"io"
+	"sort"
 	"strconv"
 	"time"
 
@@ -12,6 +14,7 @@ import (
 type Metrics struct {
 	Total, Open, Unassigned, Closed, Transfers, Reopens      int
 	MeanFirstResponse, MeanResolution, MeanWorkingResolution time.Duration
+	MeanClientWaiting, MeanWorkingClientWaiting              time.Duration
 }
 
 // Summarize counts response and resolution durations only when corresponding timestamps exist.
@@ -36,6 +39,9 @@ func Summarize(tickets []domain.Ticket, events []domain.Event, calendar Calendar
 			closedCount++
 			m.MeanResolution += t.ClosedAt.Sub(t.CreatedAt)
 			m.MeanWorkingResolution += calendar.WorkDuration(t.CreatedAt, *t.ClosedAt)
+			waiting, workingWaiting := WaitingDuration(t.ID, events, *t.ClosedAt, calendar)
+			m.MeanClientWaiting += waiting
+			m.MeanWorkingClientWaiting += workingWaiting
 		}
 	}
 	for _, e := range events {
@@ -52,6 +58,8 @@ func Summarize(tickets []domain.Ticket, events []domain.Event, calendar Calendar
 	if closedCount > 0 {
 		m.MeanResolution /= time.Duration(closedCount)
 		m.MeanWorkingResolution /= time.Duration(closedCount)
+		m.MeanClientWaiting /= time.Duration(closedCount)
+		m.MeanWorkingClientWaiting /= time.Duration(closedCount)
 	}
 	return m
 }
@@ -88,4 +96,53 @@ func csvSafe(s string) string {
 		}
 	}
 	return s
+}
+
+// WaitingDuration reconstructs waiting intervals from status events up to until.
+func WaitingDuration(ticketID int64, events []domain.Event, until time.Time, calendar Calendar) (time.Duration, time.Duration) {
+	selected := make([]domain.Event, 0)
+	for _, e := range events {
+		if e.TicketID == ticketID && !e.CreatedAt.After(until) {
+			selected = append(selected, e)
+		}
+	}
+	sort.SliceStable(selected, func(i, j int) bool {
+		if selected[i].CreatedAt.Equal(selected[j].CreatedAt) {
+			return selected[i].ID < selected[j].ID
+		}
+		return selected[i].CreatedAt.Before(selected[j].CreatedAt)
+	})
+	var start *time.Time
+	var total, working time.Duration
+	for _, e := range selected {
+		waiting := false
+		stop := false
+		switch e.Kind {
+		case "status_changed":
+			var payload struct {
+				Status domain.Status `json:"status"`
+			}
+			if json.Unmarshal(e.Data, &payload) != nil {
+				continue
+			}
+			waiting = payload.Status == domain.Waiting
+			stop = !waiting
+		case "closed", "transferred", "reopened":
+			stop = true
+		}
+		if waiting && start == nil {
+			at := e.CreatedAt
+			start = &at
+		}
+		if stop && start != nil {
+			total += e.CreatedAt.Sub(*start)
+			working += calendar.WorkDuration(*start, e.CreatedAt)
+			start = nil
+		}
+	}
+	if start != nil {
+		total += until.Sub(*start)
+		working += calendar.WorkDuration(*start, until)
+	}
+	return total, working
 }

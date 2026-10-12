@@ -47,3 +47,13 @@ func TestReopenUsesExistingTopic(t *testing.T) {
 		t.Fatal("existing topic was replaced")
 	}
 }
+func TestWaitingIntervalsSortedAndClipped(t *testing.T) {
+	c := DefaultCalendar()
+	start := time.Date(2026, 10, 13, 10, 0, 0, 0, c.Location)
+	end := start.Add(2 * time.Hour)
+	events := []domain.Event{{TicketID: 1, Kind: "closed", CreatedAt: end}, {TicketID: 1, Kind: "status_changed", CreatedAt: start, Data: []byte(`{"status":"waiting_client"}`)}, {TicketID: 2, Kind: "status_changed", CreatedAt: start, Data: []byte(`{"status":"waiting_client"}`)}}
+	actual, working := WaitingDuration(1, events, end, c)
+	if actual != 2*time.Hour || working != actual {
+		t.Fatal(actual, working)
+	}
+}

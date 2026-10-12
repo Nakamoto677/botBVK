@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -335,10 +336,6 @@ func (s *Service) AddMessage(ctx context.Context, actorID, ticketID int64, msg d
 		} else if public {
 			msg.Direction = "outbound"
 			kind = "client_message"
-			if t.FirstResponseAt == nil {
-				now := s.now()
-				t.FirstResponseAt = &now
-			}
 		}
 		if err := tx.AddMessage(ctx, &msg); err != nil {
 			return err
@@ -356,6 +353,46 @@ func (s *Service) AddMessage(ctx context.Context, actorID, ticketID int64, msg d
 		}
 		if kind != "" {
 			return s.enqueue(ctx, tx, *t, kind, msg)
+		}
+		if msg.FileID != "" {
+			return s.enqueue(ctx, tx, *t, "archive_message", msg)
+		}
+		return nil
+	})
+}
+
+// EditMessage archives a revision of an existing message. Engineer edits never
+// resend a public response; a deliberate new /reply is required for delivery.
+func (s *Service) EditMessage(ctx context.Context, actorID, ticketID int64, msg domain.Message) error {
+	if msg.TelegramChatID == 0 || msg.TelegramMessageID == 0 || (strings.TrimSpace(msg.Text) == "" && msg.FileID == "") {
+		return domain.ErrInvalid
+	}
+	return s.mutate(ctx, actorID, ticketID, func(tx domain.Tx, u domain.User, t *domain.Ticket) error {
+		client := u.Role == "client" && u.Approved && u.ID == t.ClientID && u.CompanyID == t.CompanyID
+		if !client && !team(u, t.Department) {
+			return domain.ErrForbidden
+		}
+		msg.TicketID = t.ID
+		msg.AuthorID = u.ID
+		msg.Direction = ""
+		if msg.EditedAt == nil {
+			now := s.now()
+			msg.EditedAt = &now
+		}
+		if err := tx.EditMessage(ctx, &msg); err != nil {
+			return err
+		}
+		if err := s.event(ctx, tx, *t, actorID, "message_edited", map[string]any{"message_id": msg.ID, "direction": msg.Direction}); err != nil {
+			return err
+		}
+		if msg.FileID != "" {
+			if err := s.enqueue(ctx, tx, *t, "archive_message", msg); err != nil {
+				return err
+			}
+		}
+		if client && t.Status.Active() {
+			msg.Text = fmt.Sprintf("Исправление сообщения #%d: %s", msg.TelegramMessageID, msg.Text)
+			return s.enqueue(ctx, tx, *t, "team_message", msg)
 		}
 		return nil
 	})
