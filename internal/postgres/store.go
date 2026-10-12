@@ -216,6 +216,50 @@ func (t *transaction) AddMessage(ctx context.Context, v *domain.Message) error {
 	}
 	return mapError(err)
 }
+
+// EditMessage changes only text and edit history; source and archive metadata
+// remain attached to the original message. Revisions contain prior versions,
+// oldest first. The original revision timestamp is its creation time.
+func (t *transaction) EditMessage(ctx context.Context, v *domain.Message) error {
+	if v == nil || v.TelegramMessageID == 0 || v.EditedAt == nil {
+		return domain.ErrInvalid
+	}
+	matches, err := listJSON[domain.Message](ctx, t.tx, "SELECT payload FROM bvk_messages WHERE telegram_chat_id=$1 AND telegram_message_id=$2 AND ticket_id=$3 AND ($4='' OR direction=$4) ORDER BY id LIMIT 2 FOR UPDATE", v.TelegramChatID, v.TelegramMessageID, v.TicketID, v.Direction)
+	if err != nil {
+		return err
+	}
+	if len(matches) == 0 {
+		return domain.ErrNotFound
+	}
+	if len(matches) != 1 {
+		return domain.ErrConflict
+	}
+	stored := matches[0]
+	if stored.AuthorID != v.AuthorID {
+		return domain.ErrForbidden
+	}
+	if stored.Text == v.Text || (stored.EditedAt != nil && v.EditedAt.Before(*stored.EditedAt)) {
+		return domain.ErrConflict
+	}
+	previousTime := stored.CreatedAt
+	if stored.EditedAt != nil {
+		previousTime = *stored.EditedAt
+	}
+	stored.Revisions = append(stored.Revisions, domain.MessageRevision{Text: stored.Text, EditedAt: previousTime})
+	stored.Text = v.Text
+	edited := v.EditedAt.UTC()
+	stored.EditedAt = &edited
+	raw, err := json.Marshal(stored)
+	if err != nil {
+		return err
+	}
+	_, err = t.tx.Exec(ctx, "UPDATE bvk_messages SET payload=$2 WHERE id=$1", stored.ID, raw)
+	if err == nil {
+		*v = stored
+	}
+	return err
+}
+
 func (t *transaction) AddEvent(ctx context.Context, v domain.Event) error {
 	if v.CreatedAt.IsZero() {
 		v.CreatedAt = time.Now().UTC()
@@ -395,4 +439,15 @@ func (s *Store) SaveArchive(ctx context.Context, id int64, path, sha string) err
 		return domain.ErrNotFound
 	}
 	return err
+}
+
+// QueueHealth reports unfinished and failed operations, plus the earliest due
+// time among unfinished operations. Future scheduled work is not overdue.
+func (s *Store) QueueHealth(ctx context.Context) (pending int, failed int, oldest time.Time, err error) {
+	var earliest *time.Time
+	err = s.pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE state IN ('pending','processing')), count(*) FILTER (WHERE state='failed'), min(available_at) FILTER (WHERE state IN ('pending','processing') AND available_at<=now()) FROM bvk_outbox`).Scan(&pending, &failed, &earliest)
+	if earliest != nil {
+		oldest = *earliest
+	}
+	return
 }
