@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"bot-bvk/internal/domain"
@@ -22,10 +23,11 @@ import (
 )
 
 type TicketSnapshot struct {
-	Version   int64 `json:"version"`
-	MessageID int64 `json:"message_id"`
-	EventID   int64 `json:"event_id"`
-	Complete  bool  `json:"complete"`
+	Version       int64            `json:"version"`
+	MessageID     int64            `json:"message_id"`
+	EventID       int64            `json:"event_id"`
+	Complete      bool             `json:"complete"`
+	MessageHashes map[int64]string `json:"message_hashes,omitempty"`
 }
 type File struct {
 	Path   string `json:"path"`
@@ -91,7 +93,12 @@ func run(ctx context.Context, dsn, name string, args ...string) error {
 	}
 	return nil
 }
+
+var backupMu sync.Mutex
+
 func Create(ctx context.Context, dsn, archiveDir, backupDir string) (string, error) {
+	backupMu.Lock()
+	defer backupMu.Unlock()
 	stamp := time.Now().UTC()
 	dir := filepath.Join(backupDir, stamp.Format("20060102T150405.000000000Z"))
 	if e := os.MkdirAll(dir, 0700); e != nil {
@@ -135,12 +142,13 @@ func Create(ctx context.Context, dsn, archiveDir, backupDir string) (string, err
 	}
 	manifest := Manifest{CreatedAt: stamp, Tickets: map[int64]TicketSnapshot{}, Files: map[int64]File{}}
 	for _, t := range all {
-		snap := TicketSnapshot{Version: t.Version, Complete: true}
+		snap := TicketSnapshot{Version: t.Version, Complete: true, MessageHashes: map[int64]string{}}
 		msgs, e := restored.Messages(ctx, t.ID)
 		if e != nil {
 			return "", e
 		}
 		for _, m := range msgs {
+			snap.MessageHashes[m.ID] = messageHash(m)
 			if m.ID > snap.MessageID {
 				snap.MessageID = m.ID
 			}
@@ -271,9 +279,105 @@ func (m Manifest) Covers(t domain.Ticket, msgs []domain.Message, events []domain
 		if ev.Kind == "media_edit_unsupported" {
 			return false
 		}
-		if ev.ID > snap.EventID && ev.Kind != "cleanup_queued" && ev.Kind != "cleanup_deferred" && ev.Kind != "topic_deleted" {
+		if ev.ID > snap.EventID && !housekeeping(ev.Kind) {
 			return false
 		}
 	}
 	return true
+}
+
+func housekeeping(kind string) bool {
+	switch kind {
+	case "cleanup_queued", "cleanup_deferred", "cleanup_blocked", "cleanup_recovered", "topic_deleted":
+		return true
+	}
+	return false
+}
+func messageHash(m domain.Message) string {
+	data, _ := json.Marshal(m)
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// Load reads a specific durable verification proof, rather than replacing it
+// with a possibly newer snapshot while an old topic waits in the outbox.
+func Load(dir string) (Manifest, error) {
+	data, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
+	if err != nil {
+		return Manifest{}, err
+	}
+	var m Manifest
+	if err = json.Unmarshal(data, &m); err != nil {
+		return m, err
+	}
+	if !m.Verified {
+		return m, domain.ErrConflict
+	}
+	m.Directory = dir
+	return m, nil
+}
+
+// CoversCompletion protects the transcript accepted before this completion.
+// Later routing/claim changes can safely coexist with deletion of a detached
+// old topic. Fingerprints detect later edits to its saved messages.
+func (m Manifest) CoversCompletion(t domain.Ticket, msgs []domain.Message, events []domain.Event, completion domain.Event) bool {
+	snap, ok := m.Tickets[t.ID]
+	if !m.Verified || !ok || !snap.Complete || completion.Kind != "completion_cleanup_requested" || completion.CreatedAt.IsZero() || completion.ID == 0 || completion.ID > snap.EventID {
+		return false
+	}
+	hash, err := checksum(filepath.Join(m.Directory, "database.dump"))
+	if err != nil || m.DumpSHA256 == "" || hash != m.DumpSHA256 {
+		return false
+	}
+	for _, msg := range msgs {
+		if !msg.CreatedAt.IsZero() && msg.CreatedAt.After(completion.CreatedAt) {
+			continue
+		}
+		if msg.ID > snap.MessageID || snap.MessageHashes[msg.ID] != messageHash(msg) {
+			return false
+		}
+		if msg.FileID != "" {
+			f, ok := m.Files[msg.ID]
+			if !ok || !filepath.IsLocal(f.Path) || f.SHA256 != msg.SHA256 {
+				return false
+			}
+			actual, err := checksum(filepath.Join(m.Directory, f.Path))
+			if err != nil || actual != f.SHA256 {
+				return false
+			}
+		}
+	}
+	for _, event := range events {
+		if housekeeping(event.Kind) {
+			continue
+		}
+		if event.CreatedAt.After(completion.CreatedAt) {
+			continue
+		}
+		if event.Kind == "media_edit_unsupported" || event.ID > snap.EventID {
+			return false
+		}
+	}
+	return true
+}
+
+// CheckMessages checks live attachment availability before a new backup. This
+// is separate from proof validation, whose copied files survive live-file loss.
+func CheckMessages(msgs []domain.Message) error {
+	for _, msg := range msgs {
+		if msg.FileID == "" {
+			continue
+		}
+		if msg.ArchivePath == "" || msg.SHA256 == "" {
+			return fmt.Errorf("attachment of message %d is not archived", msg.ID)
+		}
+		actual, err := checksum(msg.ArchivePath)
+		if err != nil {
+			return fmt.Errorf("attachment of message %d unavailable: %w", msg.ID, err)
+		}
+		if actual != msg.SHA256 {
+			return fmt.Errorf("attachment of message %d checksum mismatch", msg.ID)
+		}
+	}
+	return nil
 }

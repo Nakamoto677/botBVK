@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"bot-bvk/internal/archive"
@@ -15,10 +16,12 @@ import (
 )
 
 type Scheduler struct {
-	Store    domain.Store
-	Config   config.Config
-	Calendar tickets.Calendar
-	Now      func() time.Time
+	Store     domain.Store
+	Config    config.Config
+	Calendar  tickets.Calendar
+	Now       func() time.Time
+	Backup    func(context.Context) (string, error)
+	cleanupMu sync.Mutex
 }
 
 func (s *Scheduler) Run(ctx context.Context) error {
@@ -44,7 +47,6 @@ func (s *Scheduler) Tick(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	backup, _ := archive.Latest(s.Config.BackupDir)
 	for _, t := range all {
 		events, err := s.Store.Events(ctx, t.ID)
 		if err != nil {
@@ -93,58 +95,7 @@ func (s *Scheduler) Tick(ctx context.Context) error {
 				}
 			}
 		}
-		// Current closed topic and former transferred topics share the same archive.
-		// Any unarchived attachment or unverified backup prevents deletion.
-		if !backup.Covers(t, msgs, events) {
-			continue
-		}
-		type candidate struct {
-			ChatID  int64     `json:"chat_id"`
-			TopicID int64     `json:"topic_id"`
-			At      time.Time `json:"-"`
-		}
-		var targets []candidate
-		if (t.Status == domain.Closed || t.Status == domain.Cancelled) && t.ClosedAt != nil && t.TopicID != 0 {
-			targets = append(targets, candidate{t.TopicChatID, t.TopicID, *t.ClosedAt})
-		}
-		for _, ev := range events {
-			if ev.Kind == "topic_retired" {
-				var c candidate
-				if json.Unmarshal(ev.Data, &c) == nil && c.ChatID != 0 && c.TopicID != 0 {
-					c.At = ev.CreatedAt
-					targets = append(targets, c)
-				}
-			}
-		}
-		for _, target := range targets {
-			if now.Sub(target.At) < time.Duration(s.Config.TopicRetentionDays)*24*time.Hour {
-				continue
-			}
-			key := fmt.Sprintf("cleanup:%d:%d", target.ChatID, target.TopicID)
-			if hasKey(events, key) {
-				continue
-			}
-			if err = s.Store.Transact(ctx, func(tx domain.Tx) error {
-				latest, e := tx.GetTicket(ctx, t.ID)
-				if e != nil {
-					return e
-				}
-				if latest.Version != t.Version {
-					return domain.ErrConflict
-				}
-				if latest.TopicID == target.TopicID && latest.TopicChatID == target.ChatID && latest.Status.Active() {
-					return domain.ErrConflict
-				}
-				b, _ := json.Marshal(target)
-				if e = tx.Enqueue(ctx, domain.Operation{Kind: "delete_topic", TicketID: t.ID, Payload: b}); e != nil {
-					return e
-				}
-				data, _ := json.Marshal(map[string]string{"key": key})
-				return tx.AddEvent(ctx, domain.Event{TicketID: t.ID, Kind: "cleanup_queued", Data: data, CreatedAt: now})
-			}); err != nil && !errors.Is(err, domain.ErrConflict) {
-				return err
-			}
-		}
+
 	}
 	return nil
 }
@@ -185,48 +136,34 @@ func (s *Scheduler) once(ctx context.Context, t domain.Ticket, events []domain.E
 	})
 }
 
-// BeforeDelete is invoked by the outbox worker while it holds the ticket row
-// lock. Re-checking the actual files and snapshot here fences late message edits
-// and backup corruption between scheduling and execution.
+// BeforeDelete validates only a new explicit completion and its durable proof.
+// It is called while the worker holds the ticket lock to fence concurrent edits.
 func (s *Scheduler) BeforeDelete(ctx context.Context, _ domain.Tx, t domain.Ticket, chatID, topicID int64) error {
-	now := time.Now()
-	if s.Now != nil {
-		now = s.Now()
-	}
-	messages, err := s.Store.Messages(ctx, t.ID)
-	if err != nil {
-		return err
-	}
 	events, err := s.Store.Events(ctx, t.ID)
 	if err != nil {
 		return err
 	}
-	manifest, err := archive.Latest(s.Config.BackupDir)
-	if err != nil || !manifest.Covers(t, messages, events) {
+	msgs, err := s.Store.Messages(ctx, t.ID)
+	if err != nil {
+		return err
+	}
+	if t.Status.Active() && t.TopicChatID == chatID && t.TopicID == topicID {
 		return domain.ErrConflict
 	}
-	var retiredAt time.Time
-	if t.TopicChatID == chatID && t.TopicID == topicID {
-		if t.Status.Active() || t.ClosedAt == nil {
+	for _, event := range events {
+		var target completionTarget
+		if event.Kind != "completion_cleanup_requested" || json.Unmarshal(event.Data, &target) != nil || target.ChatID != chatID || target.TopicID != topicID || target.CompletionKey == "" {
+			continue
+		}
+		dir := proofDirectory(events, target.CompletionKey)
+		if dir == "" {
 			return domain.ErrConflict
 		}
-		retiredAt = *t.ClosedAt
-	} else {
-		for _, event := range events {
-			if event.Kind != "topic_retired" {
-				continue
-			}
-			var p struct {
-				ChatID  int64 `json:"chat_id"`
-				TopicID int64 `json:"topic_id"`
-			}
-			if json.Unmarshal(event.Data, &p) == nil && p.ChatID == chatID && p.TopicID == topicID {
-				retiredAt = event.CreatedAt
-			}
+		manifest, err := archive.Load(dir)
+		if err != nil || !manifest.CoversCompletion(t, msgs, events, event) {
+			return domain.ErrConflict
 		}
+		return nil
 	}
-	if retiredAt.IsZero() || now.Sub(retiredAt) < time.Duration(s.Config.TopicRetentionDays)*24*time.Hour {
-		return domain.ErrConflict
-	}
-	return nil
+	return domain.ErrConflict
 }
