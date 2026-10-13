@@ -514,6 +514,9 @@ func (a *Adapter) staff(ctx context.Context, m *Message) error {
 	if err != nil {
 		return err
 	}
+	if consumed, e := a.engineerKeyboardAction(ctx, m); consumed {
+		return e
+	}
 	text := strings.TrimSpace(m.Text)
 	if text == "/help" || text == "/menu" {
 		if text == "/menu" {

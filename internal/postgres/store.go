@@ -27,6 +27,9 @@ var refreshCardsMigration string
 //go:embed completion_cleanup.sql
 var completionCleanupMigration string
 
+//go:embed engineer_cards.sql
+var engineerCardsMigration string
+
 type Store struct{ pool *pgxpool.Pool }
 type transaction struct{ tx pgx.Tx }
 
@@ -77,10 +80,19 @@ func (s *Store) Migrate(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		if marker.RowsAffected() != 0 {
+			if _, err = tx.Exec(ctx, completionCleanupMigration); err != nil {
+				return err
+			}
+		}
+		marker, err = tx.Exec(ctx, "INSERT INTO bvk_migrations(version) VALUES('005_engineer_cards') ON CONFLICT(version) DO NOTHING")
+		if err != nil {
+			return err
+		}
 		if marker.RowsAffected() == 0 {
 			return nil
 		}
-		_, err = tx.Exec(ctx, completionCleanupMigration)
+		_, err = tx.Exec(ctx, engineerCardsMigration)
 		return err
 	})
 }

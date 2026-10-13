@@ -93,7 +93,7 @@ func TestClaimTopicReplaysDeferredMessagesWithoutDuplicates(t *testing.T) {
 	if len(replayed) != 2 {
 		t.Fatal("backlog message lost", replayed)
 	}
-	if len(store.events) != 3 {
+	if len(store.events) != 4 {
 		t.Fatal("initial-card or replay mappings missing", store.events)
 	}
 }

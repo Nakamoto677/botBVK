@@ -22,7 +22,7 @@ type prompt struct {
 
 func scope(actor int64, m *Message) promptKey { return promptKey{actor, m.Chat.ID, m.ThreadID} }
 func (a *Adapter) promptText(ctx context.Context, m *Message, actor, ticket int64, text string) error {
-	return a.sayAux(ctx, m, actor, actionScenario(ticket), fmt.Sprintf("Заявка #%d: %s", ticket, text), [][]Button{{{Text: "Отмена", Data: fmt.Sprintf("promptcancel:%d", ticket)}}})
+	return a.sayAux(ctx, m, actor, actionScenario(ticket), fmt.Sprintf("Заявка #%d: %s", ticket, text), [][]Button{{{Text: "Отменить", Data: fmt.Sprintf("promptcancel:%d", ticket)}}})
 }
 func (a *Adapter) beginStaffPrompt(ctx context.Context, c *Callback, id int64, action string) error {
 	if c.Message == nil {
@@ -67,7 +67,7 @@ func (a *Adapter) beginStaffPrompt(ctx context.Context, c *Callback, id int64, a
 			buttons = append(buttons, []Button{{Text: departmentName(d), Data: fmt.Sprintf("transferdept:%d:%s", id, d)}})
 		}
 	}
-	buttons = append(buttons, []Button{{Text: "Отмена", Data: fmt.Sprintf("promptcancel:%d", id)}})
+	buttons = append(buttons, []Button{{Text: "Отменить", Data: fmt.Sprintf("promptcancel:%d", id)}})
 	return a.sayAux(ctx, c.Message, c.From.ID, actionScenario(id), fmt.Sprintf("Заявка #%d: выберите отдел для передачи.", id), buttons)
 }
 func (a *Adapter) beginCancel(ctx context.Context, actor int64, m *Message, id int64) error {

@@ -139,10 +139,10 @@ func TestInitialTopicCardSupportsPublicReplyAndRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bound.TopicMessageID != 99 || len(store.events) != 1 {
+	if bound.TopicMessageID != 99 || len(store.events) != 2 {
 		t.Fatal("initial card not persisted", bound, store.events)
 	}
-	if _, err = worker.ensureTopicCard(context.Background(), bound); err != nil || calls != 1 {
+	if _, err = worker.ensureTopicCard(context.Background(), bound); err != nil || calls != 2 {
 		t.Fatalf("retry duplicated card: %v calls %d", err, calls)
 	}
 	adapterStore := &adapterStore{user: domain.User{ID: 2, Role: "engineer", Approved: true, Departments: []domain.Department{domain.IT}}, ticket: bound, events: store.events}

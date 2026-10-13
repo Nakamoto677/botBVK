@@ -96,23 +96,9 @@ func (w *Worker) send(ctx context.Context, chat, topic int64, text string, butto
 	return w.client.Send(ctx, chat, topic, text, buttons)
 }
 func card(t domain.Ticket) string {
-	return ticketText(t, "Клиент", "Компания", "Специалист")
+	return engineerCardText(t, "Клиент", "Компания", "Специалист")
 }
-func cardButtons(t domain.Ticket) [][]Button {
-	if !t.Status.Active() {
-		return nil
-	}
-	id := fmt.Sprint(t.ID)
-	if t.Status == domain.New {
-		return [][]Button{{{Text: "Взять в работу", Data: "claim:" + id}, {Text: "Передать", Data: "transfer:" + id}}, {{Text: "История", Data: "history:" + id}}}
-	}
-	buttons := [][]Button{}
-	if t.TopicID != 0 && t.TopicChatID < 0 {
-		chat := strings.TrimPrefix(fmt.Sprint(t.TopicChatID), "-100")
-		buttons = append(buttons, []Button{{Text: "Открыть", URL: fmt.Sprintf("https://t.me/c/%s/%d", chat, t.TopicID)}})
-	}
-	return append(buttons, []Button{{Text: "Закрыть", Data: "close:" + id}, {Text: "Передать", Data: "transfer:" + id}}, []Button{{Text: "Ждём клиента", Data: "waiting:" + id}, {Text: "Продолжить", Data: "resume:" + id}}, []Button{{Text: "История", Data: "history:" + id}})
-}
+func cardButtons(t domain.Ticket) [][]Button { return engineerQueueButtons(t) }
 func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 	var payload struct {
 		Text              string            `json:"text"`
@@ -310,7 +296,7 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 		if err = w.rate(ctx, chat); err != nil {
 			return err
 		}
-		return messageEditError(w.client.Call(ctx, "editMessageText", map[string]any{"chat_id": chat, "message_id": payload.MessageID, "text": text + "\nПередано в отдел: " + departmentName(payload.ToDepartment), "reply_markup": Markup{Buttons: [][]Button{}}}, nil))
+		return messageEditError(w.client.Call(ctx, "editMessageText", map[string]any{"chat_id": chat, "message_id": payload.MessageID, "text": text + "\nПередано в отдел: " + departmentName(payload.ToDepartment), "parse_mode": "HTML", "reply_markup": Markup{Buttons: [][]Button{}}}, nil))
 	case "team_notification":
 		_, err = w.send(ctx, team.ChatID, team.QueueTopicID, payload.Text, nil)
 		return err
@@ -485,14 +471,19 @@ func (w *Worker) refresh(ctx context.Context, t domain.Ticket) error {
 		return err
 	}
 	if t.TopicID != 0 && t.TopicMessageID != 0 {
-		buttons := cardButtons(t)
+		buttons := engineerTopicButtons(t)
 		if t.Status == domain.New {
 			buttons = [][]Button{}
 		}
 		if err = w.rate(ctx, t.TopicChatID); err != nil {
 			return err
 		}
-		if err = messageEditError(w.client.Call(ctx, "editMessageText", map[string]any{"chat_id": t.TopicChatID, "message_id": t.TopicMessageID, "text": text, "reply_markup": Markup{Buttons: buttons}}, nil)); err != nil {
+		if err = messageEditError(w.client.Call(ctx, "editMessageText", map[string]any{"chat_id": t.TopicChatID, "message_id": t.TopicMessageID, "text": text, "parse_mode": "HTML", "reply_markup": Markup{Buttons: buttons}}, nil)); err != nil {
+			return err
+		}
+	}
+	if t.TopicID != 0 && provisioningStatus(t.Status) {
+		if err = w.ensureEngineerKeyboard(ctx, t); err != nil {
 			return err
 		}
 	}
@@ -500,14 +491,14 @@ func (w *Worker) refresh(ctx context.Context, t domain.Ticket) error {
 		if err = w.rate(ctx, team.ChatID); err != nil {
 			return err
 		}
-		err := w.client.Call(ctx, "editMessageText", map[string]any{"chat_id": team.ChatID, "message_id": t.QueueMessageID, "text": text, "reply_markup": Markup{cardButtons(t)}}, nil)
+		err := w.client.Call(ctx, "editMessageText", map[string]any{"chat_id": team.ChatID, "message_id": t.QueueMessageID, "text": text, "parse_mode": "HTML", "reply_markup": Markup{cardButtons(t)}}, nil)
 		var api *APIError
 		if errors.As(err, &api) && strings.Contains(api.Description, "message is not modified") {
 			return nil
 		}
 		return err
 	}
-	sent, err := w.send(ctx, team.ChatID, team.QueueTopicID, text, cardButtons(t))
+	sent, err := w.sendEngineerCard(ctx, team.ChatID, team.QueueTopicID, text, cardButtons(t))
 	if err != nil {
 		return err
 	}
@@ -631,7 +622,7 @@ func (w *Worker) archive(ctx context.Context, t domain.Ticket, msg domain.Messag
 
 func (w *Worker) ensureTopicCard(ctx context.Context, t domain.Ticket) (domain.Ticket, error) {
 	if t.TopicMessageID != 0 {
-		return t, nil
+		return t, w.ensureEngineerKeyboard(ctx, t)
 	}
 	if t.TopicID == 0 {
 		return t, domain.ErrConflict
@@ -640,7 +631,7 @@ func (w *Worker) ensureTopicCard(ctx context.Context, t domain.Ticket) (domain.T
 	if err != nil {
 		return t, err
 	}
-	sent, err := w.send(ctx, t.TopicChatID, t.TopicID, text, cardButtons(t))
+	sent, err := w.sendEngineerCard(ctx, t.TopicChatID, t.TopicID, text, engineerTopicButtons(t))
 	if err != nil {
 		return t, err
 	}
@@ -663,6 +654,9 @@ func (w *Worker) ensureTopicCard(ctx context.Context, t domain.Ticket) (domain.T
 		t = current
 		return nil
 	})
+	if err == nil {
+		err = w.ensureEngineerKeyboard(ctx, t)
+	}
 	return t, err
 }
 
@@ -693,7 +687,7 @@ func (w *Worker) card(ctx context.Context, t domain.Ticket) (string, error) {
 			return "", err
 		}
 	}
-	text := ticketText(t, name, company, assignee)
+	text := engineerCardText(t, name, company, assignee)
 	if t.Status == domain.New {
 		messages, e := w.store.Messages(ctx, t.ID)
 		if e != nil {

@@ -333,3 +333,36 @@ func TestCompletionMigrationRetainsHistoricalTopics(t *testing.T) {
 		t.Fatalf("historical=%s new=%s", historical, current)
 	}
 }
+
+func TestEngineerCardsMigrationOnlyRefreshesExistingCardsOnce(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	v := seed(t, s)
+	if _, err := s.pool.Exec(ctx, `UPDATE bvk_tickets SET payload=payload||'{"queue_message_id":77,"topic_message_id":88}'::jsonb WHERE id=$1`, v.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `DELETE FROM bvk_migrations WHERE version='005_engineer_cards'`); err != nil {
+		t.Fatal(err)
+	}
+	var before []byte
+	if err := s.pool.QueryRow(ctx, `SELECT payload FROM bvk_tickets WHERE id=$1`, v.ID).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var refreshes, deletes int
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FILTER(WHERE kind='refresh_card'),count(*) FILTER(WHERE kind='delete_topic') FROM bvk_outbox WHERE ticket_id=$1`, v.ID).Scan(&refreshes, &deletes); err != nil {
+		t.Fatal(err)
+	}
+	var after []byte
+	if err := s.pool.QueryRow(ctx, `SELECT payload FROM bvk_tickets WHERE id=$1`, v.ID).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) || refreshes != 1 || deletes != 0 {
+		t.Fatalf("migration changed history or repeated cards: refresh=%d delete=%d", refreshes, deletes)
+	}
+}
