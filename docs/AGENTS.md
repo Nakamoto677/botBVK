@@ -9,3 +9,9 @@ Use profile branches from the current shared baseline. Coordinate shared domain
 contracts before parallel edits. Review integration and test the complete lifecycle.
 Preserve existing records and archives; new completion cleanup must never bulk-delete
 topics belonging to historical closures. Report real Telegram pilot separately from mocks.
+
+Apply $telegram-bot-ui when working on the bot interface: messages, button labels,
+keyboards, menus, navigation, confirmations, and error states. Read
+.agents/skills/telegram-bot-ui/SKILL.md and the relevant bundled references before
+making interface changes. Preserve the requirements in PLAN.md and existing
+business logic; explicit user instructions take precedence over skill guidelines.

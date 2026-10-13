@@ -1,0 +1,132 @@
+package telegram
+
+import (
+	"bot-bvk/internal/domain"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"github.com/jackc/pgx/v5/pgconn"
+	"io"
+	"log"
+	"net"
+	"time"
+)
+
+func businessError(err error) bool {
+	return errors.Is(err, domain.ErrInvalid) || errors.Is(err, domain.ErrForbidden) || errors.Is(err, domain.ErrConflict) || errors.Is(err, domain.ErrNotFound)
+}
+func (a *Adapter) processUpdate(ctx context.Context, entry domain.StoredUpdate) error {
+	var u Update
+	err := json.Unmarshal(entry.Payload, &u)
+	malformed := err != nil
+	if !malformed {
+		a.activeUpdate = entry.ID
+		a.activeActor = 0
+		if u.Callback != nil {
+			a.activeActor = u.Callback.From.ID
+		} else if u.Message != nil {
+			a.activeActor = u.Message.From.ID
+		} else if u.EditedMessage != nil {
+			a.activeActor = u.EditedMessage.From.ID
+		}
+		a.screenSequence = 0
+		err = a.Handle(ctx, u)
+		a.activeUpdate = 0
+		a.activeActor = 0
+	}
+	if err == nil || businessError(err) {
+		if err != nil {
+			a.respondError(ctx, u, err)
+		}
+		return a.store.FinishUpdate(ctx, entry.ID)
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	// Never convert a database or connection failure into a poison message.
+	var db *pgconn.PgError
+	var connection *pgconn.ConnectError
+	var network *net.OpError
+	if errors.As(err, &db) || errors.As(err, &connection) || errors.As(err, &network) || errors.Is(err, io.EOF) || pgconn.SafeToRetry(err) || pgconn.Timeout(err) {
+		return err
+	}
+	if e := a.store.Ping(ctx); e != nil {
+		return e
+	}
+	retry, ok := a.store.(domain.RetryInbox)
+	if !ok {
+		return err
+	}
+	var api *APIError
+	permanent := malformed
+	delay := time.Duration(1<<min(entry.Attempts+1, 8)) * time.Second
+	if errors.As(err, &api) {
+		permanent = api.Code >= 400 && api.Code < 500 && api.Code != 429
+		if api.RetryAfter > 0 {
+			delay = time.Duration(api.RetryAfter) * time.Second
+		}
+	}
+	quarantine := permanent || entry.Attempts+1 >= 5
+	if e := retry.RetryUpdate(ctx, entry.ID, err.Error(), delay, quarantine); e != nil {
+		return e
+	}
+	log.Printf("inbox update %d attempt %d quarantined=%t: %v", entry.ID, entry.Attempts+1, quarantine, err)
+	if quarantine {
+		w := NewWorker(a.client, a.store, a.cfg)
+		return w.notifyAdmins(ctx, fmt.Sprintf("Входящее действие %d изолировано после ошибки; исходные данные сохранены, зависимые действия и удаление архива заблокированы.", entry.ID))
+	}
+	return nil
+}
+
+func (a *Adapter) queueScreen(ctx context.Context, m *Message, actor int64, scenario, text string, markup any) error {
+	if a.activeActor != 0 {
+		actor = a.activeActor
+	}
+	a.screenSequence++
+	raw, _ := json.Marshal(map[string]any{"user_id": actor, "chat_id": m.Chat.ID, "topic_id": m.ThreadID, "text": text, "markup": markup, "scenario": clientAuxScenario(m, scenario, text), "ui_key": fmt.Sprintf("%d:%d", a.activeUpdate, a.screenSequence)})
+	return a.store.Transact(ctx, func(tx domain.Tx) error {
+		return tx.Enqueue(ctx, domain.Operation{Kind: "ui_screen", Payload: raw, State: "pending"})
+	})
+}
+
+func (w *Worker) uiScreen(ctx context.Context, op domain.Operation) error {
+	var p struct {
+		UserID   int64           `json:"user_id"`
+		ChatID   int64           `json:"chat_id"`
+		TopicID  int64           `json:"topic_id"`
+		Text     string          `json:"text"`
+		Markup   json.RawMessage `json:"markup"`
+		Scenario string          `json:"scenario"`
+	}
+	if json.Unmarshal(op.Payload, &p) != nil {
+		return domain.ErrInvalid
+	}
+	parts := splitText(p.Text, messageLimit)
+	for i, text := range parts {
+		sent, err := w.confirmedPart(ctx, fmt.Sprintf("ui:%d", op.ID), i, func() (Message, error) {
+			if err := w.rate(ctx, p.ChatID); err != nil {
+				return Message{}, err
+			}
+			payload := map[string]any{"chat_id": p.ChatID, "text": text}
+			if p.TopicID != 0 {
+				payload["message_thread_id"] = p.TopicID
+			}
+			if i == len(parts)-1 && len(p.Markup) > 0 && string(p.Markup) != "null" {
+				payload["reply_markup"] = p.Markup
+			}
+			var result Message
+			err := w.client.Call(ctx, "sendMessage", payload, &result)
+			return result, err
+		})
+		if err != nil {
+			return err
+		}
+		if store, ok := w.store.(domain.WorkflowStore); ok && p.Scenario != "" && sent.ID > 0 {
+			if err := store.SaveAuxiliary(ctx, domain.AuxiliaryMessage{UserID: p.UserID, ChatID: p.ChatID, TopicID: p.TopicID, Scenario: p.Scenario, MessageID: sent.ID}); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}

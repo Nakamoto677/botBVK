@@ -26,7 +26,7 @@ type Config struct {
 	DatabaseURL          string                     `json:"-"`
 	Token                string                     `json:"-"`
 	AdminID              int64                      `json:"admin_id"`
-	Companies            []string                   `json:"companies"`
+	Companies            Companies                  `json:"companies"`
 	Staff                []Staff                    `json:"staff"`
 	Departments          map[domain.Department]Team `json:"departments"`
 	ArchiveDir           string                     `json:"archive_dir"`
@@ -68,6 +68,9 @@ func Load(path string) (Config, error) {
 		if e != nil {
 			return c, e
 		}
+	}
+	if _, ok := raw["companies"]; !ok {
+		return c, fmt.Errorf("companies is required; use [] explicitly for no companies")
 	}
 	encoded, e := json.Marshal(raw)
 	if e != nil {

@@ -154,6 +154,9 @@ func TestHistoryShowsInitialDescriptionAndRevisionsWithoutInternalNotes(t *testi
 	if err := a.Handle(context.Background(), Update{Message: &Message{From: Person{ID: 1}, Chat: Chat{ID: 1, Type: "private"}, Text: "/history 7"}}); err != nil {
 		t.Fatal(err)
 	}
+	if err := a.historyPage(context.Background(), &Message{From: Person{ID: 1}, Chat: Chat{ID: 1, Type: "private"}}, store.user, store.ticket, 1, 0); err != nil {
+		t.Fatal(err)
+	}
 	text := transcript.String()
 	if !strings.Contains(text, "Initial problem") || !strings.Contains(text, "Original detail") || strings.Contains(text, "SECRET NOTE") {
 		t.Fatal("wrong transcript", text)

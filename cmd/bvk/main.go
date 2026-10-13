@@ -59,7 +59,7 @@ func run() error {
 	if err = store.Migrate(ctx); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
-	if err = store.Bootstrap(ctx, cfg.AdminID, cfg.Companies); err != nil {
+	if err = store.BootstrapCompanies(ctx, cfg.AdminID, cfg.Companies); err != nil {
 		return fmt.Errorf("bootstrap: %w", err)
 	}
 	if err = bootstrapStaff(ctx, store, cfg.Staff); err != nil {

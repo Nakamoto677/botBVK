@@ -15,11 +15,14 @@ const actionWorkflow = "active_action"
 
 func actionScenario(ticket int64) string { return "action:" + strconv.FormatInt(ticket, 10) }
 func (a *Adapter) sayAux(ctx context.Context, m *Message, actor int64, scenario, text string, buttons [][]Button) error {
+	if a.activeUpdate != 0 {
+		return a.queueScreen(ctx, m, actor, scenario, text, Markup{buttons})
+	}
 	sent, err := a.client.Send(ctx, m.Chat.ID, m.ThreadID, text, buttons)
 	if err != nil {
 		return err
 	}
-	return a.recordAux(ctx, m, actor, scenario, sent.ID)
+	return a.recordAux(ctx, m, actor, clientAuxScenario(m, scenario, text), sent.ID)
 }
 func (a *Adapter) recordAux(ctx context.Context, m *Message, actor int64, scenario string, id int64) error {
 	if id <= 0 {

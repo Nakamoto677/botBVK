@@ -106,7 +106,14 @@ func (a *Adapter) engineerKeyboardAction(ctx context.Context, m *Message) (bool,
 	if t.TopicID == 0 || m.Chat.ID != t.TopicChatID || m.ThreadID != t.TopicID || !t.Status.Active() || m.ThreadID == a.cfg.Departments[t.Department].QueueTopicID {
 		return true, domain.ErrConflict
 	}
-	return true, a.beginStaffPrompt(ctx, &Callback{From: m.From, Message: m}, t.ID, action)
+	if err = a.beginStaffPrompt(ctx, &Callback{From: m.From, Message: m}, t.ID, action); err != nil {
+		return true, err
+	}
+	// Only this validated control message is disposable, never free-text input.
+	if action == "transfer" {
+		return true, a.recordAux(ctx, m, m.From.ID, actionScenario(t.ID), m.ID)
+	}
+	return true, nil
 }
 func (w *Worker) ensureEngineerKeyboard(ctx context.Context, t domain.Ticket) error {
 	events, err := w.store.Events(ctx, t.ID)

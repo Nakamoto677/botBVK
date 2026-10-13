@@ -10,13 +10,13 @@ func TestLoadValidation(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://localhost/test")
 	t.Setenv("TELEGRAM_BOT_TOKEN", "")
 	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(`{"admin_id":1,"staff":[{"id":2,"role":"owner"}]}`), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"admin_id":1,"companies":[],"staff":[{"id":2,"role":"owner"}]}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Load(path); err == nil {
 		t.Fatal("invalid role accepted")
 	}
-	if err := os.WriteFile(path, []byte(`{"admin_id":1}`), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"admin_id":1,"companies":[]}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	c, err := Load(path)
@@ -34,7 +34,7 @@ func TestLoadValidation(t *testing.T) {
 func TestRemovedRoutingSettingsDoNotBreakExistingConfig(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://localhost/test")
 	path := filepath.Join(t.TempDir(), "config.json")
-	old := `{"admin_id":1,"dispatcher_chat_id":-1009,"departments":{"it":{"chat_id":-1001,"queue_topic_id":2,"duty_user_id":12}}}`
+	old := `{"admin_id":1,"companies":[],"dispatcher_chat_id":-1009,"departments":{"it":{"chat_id":-1001,"queue_topic_id":2,"duty_user_id":12}}}`
 	if err := os.WriteFile(path, []byte(old), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +45,7 @@ func TestRemovedRoutingSettingsDoNotBreakExistingConfig(t *testing.T) {
 	if config.Departments["it"].ChatID != -1001 {
 		t.Fatal("upgrade changed department routing")
 	}
-	if err := os.WriteFile(path, []byte(`{"admin_id":1,"unrecognized_setting":1}`), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"admin_id":1,"companies":[],"unrecognized_setting":1}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = Load(path); err == nil {

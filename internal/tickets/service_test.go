@@ -223,7 +223,7 @@ func TestTransferRetainsHistoryAndReopen(t *testing.T) {
 	}
 	var payload map[string]any
 	_ = json.Unmarshal(f.ops[before].Payload, &payload)
-	if payload["topic_id"] != float64(5) || payload["retire"] != true {
+	if payload["topic_id"] != float64(5) || payload["retire"] != true || payload["to_department"] != string(domain.OneC) {
 		t.Fatal(payload)
 	}
 	if err := s.Claim(t.Context(), 3, v.ID); err != nil {
@@ -286,8 +286,8 @@ func TestEditArchivesAndOnlyClientCorrectionIsDelivered(t *testing.T) {
 	if err := s.EditMessage(ctx, 2, ticket.ID, domain.Message{Text: "changed answer", TelegramChatID: -100, TelegramMessageID: 100}); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.ops) != count {
-		t.Fatal("outbound edit resent")
+	if len(f.ops) != count+1 || f.ops[len(f.ops)-1].Kind != "client_message" {
+		t.Fatal("public correction missing")
 	}
 	_ = s.Close(ctx, 2, ticket.ID, "fixed")
 	count = len(f.ops)

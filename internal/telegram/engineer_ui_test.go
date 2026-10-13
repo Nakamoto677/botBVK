@@ -135,3 +135,86 @@ func TestEngineerKeyboardDurableOncePerBindingAndTopicMarkupSeparate(t *testing.
 		t.Fatal("new topic did not receive controls")
 	}
 }
+
+func TestClientContactTracksUsernameChangesAndMissingUsername(t *testing.T) {
+	ctx := context.Background()
+	store := &adapterStore{user: domain.User{ID: 1, Name: "Иван", Username: "old", Role: "client", Approved: true}}
+	a := NewAdapter(nil, store, nil, Config{})
+	for _, username := range []string{"new_name", ""} {
+		if err := a.updateName(ctx, store.user, Person{ID: 1, FirstName: "Иван", Username: username}); err != nil {
+			t.Fatal(err)
+		}
+		if store.user.Username != username || !store.user.Approved {
+			t.Fatal(store.user)
+		}
+		name, err := clientContact(ctx, store, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "Telegram: не указан"
+		if username != "" {
+			want = "@" + username
+		}
+		ticket := domain.Ticket{ID: 7, Department: domain.IT}
+		for _, text := range []string{ticketText(ticket, name, "Компания", ""), engineerCardText(ticket, name, "Компания", "")} {
+			if !strings.Contains(text, want) {
+				t.Fatal(text)
+			}
+		}
+	}
+	var person Person
+	if err := json.Unmarshal([]byte(`{"id":1,"first_name":"Иван","username":"incoming"}`), &person); err != nil || person.Username != "incoming" {
+		t.Fatal(person, err)
+	}
+}
+
+func TestTransferPromptCommentAndControlCleanup(t *testing.T) {
+	for _, cancelBeforeDepartment := range []bool{true, false} {
+		ctx := context.Background()
+		client, requests := uiClient(t)
+		s := &durableUIStore{adapterStore: &adapterStore{user: domain.User{ID: 2, Role: "engineer", Approved: true, Departments: []domain.Department{domain.IT}}, ticket: domain.Ticket{ID: 7, Status: domain.InProgress, Department: domain.IT, AssigneeID: 2, TopicChatID: -100, TopicID: 10}}, workflows: map[promptKey][]byte{}, aux: map[auxKey][]domain.AuxiliaryMessage{}}
+		svc := &adapterService{}
+		a := NewAdapter(client, s, svc, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100, QueueTopicID: 1}}})
+		m := &Message{ID: 80, From: Person{ID: 2}, Chat: Chat{ID: -100, Type: "supergroup"}, ThreadID: 10, Text: engineerTransferLabel}
+		if err := a.Handle(ctx, Update{Message: m}); err != nil {
+			t.Fatal(err)
+		}
+		// Restart must retain the engineer control's cleanup scope.
+		a = NewAdapter(client, s, svc, a.cfg)
+		if !cancelBeforeDepartment {
+			if err := a.promptCallback(ctx, &Callback{From: m.From, Message: m}, "transferdept", 7, []string{"transferdept", "7", "1c"}); err != nil {
+				t.Fatal(err)
+			}
+			want := "Передача заявки #7\n\nОтдел: 1С\n\nНапишите комментарий к передаче следующим сообщением.\nЕсли комментарий не нужен, отправьте прочерк «-»."
+			if (*requests)[len(*requests)-1]["text"] != want {
+				t.Fatal(*requests)
+			}
+			m.ID = 81
+			m.Text = "-"
+			if _, err := a.consumePrompt(ctx, m, s.user); err != nil {
+				t.Fatal(err)
+			}
+			if svc.transferReason != "-" || len(svc.messages) != 0 {
+				t.Fatal("comment sent as public reply")
+			}
+		} else if err := a.promptCallback(ctx, &Callback{From: m.From, Message: m}, "promptcancel", 7, []string{"promptcancel", "7"}); err != nil {
+			t.Fatal(err)
+		}
+		removed := false
+		for _, op := range s.operations {
+			var p struct {
+				ID int64 `json:"message_id"`
+			}
+			json.Unmarshal(op.Payload, &p)
+			if p.ID == 80 {
+				removed = true
+			}
+			if p.ID == 81 {
+				t.Fatal("free-text reason deleted")
+			}
+		}
+		if !removed {
+			t.Fatal("transfer control retained")
+		}
+	}
+}

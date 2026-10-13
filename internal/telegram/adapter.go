@@ -5,8 +5,6 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -43,11 +41,12 @@ type DraftStore interface {
 	Draft(context.Context, int64) (domain.Department, string, error)
 	DeleteDraft(context.Context, int64) error
 }
-type draft struct {
-	Department domain.Department
-	Text       string
-}
+type draft = domain.Draft
 type Adapter struct {
+	activeUpdate   int64
+	activeActor    int64
+	screenSequence int
+
 	client    *Client
 	store     domain.Store
 	service   Service
@@ -72,35 +71,16 @@ func (a *Adapter) Run(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		failed := false
 		for _, entry := range pending {
-			var u Update
-			if err = json.Unmarshal(entry.Payload, &u); err != nil {
-				return fmt.Errorf("invalid stored update %d: %w", entry.ID, err)
-			}
-			err = a.Handle(ctx, u)
-			if err != nil {
-				if errors.Is(err, domain.ErrForbidden) || errors.Is(err, domain.ErrInvalid) || errors.Is(err, domain.ErrConflict) || errors.Is(err, domain.ErrNotFound) {
-					a.respondError(ctx, u, err)
-				} else {
-					failed = true
-					break
-				}
-			}
-			if err = a.store.FinishUpdate(ctx, entry.ID); err != nil {
+			if err = a.processUpdate(ctx, entry); err != nil {
 				return err
 			}
 		}
-		if !failed && len(pending) == 100 {
-			continue
+		pollTimeout := 50
+		if len(pending) > 0 {
+			pollTimeout = 0
 		}
-		if failed {
-			if !pause(ctx, 2*time.Second) {
-				break
-			}
-			continue
-		}
-		updates, err := a.client.Updates(ctx, offset)
+		updates, err := a.client.updatesTimeout(ctx, offset, pollTimeout)
 		if err != nil {
 			if !pause(ctx, 2*time.Second) {
 				break
@@ -159,6 +139,13 @@ func (a *Adapter) respondError(ctx context.Context, u Update, err error) {
 	}
 }
 func (a *Adapter) say(ctx context.Context, m *Message, text string, buttons [][]Button) error {
+	if a.activeUpdate != 0 {
+		var markup any
+		if buttons != nil {
+			markup = Markup{buttons}
+		}
+		return a.queueScreen(ctx, m, m.From.ID, "", text, markup)
+	}
 	_, err := a.client.Send(ctx, m.Chat.ID, m.ThreadID, text, buttons)
 	return err
 }
@@ -208,15 +195,7 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 		} else if e != nil && !errors.Is(e, domain.ErrNotFound) {
 			return e
 		}
-		companies, err := a.store.Companies(ctx)
-		if err != nil {
-			return err
-		}
-		buttons := [][]Button{}
-		for _, c := range companies {
-			buttons = append(buttons, []Button{{Text: c.Name, Data: fmt.Sprintf("company:%d", c.ID)}})
-		}
-		return a.sayAux(ctx, m, m.From.ID, "registration", "Выберите компанию. Доступ подтвердит администратор.", buttons)
+		return a.registrationCompanies(ctx, m, m.From.ID, false)
 	}
 	user, err := a.store.User(ctx, m.From.ID)
 	if err != nil {
@@ -242,6 +221,9 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 			a.cleanupBestEffort(ctx, key, "draft")
 		}
 		return a.menu(ctx, m, user)
+	}
+	if text == "/form" {
+		return a.resumeDraft(ctx, m)
 	}
 	if text == "/help" {
 		return a.help(ctx, m, user)
@@ -277,6 +259,9 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 	if text == "/history" || strings.HasPrefix(text, "/history ") {
 		return a.historyCommand(ctx, m, user)
 	}
+	if text == "/ticket" || strings.HasPrefix(text, "/ticket ") {
+		return a.exactTicket(ctx, m, user)
+	}
 	if text == "/tickets" {
 		return a.ticketList(ctx, m, user)
 	}
@@ -293,12 +278,16 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 		} else if !errors.Is(err, domain.ErrNotFound) {
 			return err
 		}
+		d := draft{Generation: a.formGeneration(m), Step: "department"}
+		if err := a.saveDraft(ctx, m.From.ID, d); err != nil {
+			return err
+		}
 		a.cleanupBestEffort(ctx, scope(m.From.ID, m), "client_home")
 		a.cleanupBestEffort(ctx, scope(m.From.ID, m), "draft")
 		if err := a.clientScreen(ctx, m, "draft", "Создание заявки.", clientDraftKeyboard); err != nil {
 			return err
 		}
-		return a.sayAux(ctx, m, m.From.ID, "draft", "Выберите направление.", departmentButtons("new"))
+		return a.sayAux(ctx, m, m.From.ID, "draft", "Выберите направление.", draftDepartments(d))
 	}
 	if strings.HasPrefix(text, "/") {
 		return a.help(ctx, m, user)
@@ -317,19 +306,34 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 			return e
 		}
 	}
-	if ok {
+	if ok && d.Step != "submitted" {
+		if !d.Department.Valid() {
+			return a.resumeDraft(ctx, m)
+		}
 		if strings.HasPrefix(text, "/") {
 			return domain.ErrInvalid
 		}
 		d.Text = messageText(m)
 		if strings.TrimSpace(d.Text) == "" {
-			return a.say(ctx, m, "Сначала опишите проблему текстом. Вложения можно отправить после создания заявки.", nil)
+			return a.say(ctx, m, "Добавьте описание текстом или подписью к вложению.", nil)
+		}
+		d.Generation = a.formGeneration(m)
+		d.Step = "confirm"
+		attachment := normalise(m, false)
+		if attachment.FileID != "" {
+			found := false
+			for _, v := range d.Attachments {
+				found = found || v.TelegramChatID == attachment.TelegramChatID && v.TelegramMessageID == attachment.TelegramMessageID
+			}
+			if !found {
+				d.Attachments = append(d.Attachments, attachment)
+			}
 		}
 		if err := a.saveDraft(ctx, m.From.ID, d); err != nil {
 			return err
 		}
 		a.cleanupBestEffort(ctx, scope(m.From.ID, m), "draft")
-		return a.sayAux(ctx, m, m.From.ID, "draft", "Создать заявку?\n"+d.Text, [][]Button{{{Text: "Отправить", Data: "submit"}, {Text: clientCancelDraftLabel, Data: "cancel"}}})
+		return a.confirmDraft(ctx, m, d)
 	}
 	t, err := a.store.ActiveTicket(ctx, m.From.ID)
 	if err != nil {
@@ -369,6 +373,7 @@ func (a *Adapter) callback(ctx context.Context, c *Callback) error {
 		if c.Message == nil || c.Message.Chat.Type != "private" {
 			return domain.ErrForbidden
 		}
+		_ = a.client.Answer(ctx, c.ID, "")
 		companies, e := a.store.Companies(ctx)
 		if e != nil {
 			return e
@@ -378,9 +383,19 @@ func (a *Adapter) callback(ctx context.Context, c *Callback) error {
 			valid = valid || co.ID == id
 		}
 		if !valid {
-			return domain.ErrInvalid
+			return a.registrationCompanies(ctx, c.Message, c.From.ID, true)
 		}
 		err = a.service.Register(ctx, c.From.ID, strings.TrimSpace(c.From.FirstName+" "+c.From.LastName), id)
+		if errors.Is(err, domain.ErrInvalid) {
+			return a.registrationCompanies(ctx, c.Message, c.From.ID, true)
+		}
+		if err == nil {
+			registered, e := a.store.User(ctx, c.From.ID)
+			if e != nil {
+				return e
+			}
+			err = a.updateName(ctx, registered, c.From)
+		}
 		if err == nil {
 			requests, e := a.store.AccessRequests(ctx)
 			if e != nil {
@@ -402,53 +417,46 @@ func (a *Adapter) callback(ctx context.Context, c *Callback) error {
 	case "approve", "reject":
 		err = a.service.ApproveAccess(ctx, c.From.ID, id, action == "approve")
 	case "new":
-		if c.Message == nil || c.Message.Chat.Type != "private" || c.Message.Chat.ID != c.From.ID {
-			return domain.ErrForbidden
+		d, valid, e := a.boundDraft(ctx, c, parts, "department")
+		if e != nil || !valid {
+			return e
 		}
-		user, e := a.store.User(ctx, c.From.ID)
+		if len(parts) != 3 || !domain.Department(parts[1]).Valid() {
+			return domain.ErrInvalid
+		}
+		u, e := a.store.User(ctx, c.From.ID)
 		if e != nil {
 			return e
 		}
-		if !user.Approved {
+		if !u.Approved || u.Role != "client" {
 			return domain.ErrForbidden
 		}
-		if len(parts) != 2 || !domain.Department(parts[1]).Valid() {
-			return domain.ErrInvalid
-		}
-		if _, e := a.store.ActiveTicket(ctx, c.From.ID); e == nil {
+		if _, e = a.store.ActiveTicket(ctx, c.From.ID); e == nil {
 			return domain.ErrConflict
 		} else if !errors.Is(e, domain.ErrNotFound) {
 			return e
 		}
-		if err := a.saveDraft(ctx, c.From.ID, draft{Department: domain.Department(parts[1])}); err != nil {
+		d.Department = domain.Department(parts[1])
+		d.Step = "description"
+		if err = a.saveDraft(ctx, c.From.ID, d); err != nil {
 			return err
 		}
 		a.cleanupBestEffort(ctx, scope(c.From.ID, c.Message), "draft")
-		err = a.clientScreen(ctx, c.Message, "draft", "Опишите проблему текстом. Вложения отправьте после создания заявки.", clientDraftKeyboard)
+		err = a.clientScreen(ctx, c.Message, "draft", draftDescriptionText, clientDraftKeyboard)
 	case "submit":
-		if c.Message == nil || c.Message.Chat.Type != "private" || c.Message.Chat.ID != c.From.ID {
-			return domain.ErrForbidden
-		}
-		d, ok, e := a.getDraft(ctx, c.From.ID)
-		if e != nil {
+		d, valid, e := a.boundDraft(ctx, c, parts, "confirm")
+		if e != nil || !valid {
 			return e
 		}
-		if !ok || d.Text == "" {
-			return domain.ErrInvalid
-		}
-		var t domain.Ticket
-		t, err = a.service.Create(ctx, c.From.ID, d.Department, d.Text)
+		err = a.submitDraft(ctx, c, d)
 		if err == nil {
-			if err = a.deleteDraft(ctx, c.From.ID); err != nil {
-				return err
-			}
 			a.cleanupBestEffort(ctx, scope(c.From.ID, c.Message), "draft")
-			_ = t
 		}
 	case "cancel":
 		if id == 0 {
-			if c.Message == nil || c.Message.Chat.Type != "private" || c.Message.Chat.ID != c.From.ID {
-				return domain.ErrForbidden
+			_, valid, e := a.boundDraft(ctx, c, parts, "")
+			if e != nil || !valid {
+				return e
 			}
 			err = a.cancelClientDraft(ctx, c.Message)
 		} else {
@@ -466,6 +474,40 @@ func (a *Adapter) callback(ctx context.Context, c *Callback) error {
 		err = a.beginStaffPrompt(ctx, c, id, action)
 	case "transferdept", "cancelconfirm", "promptcancel":
 		err = a.promptCallback(ctx, c, action, id, parts)
+	case "tickets":
+		if c.Message == nil || len(parts) != 3 {
+			return domain.ErrInvalid
+		}
+		page, e := strconv.ParseInt(parts[1], 10, 32)
+		if e != nil || page < 0 {
+			return domain.ErrInvalid
+		}
+		anchor, e := strconv.ParseInt(parts[2], 10, 64)
+		if e != nil || anchor < 0 {
+			return domain.ErrInvalid
+		}
+		u, e := a.store.User(ctx, c.From.ID)
+		if e != nil {
+			return e
+		}
+		err = a.ticketListPage(ctx, c.Message, u, int(page), anchor)
+	case "historyfile":
+		if c.Message == nil || len(parts) != 3 {
+			return domain.ErrInvalid
+		}
+		messageID, e := strconv.ParseInt(parts[2], 10, 64)
+		if e != nil || messageID <= 0 {
+			return domain.ErrInvalid
+		}
+		t, e := a.store.Ticket(ctx, id)
+		if e != nil {
+			return e
+		}
+		u, e := a.store.User(ctx, c.From.ID)
+		if e != nil {
+			return e
+		}
+		err = a.historyFile(ctx, c.Message, u, t, messageID)
 	case "ticket", "history":
 		if c.Message == nil {
 			return domain.ErrInvalid
@@ -481,7 +523,22 @@ func (a *Adapter) callback(ctx context.Context, c *Callback) error {
 		if action == "ticket" {
 			err = a.showTicket(ctx, c.Message, user, t)
 		} else {
-			err = a.history(ctx, c.Message, user, t)
+			page := int64(0)
+			anchor := int64(0)
+			if len(parts) == 4 {
+				var e error
+				page, e = strconv.ParseInt(parts[2], 10, 32)
+				if e != nil {
+					return domain.ErrInvalid
+				}
+				anchor, e = strconv.ParseInt(parts[3], 10, 64)
+				if e != nil || anchor < 0 {
+					return domain.ErrInvalid
+				}
+			} else if len(parts) != 2 {
+				return domain.ErrInvalid
+			}
+			err = a.historyPage(ctx, c.Message, user, t, int(page), anchor)
 		}
 
 	default:
@@ -490,7 +547,13 @@ func (a *Adapter) callback(ctx context.Context, c *Callback) error {
 	if err != nil {
 		return err
 	}
-	return a.client.Answer(ctx, c.ID, "")
+	if c.Message != nil && (action == "new" || action == "submit" || action == "cancel" && id == 0) {
+		_ = a.client.Call(ctx, "editMessageReplyMarkup", map[string]any{"chat_id": c.Message.Chat.ID, "message_id": c.Message.ID, "reply_markup": Markup{Buttons: [][]Button{}}}, nil)
+	}
+	if action != "company" {
+		_ = a.client.Answer(ctx, c.ID, "")
+	}
+	return nil
 }
 func staffAuthorized(u domain.User, t domain.Ticket) bool {
 	if !u.Approved {
@@ -534,6 +597,9 @@ func (a *Adapter) staff(ctx context.Context, m *Message) error {
 	}
 	if text == "/history" || strings.HasPrefix(text, "/history ") {
 		return a.historyCommand(ctx, m, user)
+	}
+	if text == "/ticket" || strings.HasPrefix(text, "/ticket ") {
+		return a.exactTicket(ctx, m, user)
 	}
 	if text == "/tickets" {
 		return a.ticketList(ctx, m, user)
@@ -708,53 +774,13 @@ func (a *Adapter) edit(ctx context.Context, m *Message) error {
 }
 
 func (a *Adapter) history(ctx context.Context, m *Message, u domain.User, t domain.Ticket) error {
-	if !historyAuthorized(u, t) || !a.historyDestination(m, u, t) {
-		return domain.ErrForbidden
-	}
-	messages, err := a.store.Messages(ctx, t.ID)
-	if err != nil {
-		return err
-	}
-	var b strings.Builder
-	company, e := companyName(ctx, a.store, t.CompanyID)
-	if e != nil {
-		return e
-	}
-	fmt.Fprintf(&b, "История #%d · %s · %s\nИсходное обращение: %s\n", t.ID, company, statusName(t.Status), t.Description)
-	for _, v := range messages {
-		if u.Role == "client" && v.Direction == "internal" {
-			continue
-		}
-		author, e := displayName(ctx, a.store, v.AuthorID, "Участник")
-		if e != nil {
-			return e
-		}
-		fmt.Fprintf(&b, "%s %s [%s]: %s", v.CreatedAt.UTC().Format(time.RFC3339), author, v.Direction, v.Text)
-		if v.FileID != "" {
-			state := "не сохранено в независимом архиве"
-			if v.ArchivePath != "" && v.SHA256 != "" {
-				state = "сохранено в архиве"
-			}
-			fmt.Fprintf(&b, " [вложение #%d: %s (%s), %s]", v.ID, v.FileName, v.MediaType, state)
-		}
-		b.WriteByte('\n')
-		for _, revision := range v.Revisions {
-			fmt.Fprintf(&b, "  Предыдущая версия (%s): %s\n", revision.EditedAt.UTC().Format(time.RFC3339), revision.Text)
-		}
-	}
-	return a.sendChunks(ctx, m, b.String())
+	return a.historyPage(ctx, m, u, t, 0, 0)
 }
 func (a *Adapter) sendChunks(ctx context.Context, m *Message, text string) error {
-	r := []rune(text)
-	for len(r) > 0 {
-		n := len(r)
-		if n > 3500 {
-			n = 3500
-		}
-		if err := a.say(ctx, m, string(r[:n]), nil); err != nil {
+	for _, part := range splitText(text, messageLimit) {
+		if err := a.say(ctx, m, part, nil); err != nil {
 			return err
 		}
-		r = r[n:]
 	}
 	return nil
 }
@@ -794,6 +820,13 @@ func (a *Adapter) report(ctx context.Context, m *Message, u domain.User) error {
 }
 
 func (a *Adapter) getDraft(ctx context.Context, id int64) (draft, bool, error) {
+	if store, ok := a.store.(domain.BoundDraftStore); ok {
+		d, err := store.LoadDraft(ctx, id)
+		if errors.Is(err, domain.ErrNotFound) {
+			return draft{}, false, nil
+		}
+		return d, err == nil, err
+	}
 	if store, ok := a.store.(DraftStore); ok {
 		dept, text, err := store.Draft(ctx, id)
 		if errors.Is(err, domain.ErrNotFound) {
@@ -805,6 +838,9 @@ func (a *Adapter) getDraft(ctx context.Context, id int64) (draft, bool, error) {
 	return d, ok, nil
 }
 func (a *Adapter) saveDraft(ctx context.Context, id int64, d draft) error {
+	if store, ok := a.store.(domain.BoundDraftStore); ok {
+		return store.PutDraft(ctx, id, d)
+	}
 	if store, ok := a.store.(DraftStore); ok {
 		return store.SaveDraft(ctx, id, d.Department, d.Text)
 	}
@@ -843,7 +879,7 @@ func historyAuthorized(u domain.User, t domain.Ticket) bool {
 }
 func (a *Adapter) historyDestination(m *Message, u domain.User, t domain.Ticket) bool {
 	if m.Chat.Type == "private" {
-		return true
+		return m.Chat.ID == u.ID
 	}
 	if a.cfg.Departments[t.Department].ChatID == m.Chat.ID {
 		return true
@@ -875,31 +911,5 @@ func (a *Adapter) historyCommand(ctx context.Context, m *Message, u domain.User)
 	return a.history(ctx, m, u, t)
 }
 func (a *Adapter) ticketList(ctx context.Context, m *Message, u domain.User) error {
-	if !u.Approved {
-		return domain.ErrForbidden
-	}
-	tickets, err := a.store.Tickets(ctx)
-	if err != nil {
-		return err
-	}
-	sort.Slice(tickets, func(i, j int) bool { return tickets[i].ID > tickets[j].ID })
-	var b strings.Builder
-	b.WriteString("Ваши последние заявки. Нажмите номер заявки, чтобы открыть её.\n")
-	buttons := [][]Button{}
-	count := 0
-	for _, t := range tickets {
-		if !historyAuthorized(u, t) || !a.historyDestination(m, u, t) {
-			continue
-		}
-		fmt.Fprintf(&b, "#%d · %s · %s\n", t.ID, departmentName(t.Department), statusName(t.Status))
-		buttons = append(buttons, []Button{{Text: fmt.Sprintf("#%d · %s", t.ID, statusName(t.Status)), Data: fmt.Sprintf("ticket:%d", t.ID)}})
-		count++
-		if count == 10 {
-			break
-		}
-	}
-	if count == 0 {
-		b.WriteString("Заявок нет.\n")
-	}
-	return a.say(ctx, m, b.String(), buttons)
+	return a.ticketListPage(ctx, m, u, 0, 0)
 }

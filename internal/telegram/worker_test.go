@@ -202,3 +202,63 @@ func TestAuxiliaryDeletionHasNoTicketDependencyAndMissingMessageIsSuccess(t *tes
 		t.Fatal(err)
 	}
 }
+
+func (s *workerStore) ActiveTicket(_ context.Context, id int64) (domain.Ticket, error) {
+	if s.current.ClientID == id && s.current.Status.Active() {
+		return s.current, nil
+	}
+	return domain.Ticket{}, domain.ErrNotFound
+}
+
+func TestClosingNoticeTargetsOldTopicAndSurvivesCloseRetry(t *testing.T) {
+	for _, tc := range []struct {
+		payload, want string
+		status        domain.Status
+	}{
+		{`{"chat_id":-100,"topic_id":10,"retire":true,"to_department":"1c"}`, "Передано в отдел 1С", domain.New},
+		{`{"chat_id":-100,"topic_id":10,"text":"Тикет закрыт инженером"}`, "Тикет закрыт инженером", domain.Closed},
+	} {
+		t.Run(tc.want, func(t *testing.T) {
+			calls := []string{}
+			sends := 0
+			closes := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var p map[string]any
+				json.NewDecoder(r.Body).Decode(&p)
+				calls = append(calls, r.URL.Path)
+				if p["chat_id"] != float64(-100) || p["message_thread_id"] != float64(10) {
+					t.Error("wrong topic", p)
+				}
+				if r.URL.Path == "/bottest/sendMessage" {
+					sends++
+					if p["text"] != tc.want {
+						t.Error(p)
+					}
+				} else {
+					closes++
+					if closes == 1 {
+						w.Write([]byte(`{"ok":false,"error_code":500,"description":"retry"}`))
+						return
+					}
+				}
+				w.Write([]byte(`{"ok":true,"result":{"message_id":99}}`))
+			}))
+			defer server.Close()
+			client := NewClient("test")
+			client.BaseURL = server.URL
+			store := &workerStore{current: domain.Ticket{ID: 7, Department: domain.OneC, Status: tc.status}}
+			worker := NewWorker(client, store, Config{Departments: map[domain.Department]Team{domain.OneC: {ChatID: -200}}})
+			worker.interval = 0
+			op := domain.Operation{ID: 42, TicketID: 7, Kind: "close_topic", Payload: json.RawMessage(tc.payload)}
+			if err := worker.Handle(context.Background(), op); err == nil {
+				t.Fatal("close failure hidden")
+			}
+			if err := worker.Handle(context.Background(), op); err != nil {
+				t.Fatal(err)
+			}
+			if sends != 1 || closes != 2 || calls[0] != "/bottest/sendMessage" {
+				t.Fatal(calls)
+			}
+		})
+	}
+}

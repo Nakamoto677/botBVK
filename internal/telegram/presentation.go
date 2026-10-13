@@ -26,6 +26,21 @@ func displayName(ctx context.Context, store domain.Store, id int64, fallback str
 	return fallback, nil
 }
 func companyName(ctx context.Context, store domain.Store, id int64) (string, error) {
+	if catalog, ok := store.(interface {
+		Company(context.Context, int64) (domain.Company, error)
+	}); ok {
+		c, err := catalog.Company(ctx, id)
+		if errors.Is(err, domain.ErrNotFound) {
+			return "Компания", nil
+		}
+		if err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(c.Name) != "" {
+			return c.Name, nil
+		}
+		return "Компания", nil
+	}
 	companies, err := store.Companies(ctx)
 	if err != nil {
 		return "", err
@@ -102,49 +117,19 @@ func (a *Adapter) menu(ctx context.Context, m *Message, u domain.User) error {
 }
 func (a *Adapter) help(ctx context.Context, m *Message, u domain.User) error {
 	if u.Role != "client" {
-		return a.say(ctx, m, "В группе отдела: возьмите заявку кнопкой. Обычные сообщения и вложения инженеров текущего отдела в актуальном топике автоматически уходят клиенту. Служебный ввод для закрытия и передачи не пересылается. В очереди нажмите Закрыть задачу, в топике — Закрыть тикет; Передать предложит выбрать отдел и причину. /history ID — переписка, /tickets — список, /report — отчёт для администратора. Для отмены ввода нажмите Отменить.", nil)
+		return a.say(ctx, m, "В группе отдела: возьмите заявку кнопкой. Обычные сообщения и вложения инженеров текущего отдела в актуальном топике автоматически уходят клиенту. Служебный ввод для закрытия и передачи не пересылается. В очереди нажмите Закрыть задачу, в топике — Закрыть тикет; Передать предложит выбрать отдел и причину. /ticket ID — карточка, /history ID — переписка, /tickets — список, /report — отчёт для администратора. Для отмены ввода нажмите Отменить.", nil)
 	}
-	return a.sayAux(ctx, m, u.ID, "client_home", "Чтобы обратиться в поддержку, нажмите «Создать заявку», выберите отдел и опишите проблему. Специалист ответит прямо здесь.\n\nИстория: /tickets. Повторное открытие: /reopen ID.", nil)
+	return a.sayAux(ctx, m, u.ID, "client_home", "Чтобы обратиться в поддержку, нажмите «Создать заявку», выберите отдел и опишите проблему. Специалист ответит прямо здесь.\n\nКарточка по номеру: /ticket ID. Список: /tickets. Переписка: /history ID. Продолжить форму: /form. Повторное открытие: /reopen ID.", nil)
 }
 func (a *Adapter) showTicket(ctx context.Context, m *Message, u domain.User, t domain.Ticket) error {
 	if !historyAuthorized(u, t) || !a.historyDestination(m, u, t) {
 		return domain.ErrForbidden
 	}
-	name, err := displayName(ctx, a.store, t.ClientID, "Клиент")
-	if err != nil {
-		return err
-	}
-	company, err := companyName(ctx, a.store, t.CompanyID)
-	if err != nil {
-		return err
-	}
-	assignee, err := displayName(ctx, a.store, t.AssigneeID, "Специалист")
-	if err != nil {
-		return err
-	}
-	buttons := clientTicketButtons(t)
-	if u.Role == "client" && t.Status.Active() {
-		buttons = [][]Button{{{Text: "Отменить заявку", Data: fmt.Sprintf("cancel:%d", t.ID)}}}
-	}
-	if u.Role == "engineer" {
-		buttons = [][]Button{{{Text: "История", Data: fmt.Sprintf("history:%d", t.ID)}}}
-		team := a.cfg.Departments[t.Department]
-		topicOrMessage := t.TopicID
-		label := "Открыть топик"
-		if topicOrMessage == 0 {
-			topicOrMessage = t.QueueMessageID
-			label = "Открыть очередь"
-		}
-		if team.ChatID < 0 && topicOrMessage != 0 {
-			chat := strings.TrimPrefix(fmt.Sprint(team.ChatID), "-100")
-			buttons = append(buttons, []Button{{Text: label, URL: fmt.Sprintf("https://t.me/c/%s/%d", chat, topicOrMessage)}})
-		}
-	}
-	return a.say(ctx, m, ticketText(t, name, company, assignee), buttons)
+	return a.historyPage(ctx, m, u, t, 0, 0)
 }
 func (a *Adapter) updateName(ctx context.Context, u domain.User, p Person) error {
 	name := strings.TrimSpace(p.FirstName + " " + p.LastName)
-	if !u.Approved || name == "" || name == u.Name {
+	if (name == "" || name == u.Name) && p.Username == u.Username {
 		return nil
 	}
 	return a.store.Transact(ctx, func(tx domain.Tx) error {
@@ -152,7 +137,31 @@ func (a *Adapter) updateName(ctx context.Context, u domain.User, p Person) error
 		if err != nil {
 			return err
 		}
-		current.Name = name
+		if name != "" {
+			current.Name = name
+		}
+		current.Username = p.Username
 		return tx.SaveUser(ctx, current)
 	})
+}
+
+// A username is optional and can change or be removed by the Telegram user.
+func clientContact(ctx context.Context, store domain.Store, id int64) (string, error) {
+	u, err := store.User(ctx, id)
+	if errors.Is(err, domain.ErrNotFound) {
+		return "Клиент · Telegram: не указан", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	name := strings.TrimSpace(u.Name)
+	if name == "" {
+		name = "Клиент"
+	}
+	name = engineerTextBound(strings.Join(strings.Fields(name), " "), 60)
+	username := strings.TrimSpace(u.Username)
+	if username == "" {
+		return name + " · Telegram: не указан", nil
+	}
+	return name + " · @" + username, nil
 }

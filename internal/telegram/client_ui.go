@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 )
 
 const clientAcceptedText = "Заявка принята!\nВ ближайшее время в этот чат вам ответит специалист)"
@@ -29,11 +30,14 @@ func clientReplyMarkup(keyboard [][]string) map[string]any {
 }
 func clientTicketScenario(id int64) string { return fmt.Sprintf("client_ticket:%d", id) }
 func (a *Adapter) clientScreen(ctx context.Context, m *Message, scenario, text string, keyboard [][]string) error {
+	if a.activeUpdate != 0 {
+		return a.queueScreen(ctx, m, m.Chat.ID, scenario, text, clientReplyMarkup(keyboard))
+	}
 	var sent Message
 	if err := a.client.Call(ctx, "sendMessage", map[string]any{"chat_id": m.Chat.ID, "text": text, "reply_markup": clientReplyMarkup(keyboard)}, &sent); err != nil {
 		return err
 	}
-	return a.recordAux(ctx, m, m.Chat.ID, scenario, sent.ID)
+	return a.recordAux(ctx, m, m.Chat.ID, clientAuxScenario(m, scenario, text), sent.ID)
 }
 func (a *Adapter) clientHome(ctx context.Context, m *Message, text string) error {
 	a.cleanupBestEffort(ctx, scope(m.Chat.ID, m), "client_home")
@@ -47,9 +51,9 @@ func (a *Adapter) clientMenu(ctx context.Context, m *Message, u domain.User) err
 	if !errors.Is(err, domain.ErrNotFound) {
 		return err
 	}
-	if _, exists, err := a.getDraft(ctx, u.ID); err != nil {
+	if d, exists, err := a.getDraft(ctx, u.ID); err != nil {
 		return err
-	} else if exists {
+	} else if exists && d.Step != "submitted" {
 		return a.clientScreen(ctx, m, "draft", "Опишите проблему или отмените подачу заявки.", clientDraftKeyboard)
 	}
 	return a.clientHome(ctx, m, "Чем можем помочь?")
@@ -103,11 +107,13 @@ func (w *Worker) clientNotification(ctx context.Context, t domain.Ticket, text s
 		return err
 	}
 	var sent Message
-	if err := w.client.Call(ctx, "sendMessage", map[string]any{"chat_id": t.ClientID, "text": text, "reply_markup": clientReplyMarkup(keyboard)}, &sent); err != nil {
+	var sendErr error
+	sent, sendErr = w.textParts(ctx, w.operationSendKey("client_notice"), t.ClientID, 0, text, clientReplyMarkup(keyboard))
+	if err := sendErr; err != nil {
 		return err
 	}
 	if store, ok := w.store.(domain.WorkflowStore); ok && sent.ID > 0 {
-		if err := store.SaveAuxiliary(ctx, domain.AuxiliaryMessage{UserID: t.ClientID, ChatID: t.ClientID, Scenario: scenario, MessageID: sent.ID}); err != nil {
+		if err := store.SaveAuxiliary(ctx, domain.AuxiliaryMessage{UserID: t.ClientID, ChatID: t.ClientID, Scenario: clientAuxScenario(&Message{Chat: Chat{Type: "private"}}, scenario, text), MessageID: sent.ID}); err != nil {
 			log.Printf("client notification UI registration failed: %v", err)
 		}
 	}
@@ -127,4 +133,42 @@ func clientErrorText(err error) string {
 	default:
 		return "Не удалось выполнить действие. Попробуйте ещё раз."
 	}
+}
+
+// Approval notifications also replace stale menus and participate in UI cleanup.
+func (w *Worker) clientAccessNotification(ctx context.Context, id int64, text string) error {
+	keyboard := clientKeyboard
+	scenario := "client_home"
+	if ticket, err := w.store.ActiveTicket(ctx, id); err == nil {
+		keyboard = clientActiveKeyboard
+		scenario = clientTicketScenario(ticket.ID)
+	} else if !errors.Is(err, domain.ErrNotFound) {
+		return err
+	}
+	if err := w.rate(ctx, id); err != nil {
+		return err
+	}
+	var sent Message
+	if err := w.client.Call(ctx, "sendMessage", map[string]any{"chat_id": id, "text": text, "reply_markup": clientReplyMarkup(keyboard)}, &sent); err != nil {
+		return err
+	}
+	if store, ok := w.store.(domain.WorkflowStore); ok && sent.ID > 0 {
+		return store.SaveAuxiliary(ctx, domain.AuxiliaryMessage{UserID: id, ChatID: id, Scenario: scenario, MessageID: sent.ID})
+	}
+	return nil
+}
+
+// Keep the requested milestones even when their flow's temporary UI is cleaned.
+func clientAuxScenario(m *Message, scenario, text string) string {
+	if m.Chat.Type != "private" {
+		return scenario
+	}
+	switch strings.TrimSpace(text) {
+	case "Создание заявки.", "Выберите направление.", "Опишите проблему текстом. Вложения отправьте после создания заявки.", draftDescriptionText, clientAcceptedText, "Инженер взял заявку в работу.", "Подача заявки отменена. Вы можете создать новую.":
+		return "client_kept"
+	}
+	if strings.HasPrefix(text, "Создать заявку?\n") || text == "Создать заявку?" {
+		return "client_kept"
+	}
+	return scenario
 }

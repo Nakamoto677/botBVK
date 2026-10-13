@@ -152,7 +152,7 @@ func (a *Adapter) promptCallback(ctx context.Context, c *Callback, action string
 			return err
 		}
 		a.cleanupBestEffort(ctx, key, actionScenario(id))
-		return a.promptText(ctx, c.Message, c.From.ID, id, "напишите причину передачи в отдел "+departmentName(p.Department)+" следующим сообщением.")
+		return a.sayAux(ctx, c.Message, c.From.ID, actionScenario(id), fmt.Sprintf("Передача заявки #%d\n\nОтдел: %s\n\nНапишите комментарий к передаче следующим сообщением.\nЕсли комментарий не нужен, отправьте прочерк «-».", id, departmentName(p.Department)), [][]Button{{{Text: "Отменить", Data: fmt.Sprintf("promptcancel:%d", id)}}})
 	}
 	if action == "cancelconfirm" {
 		if p.Action != "cancel" || p.Phase != "confirm" {

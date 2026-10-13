@@ -103,8 +103,15 @@ func (s *Service) ApproveAccess(ctx context.Context, actorID, requestID int64, a
 	})
 }
 func (s *Service) Create(ctx context.Context, actorID int64, department domain.Department, description string) (domain.Ticket, error) {
+	return s.create(ctx, actorID, department, description, "")
+}
+
+func (s *Service) CreateDraft(ctx context.Context, actorID int64, generation string) (domain.Ticket, error) {
+	return s.create(ctx, actorID, "", "", generation)
+}
+func (s *Service) create(ctx context.Context, actorID int64, department domain.Department, description, generation string) (domain.Ticket, error) {
 	var t domain.Ticket
-	if !department.Valid() || strings.TrimSpace(description) == "" {
+	if generation == "" && (!department.Valid() || strings.TrimSpace(description) == "") {
 		return t, domain.ErrInvalid
 	}
 	err := s.store.Transact(ctx, func(tx domain.Tx) error {
@@ -114,6 +121,30 @@ func (s *Service) Create(ctx context.Context, actorID int64, department domain.D
 		}
 		if !u.Approved || u.Role != "client" {
 			return domain.ErrForbidden
+		}
+		var d domain.Draft
+		var draftTx domain.DraftTx
+		if generation != "" {
+			var ok bool
+			draftTx, ok = tx.(domain.DraftTx)
+			if !ok {
+				return domain.ErrInvalid
+			}
+			d, err = draftTx.LoadDraft(ctx, actorID)
+			if err != nil {
+				return err
+			}
+			if d.Generation != generation {
+				return domain.ErrConflict
+			}
+			if d.Step == "submitted" && d.TicketID > 0 {
+				t, err = tx.GetTicket(ctx, d.TicketID)
+				return err
+			}
+			if d.Step != "confirm" || !d.Department.Valid() || strings.TrimSpace(d.Text) == "" {
+				return domain.ErrConflict
+			}
+			department, description = d.Department, d.Text
 		}
 		_, err = tx.ActiveTicket(ctx, actorID)
 		if err == nil {
@@ -132,6 +163,29 @@ func (s *Service) Create(ctx context.Context, actorID int64, department domain.D
 		}
 		if err := s.enqueue(ctx, tx, t, "refresh_card", nil); err != nil {
 			return err
+		}
+		if generation != "" {
+			for _, msg := range d.Attachments {
+				msg.ID = 0
+				msg.TicketID = t.ID
+				msg.AuthorID = actorID
+				msg.Direction = "inbound"
+				msg.DeferredDelivery = true
+				msg.RoutingDepartment = t.Department
+				msg.CreatedAt = s.now()
+				if err = tx.AddMessage(ctx, &msg); err != nil {
+					return err
+				}
+				if err = s.event(ctx, tx, t, actorID, "message", map[string]any{"message_id": msg.ID, "direction": msg.Direction}); err != nil {
+					return err
+				}
+				if err = s.enqueue(ctx, tx, t, "archive_message", msg); err != nil {
+					return err
+				}
+			}
+			if err = draftTx.CompleteDraft(ctx, actorID, generation, t.ID); err != nil {
+				return err
+			}
 		}
 		return s.notify(ctx, tx, t, "Заявка принята и поставлена в очередь.")
 	})
@@ -213,11 +267,11 @@ func (s *Service) transfer(ctx context.Context, actorID, ticketID int64, departm
 		t.TopicID = 0
 		t.QueueMessageID = 0
 		t.TopicMessageID = 0
-		if err := s.save(ctx, tx, t, actorID, "transferred", map[string]any{"from": oldDept, "to": department, "reason": reason, "old_chat_id": oldChat, "old_topic_id": oldTopic}); err != nil {
+		if err := s.save(ctx, tx, t, actorID, "transferred", map[string]any{"from": oldDept, "to": department, "reason": reason, "old_chat_id": oldChat, "old_topic_id": oldTopic, "message_id": attachmentID(msg)}); err != nil {
 			return err
 		}
 		if oldChat != 0 && oldTopic != 0 {
-			if err := s.enqueue(ctx, tx, *t, "close_topic", map[string]any{"chat_id": oldChat, "topic_id": oldTopic, "retire": true}); err != nil {
+			if err := s.enqueue(ctx, tx, *t, "close_topic", map[string]any{"chat_id": oldChat, "topic_id": oldTopic, "retire": true, "to_department": department}); err != nil {
 				return err
 			}
 		}
@@ -267,7 +321,7 @@ func (s *Service) close(ctx context.Context, actorID, ticketID int64, resolution
 			return err
 		}
 		if t.TopicChatID != 0 && t.TopicID != 0 {
-			if err := s.enqueue(ctx, tx, *t, "close_topic", map[string]int64{"chat_id": t.TopicChatID, "topic_id": t.TopicID}); err != nil {
+			if err := s.enqueue(ctx, tx, *t, "close_topic", map[string]any{"chat_id": t.TopicChatID, "topic_id": t.TopicID, "text": "Тикет закрыт инженером"}); err != nil {
 				return err
 			}
 		}
@@ -440,10 +494,22 @@ func (s *Service) EditMessage(ctx context.Context, actorID, ticketID int64, msg 
 		if client && t.Status == domain.New {
 			return s.enqueue(ctx, tx, *t, "refresh_card", nil)
 		}
-		if client && t.Status.Active() {
+		if client && msg.Direction == "inbound" && t.Status.Active() {
 			msg.RoutingDepartment = t.Department
 			msg.Text = fmt.Sprintf("Исправление сообщения #%d: %s", msg.TelegramMessageID, msg.Text)
 			return s.enqueue(ctx, tx, *t, "team_message", msg)
+		}
+		if !client && msg.Direction == "outbound" {
+			quote := ""
+			if len(msg.Revisions) > 0 {
+				quote = msg.Revisions[len(msg.Revisions)-1].Text
+				v := []rune(quote)
+				if len(v) > 200 {
+					quote = string(v[:200]) + "…"
+				}
+			}
+			msg.Text = fmt.Sprintf("Исправление ответа #%d\nИсходный ответ: %s\n\n%s", msg.TelegramMessageID, quote, msg.Text)
+			return s.enqueue(ctx, tx, *t, "client_message", msg)
 		}
 		return nil
 	})
@@ -553,6 +619,7 @@ func (s *Service) actionAttachment(ctx context.Context, tx domain.Tx, t domain.T
 	if err := s.event(ctx, tx, t, u.ID, "message", map[string]any{"message_id": msg.ID, "direction": msg.Direction, "action_attachment": true}); err != nil {
 		return err
 	}
+	*input = msg
 	return s.enqueue(ctx, tx, t, "archive_message", msg)
 }
 
@@ -564,4 +631,11 @@ func (s *Service) completionCleanup(ctx context.Context, tx domain.Tx, t domain.
 	}
 	key := fmt.Sprintf("completion:%d:%d:%d:%d", t.ID, t.RoutingGeneration, t.TopicChatID, t.TopicID)
 	return s.event(ctx, tx, t, actorID, "completion_cleanup_requested", map[string]any{"chat_id": t.TopicChatID, "topic_id": t.TopicID, "routing_generation": t.RoutingGeneration, "completion_key": key})
+}
+
+func attachmentID(msg *domain.Message) int64 {
+	if msg == nil {
+		return 0
+	}
+	return msg.ID
 }

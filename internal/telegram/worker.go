@@ -17,6 +17,8 @@ import (
 )
 
 type Worker struct {
+	currentOperation int64
+
 	client   *Client
 	store    domain.Store
 	cfg      Config
@@ -61,13 +63,13 @@ func (w *Worker) Run(ctx context.Context) error {
 					}
 				}
 			}
-			if e := w.store.RetryOperation(ctx, op.ID, err.Error(), delay, dead); e != nil {
-				return e
-			}
-			if op.Kind == "client_message" && op.Attempts == 0 {
+			if op.Kind == "client_message" && (op.Attempts <= 1 || dead) {
 				if e := w.notifyAuthor(ctx, op, err, dead); e != nil {
 					return e
 				}
+			}
+			if e := w.store.RetryOperation(ctx, op.ID, err.Error(), delay, dead); e != nil {
+				return e
 			}
 			if dead && op.Kind != "access_notification" {
 				if e := w.notifyAdmins(ctx, fmt.Sprintf("Ошибка операции %d (%s), заявка #%d. Требуется проверка: %s", op.ID, op.Kind, op.TicketID, err)); e != nil {
@@ -90,6 +92,14 @@ func (w *Worker) rate(ctx context.Context, chat int64) error {
 	return nil
 }
 func (w *Worker) send(ctx context.Context, chat, topic int64, text string, buttons [][]Button) (Message, error) {
+	if w.currentOperation > 0 {
+		hash := sha256.Sum256([]byte(fmt.Sprintf("%d:%d:%s", chat, topic, text)))
+		var markup any
+		if buttons != nil {
+			markup = Markup{buttons}
+		}
+		return w.textParts(ctx, fmt.Sprintf("operation:%d:%x", w.currentOperation, hash), chat, topic, text, markup)
+	}
 	if err := w.rate(ctx, chat); err != nil {
 		return Message{}, err
 	}
@@ -100,6 +110,7 @@ func card(t domain.Ticket) string {
 }
 func cardButtons(t domain.Ticket) [][]Button { return engineerQueueButtons(t) }
 func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
+	w.currentOperation = op.ID
 	var payload struct {
 		Text              string            `json:"text"`
 		UserID            int64             `json:"user_id"`
@@ -121,6 +132,9 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 		if err := json.Unmarshal(op.Payload, &payload); err != nil {
 			return fmt.Errorf("%w: operation payload", domain.ErrInvalid)
 		}
+	}
+	if op.Kind == "ui_screen" {
+		return w.uiScreen(ctx, op)
 	}
 	if op.Kind == "access_request_notification" {
 		var request struct {
@@ -144,10 +158,7 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 			return err
 		}
 		if user.Approved && user.Role == "client" {
-			if err = w.rate(ctx, payload.UserID); err != nil {
-				return err
-			}
-			return w.client.SendKeyboard(ctx, payload.UserID, payload.Text+"\nВыберите действие в меню.", clientKeyboard)
+			return w.clientAccessNotification(ctx, payload.UserID, payload.Text+"\nВыберите действие в меню.")
 		}
 		_, err = w.send(ctx, payload.UserID, 0, payload.Text, nil)
 		return err
@@ -313,6 +324,24 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 		if err = json.Unmarshal(op.Payload, &msg); err != nil {
 			return domain.ErrInvalid
 		}
+		if op.Kind == "client_message" {
+			events, e := w.store.Events(ctx, t.ID)
+			if e != nil {
+				return e
+			}
+			for _, event := range events {
+				if event.Kind != "message_delivered" {
+					continue
+				}
+				var d struct {
+					SourceID int64      `json:"source_message_id"`
+					EditedAt *time.Time `json:"edited_at"`
+				}
+				if json.Unmarshal(event.Data, &d) == nil && d.SourceID == msg.ID && d.EditedAt != nil && (msg.EditedAt == nil || d.EditedAt.After(*msg.EditedAt)) {
+					return nil
+				}
+			}
+		}
 		if msg.FileID != "" {
 			if err = w.archive(ctx, t, msg); err != nil {
 				return err
@@ -333,7 +362,7 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 		if e != nil {
 			return e
 		}
-		data, _ := json.Marshal(map[string]any{"source_message_id": msg.ID, "telegram_chat_id": chat, "telegram_message_id": sent.ID, "telegram_topic_id": topic, "direction": msg.Direction})
+		data, _ := json.Marshal(map[string]any{"source_message_id": msg.ID, "telegram_chat_id": chat, "telegram_message_id": sent.ID, "telegram_topic_id": topic, "direction": msg.Direction, "edited_at": msg.EditedAt})
 		return w.store.Transact(ctx, func(tx domain.Tx) error {
 			if op.Kind == "client_message" {
 				current, e := tx.GetTicket(ctx, t.ID)
@@ -365,6 +394,15 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 		}
 		if payload.ChatID == t.TopicChatID && payload.TopicID == t.TopicID && t.Status.Active() && t.Status != domain.New {
 			return nil
+		}
+		notice := payload.Text
+		if payload.Retire && payload.ToDepartment.Valid() {
+			notice = "Передано в отдел " + departmentName(payload.ToDepartment)
+		}
+		if notice != "" {
+			if err = w.topicClosingNotice(ctx, op, payload.ChatID, payload.TopicID, notice); err != nil {
+				return err
+			}
 		}
 		if err = w.client.CloseTopic(ctx, payload.ChatID, payload.TopicID); err != nil {
 			return err
@@ -528,37 +566,52 @@ func (w *Worker) deliver(ctx context.Context, chat, topic int64, msg domain.Mess
 func (w *Worker) deliverNamed(ctx context.Context, chat, topic int64, msg domain.Message, name string) (Message, error) {
 	text := msg.Text
 	if name != "" {
-		prefix := name + ":\n"
-		limit := 4096
-		if msg.FileID != "" {
-			limit = 1024
-		}
-		if len([]rune(prefix+text)) <= limit {
-			text = prefix + text
-		} else {
-			if _, err := w.send(ctx, chat, topic, name+":", nil); err != nil {
-				return Message{}, err
-			}
-		}
+		text = name + ":\n" + text
 	}
-
+	digest := sha256.Sum256([]byte(fmt.Sprintf("%d:%d:%d:%d:%s:%s:%s", msg.ID, msg.TelegramChatID, msg.TelegramMessageID, chat, msg.FileID, text, msg.MediaType)))
+	key := fmt.Sprintf("delivery:%x:%d", digest, topic)
+	limit := messageLimit
+	if msg.FileID != "" {
+		limit = captionLimit
+	}
+	if name != "" && utf16Length(text) > limit {
+		if _, err := w.textParts(ctx, key+":author", chat, topic, name+":", nil); err != nil {
+			return Message{}, err
+		}
+		text = msg.Text
+	}
 	if msg.FileID == "" {
-		return w.send(ctx, chat, topic, text, nil)
-	}
-	if err := w.rate(ctx, chat); err != nil {
-		return Message{}, err
+		return w.textParts(ctx, key, chat, topic, text, nil)
 	}
 	method := map[string]string{"document": "sendDocument", "photo": "sendPhoto", "voice": "sendVoice", "video": "sendVideo", "audio": "sendAudio"}[msg.MediaType]
 	if method == "" {
 		return Message{}, domain.ErrInvalid
 	}
-	p := map[string]any{"chat_id": chat, msg.MediaType: msg.FileID, "caption": text}
-	if topic != 0 {
-		p["message_thread_id"] = topic
+	caption := text
+	remainder := ""
+	if utf16Length(text) > captionLimit {
+		caption = ""
+		remainder = text
 	}
-	var result Message
-	err := w.client.Call(ctx, method, p, &result)
-	return result, err
+	sent, err := w.confirmedPart(ctx, key+":media", 0, func() (Message, error) {
+		if err := w.rate(ctx, chat); err != nil {
+			return Message{}, err
+		}
+		p := map[string]any{"chat_id": chat, msg.MediaType: msg.FileID, "caption": caption}
+		if topic != 0 {
+			p["message_thread_id"] = topic
+		}
+		var result Message
+		err := w.client.Call(ctx, method, p, &result)
+		return result, err
+	})
+	if err != nil {
+		return sent, err
+	}
+	if remainder != "" {
+		_, err = w.textParts(ctx, key+":text", chat, topic, remainder, nil)
+	}
+	return sent, err
 }
 func (w *Worker) archive(ctx context.Context, t domain.Ticket, msg domain.Message) error {
 	if w.cfg.ArchiveDir == "" || msg.FileSize > 20<<20 {
@@ -622,6 +675,9 @@ func (w *Worker) archive(ctx context.Context, t domain.Ticket, msg domain.Messag
 
 func (w *Worker) ensureTopicCard(ctx context.Context, t domain.Ticket) (domain.Ticket, error) {
 	if t.TopicMessageID != 0 {
+		if err := w.ensureTransferContext(ctx, t); err != nil {
+			return t, err
+		}
 		return t, w.ensureEngineerKeyboard(ctx, t)
 	}
 	if t.TopicID == 0 {
@@ -655,7 +711,10 @@ func (w *Worker) ensureTopicCard(ctx context.Context, t domain.Ticket) (domain.T
 		return nil
 	})
 	if err == nil {
-		err = w.ensureEngineerKeyboard(ctx, t)
+		err = w.ensureTransferContext(ctx, t)
+		if err == nil {
+			err = w.ensureEngineerKeyboard(ctx, t)
+		}
 	}
 	return t, err
 }
@@ -672,7 +731,7 @@ func (w *Worker) notifyAdmins(ctx context.Context, text string) error {
 	})
 }
 func (w *Worker) card(ctx context.Context, t domain.Ticket) (string, error) {
-	name, err := displayName(ctx, w.store, t.ClientID, "Клиент")
+	name, err := clientContact(ctx, w.store, t.ClientID)
 	if err != nil {
 		return "", err
 	}
@@ -688,6 +747,11 @@ func (w *Worker) card(ctx context.Context, t domain.Ticket) (string, error) {
 		}
 	}
 	text := engineerCardText(t, name, company, assignee)
+	contextText, e := w.queueTransferContext(ctx, t)
+	if e != nil {
+		return "", e
+	}
+	text += contextText
 	if t.Status == domain.New {
 		messages, e := w.store.Messages(ctx, t.ID)
 		if e != nil {
@@ -868,8 +932,39 @@ func (w *Worker) notifyAuthor(ctx context.Context, op domain.Operation, cause er
 	if permanent {
 		text = fmt.Sprintf("Ответ по заявке #%d не доставлен клиенту. Администратору отправлено уведомление; требуется восстановить доставку. Причина: %s", op.TicketID, cause)
 	}
-	raw, _ := json.Marshal(map[string]any{"user_id": msg.AuthorID, "text": text})
+	raw, _ := json.Marshal(map[string]any{"user_id": msg.AuthorID, "text": text, "notice_key": fmt.Sprintf("delivery:%d:%t", op.ID, permanent)})
 	return w.store.Transact(ctx, func(tx domain.Tx) error {
 		return tx.Enqueue(ctx, domain.Operation{Kind: "access_notification", Payload: raw, AvailableAt: time.Now().UTC(), State: "pending"})
+	})
+}
+
+// Remember confirmed delivery independently of closing: a close retry does not
+// append another notice. Unknown network outcomes retain normal outbox semantics.
+func (w *Worker) topicClosingNotice(ctx context.Context, op domain.Operation, chat, topic int64, text string) error {
+	events, err := w.store.Events(ctx, op.TicketID)
+	if err != nil {
+		return err
+	}
+	for _, event := range events {
+		if event.Kind != "topic_closing_notice" {
+			continue
+		}
+		var data struct {
+			OperationID int64  `json:"operation_id"`
+			ChatID      int64  `json:"chat_id"`
+			TopicID     int64  `json:"topic_id"`
+			Text        string `json:"text"`
+		}
+		if json.Unmarshal(event.Data, &data) == nil && data.OperationID == op.ID && data.ChatID == chat && data.TopicID == topic && data.Text == text {
+			return nil
+		}
+	}
+	sent, err := w.send(ctx, chat, topic, text, nil)
+	if err != nil {
+		return err
+	}
+	data, _ := json.Marshal(map[string]any{"operation_id": op.ID, "chat_id": chat, "topic_id": topic, "text": text, "message_id": sent.ID})
+	return w.store.Transact(ctx, func(tx domain.Tx) error {
+		return tx.AddEvent(ctx, domain.Event{TicketID: op.TicketID, Kind: "topic_closing_notice", Data: data, CreatedAt: time.Now().UTC()})
 	})
 }

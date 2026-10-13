@@ -77,6 +77,7 @@ type Person struct {
 	ID        int64  `json:"id"`
 	FirstName string `json:"first_name"`
 	LastName  string `json:"last_name"`
+	Username  string `json:"username"`
 }
 type Chat struct {
 	ID   int64  `json:"id"`
@@ -153,21 +154,29 @@ type Markup struct {
 }
 
 func (c *Client) Updates(ctx context.Context, offset int64) ([]Update, error) {
+	return c.updatesTimeout(ctx, offset, 50)
+}
+func (c *Client) updatesTimeout(ctx context.Context, offset int64, timeout int) ([]Update, error) {
 	var result []Update
-	err := c.Call(ctx, "getUpdates", map[string]any{"offset": offset, "timeout": 50, "allowed_updates": []string{"message", "edited_message", "callback_query"}}, &result)
+	err := c.Call(ctx, "getUpdates", map[string]any{"offset": offset, "timeout": timeout, "allowed_updates": []string{"message", "edited_message", "callback_query"}}, &result)
 	return result, err
 }
 func (c *Client) Send(ctx context.Context, chat, topic int64, text string, buttons [][]Button) (Message, error) {
-	p := map[string]any{"chat_id": chat, "text": text}
-	if topic != 0 {
-		p["message_thread_id"] = topic
-	}
-	if buttons != nil {
-		p["reply_markup"] = Markup{buttons}
-	}
 	var result Message
-	err := c.Call(ctx, "sendMessage", p, &result)
-	return result, err
+	parts := splitText(text, messageLimit)
+	for i, part := range parts {
+		p := map[string]any{"chat_id": chat, "text": part}
+		if topic != 0 {
+			p["message_thread_id"] = topic
+		}
+		if buttons != nil && i == len(parts)-1 {
+			p["reply_markup"] = Markup{buttons}
+		}
+		if err := c.Call(ctx, "sendMessage", p, &result); err != nil {
+			return result, err
+		}
+	}
+	return result, nil
 }
 func (c *Client) SendKeyboard(ctx context.Context, chat int64, text string, keyboard [][]string) error {
 	buttons := [][]map[string]string{}
@@ -242,13 +251,17 @@ func (c *Client) SendCSV(ctx context.Context, chat, topic int64, text string) er
 	defer resp.Body.Close()
 	var result struct {
 		OK          bool   `json:"ok"`
+		Code        int    `json:"error_code"`
 		Description string `json:"description"`
+		Parameters  struct {
+			RetryAfter int `json:"retry_after"`
+		} `json:"parameters"`
 	}
 	if err = json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return err
 	}
 	if !result.OK {
-		return fmt.Errorf("telegram: %s", result.Description)
+		return &APIError{Code: result.Code, Description: result.Description, RetryAfter: result.Parameters.RetryAfter}
 	}
 	return nil
 }

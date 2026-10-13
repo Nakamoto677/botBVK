@@ -32,6 +32,7 @@ func (s Status) Active() bool { return s == New || s == InProgress || s == Waiti
 type User struct {
 	ID          int64        `json:"id"`
 	Name        string       `json:"name"`
+	Username    string       `json:"username,omitempty"`
 	CompanyID   int64        `json:"company_id"`
 	Role        string       `json:"role"`
 	Approved    bool         `json:"approved"`
@@ -134,6 +135,7 @@ type Tx interface {
 type Store interface {
 	Transact(context.Context, func(Tx) error) error
 	User(context.Context, int64) (User, error)
+	// Companies returns only the currently selectable registration catalog.
 	Companies(context.Context) ([]Company, error)
 	Ticket(context.Context, int64) (Ticket, error)
 	ActiveTicket(context.Context, int64) (Ticket, error)
@@ -153,6 +155,28 @@ type Store interface {
 	Ping(context.Context) error
 }
 type StoredUpdate struct {
-	ID      int64
-	Payload json.RawMessage
+	ID       int64
+	Payload  json.RawMessage
+	Attempts int
+}
+
+// Draft generations and steps bind retained form buttons to a particular screen.
+type Draft struct {
+	Generation  string
+	Step        string
+	Department  Department
+	Text        string
+	Attachments []Message
+	TicketID    int64
+}
+type BoundDraftStore interface {
+	LoadDraft(context.Context, int64) (Draft, error)
+	PutDraft(context.Context, int64, Draft) error
+}
+type DraftTx interface {
+	LoadDraft(context.Context, int64) (Draft, error)
+	CompleteDraft(context.Context, int64, string, int64) error
+}
+type RetryInbox interface {
+	RetryUpdate(context.Context, int64, string, time.Duration, bool) error
 }

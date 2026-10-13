@@ -69,7 +69,7 @@ func TestMinimalClientFlowDraftCancelAcceptedAndFinished(t *testing.T) {
 	raw, _ := json.Marshal((*requests)[len(*requests)-1]["reply_markup"])
 	var options Markup
 	json.Unmarshal(raw, &options)
-	if len(options.Buttons) != 2 || len(options.Buttons[0]) != 2 || len(options.Buttons[1]) != 2 {
+	if len(options.Buttons) != 3 || len(options.Buttons[0]) != 2 || len(options.Buttons[1]) != 2 {
 		t.Fatal(string(raw))
 	}
 	send(clientCancelDraftLabel)
@@ -78,12 +78,12 @@ func TestMinimalClientFlowDraftCancelAcceptedAndFinished(t *testing.T) {
 		t.Fatal("draft cancellation created ticket")
 	}
 	send("Создать заявку")
-	callback("new:it")
+	callback("new:it:" + a.drafts[1].Generation)
 	// callback message is sent by the bot, but temporary messages belong to client.
-	if len(s.aux[auxKey{1, 1, 0, "draft"}]) != 1 {
+	if len(s.aux[auxKey{1, 1, 0, "client_kept"}]) != 6 {
 		t.Fatal("bot author used as client scenario actor")
 	}
-	assertReplyLabels(t, (*requests)[len(*requests)-2], clientCancelDraftLabel)
+	assertReplyLabels(t, (*requests)[len(*requests)-3], clientCancelDraftLabel)
 	send("Не работает компьютер")
 	raw, _ = json.Marshal((*requests)[len(*requests)-1]["reply_markup"])
 	if !strings.Contains(string(raw), clientCancelDraftLabel) || !strings.Contains(string(raw), "submit") {
@@ -91,15 +91,15 @@ func TestMinimalClientFlowDraftCancelAcceptedAndFinished(t *testing.T) {
 	}
 	svc.createErr = errors.New("temporary storage failure")
 	botMsg := &Message{From: Person{ID: 999}, Chat: m.Chat}
-	if err := a.callback(ctx, &Callback{From: m.From, Message: botMsg, Data: "submit"}); err == nil {
+	if err := a.callback(ctx, &Callback{From: m.From, Message: botMsg, Data: "submit:" + a.drafts[1].Generation}); err == nil {
 		t.Fatal("failed submission accepted")
 	}
-	if len(a.drafts) != 1 || len(s.aux[auxKey{1, 1, 0, "draft"}]) != 1 {
+	if len(a.drafts) != 1 || len(s.aux[auxKey{1, 1, 0, "client_kept"}]) != 7 {
 		t.Fatal("failure removed retry UI")
 	}
 	svc.createErr = nil
-	callback("submit")
-	if len(a.drafts) != 0 || svc.createCalls != 1 {
+	callback("submit:" + a.drafts[1].Generation)
+	if a.drafts[1].Step != "submitted" || svc.createCalls != 1 {
 		t.Fatal("draft remained after creation")
 	}
 	w := NewWorker(a.client, s, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100, QueueTopicID: 2}}})
@@ -128,7 +128,7 @@ func TestMinimalClientFlowDraftCancelAcceptedAndFinished(t *testing.T) {
 		t.Fatal(last)
 	}
 	assertReplyLabels(t, last, "Создать заявку", "Помощь")
-	if len(s.aux) != 1 || len(s.aux[auxKey{1, 1, 0, "client_home"}]) != 1 {
+	if len(s.aux) != 2 || len(s.aux[auxKey{1, 1, 0, "client_home"}]) != 1 || len(s.aux[auxKey{1, 1, 0, "client_kept"}]) != 8 {
 		t.Fatalf("auxiliary UI retained: %v", s.aux)
 	}
 	if len(s.storedMessages) != 1 || s.storedMessages[0].ID != 44 {
@@ -146,10 +146,69 @@ func TestStaleDraftCancelAndDepartmentCannotAffectActiveTicket(t *testing.T) {
 		t.Fatal("stale draft cancellation changed ticket")
 	}
 	botMsg := &Message{From: Person{ID: 999}, Chat: m.Chat}
-	if err := a.callback(context.Background(), &Callback{From: m.From, Message: botMsg, Data: "new:1c"}); !errors.Is(err, domain.ErrConflict) {
+	if err := a.callback(context.Background(), &Callback{From: m.From, Message: botMsg, Data: "new:1c"}); err != nil {
 		t.Fatalf("stale department accepted: %v", err)
 	}
-	if len(*requests) != 1 {
+	if len(*requests) != 3 {
 		t.Fatal("stale department sent new prompt")
+	}
+}
+
+func TestLateApprovalPreservesActiveMenuAndRegistersTemporaryMessage(t *testing.T) {
+	a, s, _, _, requests := clientUIFixture(t)
+	w := NewWorker(a.client, s, Config{})
+	w.interval = 0
+	if err := w.clientAccessNotification(context.Background(), 1, "Доступ одобрен"); err != nil {
+		t.Fatal(err)
+	}
+	assertReplyLabels(t, (*requests)[len(*requests)-1], "Отменить заявку")
+	if len(s.aux[auxKey{1, 1, 0, clientTicketScenario(7)}]) != 1 {
+		t.Fatal("approval notification not tracked")
+	}
+}
+
+func TestClientMilestonesSurviveCompletionAndTemporaryQuestionsAreCleaned(t *testing.T) {
+	ctx := context.Background()
+	a, s, _, m, _ := clientUIFixture(t)
+	texts := []string{"Создание заявки.", "Выберите направление.", "Опишите проблему текстом. Вложения отправьте после создания заявки.", "Создать заявку?\nОписание", clientAcceptedText, "Инженер взял заявку в работу.", "Подача заявки отменена. Вы можете создать новую."}
+	for _, text := range texts {
+		if err := a.sayAux(ctx, m, 1, "draft", text, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := a.sayAux(ctx, m, 1, "draft", "Временная подсказка", nil); err != nil {
+		t.Fatal(err)
+	}
+	a.cleanupBestEffort(ctx, scope(1, m), "draft")
+	kept := s.aux[auxKey{1, 1, 0, "client_kept"}]
+	if len(kept) != len(texts) {
+		t.Fatal("milestones not retained", s.aux)
+	}
+	protected := map[int64]bool{}
+	for _, msg := range kept {
+		protected[msg.MessageID] = true
+	}
+	s.ticket.Status = domain.Closed
+	w := NewWorker(a.client, s, Config{})
+	w.interval = 0
+	if err := w.clientNotification(ctx, s.ticket, "Заявка закрыта. Результат: Решено"); err != nil {
+		t.Fatal(err)
+	}
+	for _, op := range s.operations {
+		var p struct {
+			ID int64 `json:"message_id"`
+		}
+		json.Unmarshal(op.Payload, &p)
+		if protected[p.ID] {
+			t.Fatal("milestone queued for deletion", p.ID)
+		}
+	}
+	if len(s.operations) != 1 {
+		t.Fatal("temporary question not cleaned", s.operations)
+	}
+	// Exact private-client matching must not preserve an engineer service prompt.
+	group := &Message{Chat: Chat{ID: -100, Type: "supergroup"}, ThreadID: 10}
+	if got := clientAuxScenario(group, "action:7", texts[0]); got != "action:7" {
+		t.Fatal(got)
 	}
 }

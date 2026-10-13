@@ -72,6 +72,17 @@ func TestWorkflowQueuesUntilClaimAndPreservesMessagesAcrossTransfer(t *testing.T
 		t.Fatal(err)
 	}
 	var mu sync.Mutex
+	// Persist optional contact data in the same JSON profile as existing users.
+	if err = store.Transact(ctx, func(tx domain.Tx) error {
+		user, e := tx.GetUser(ctx, 1)
+		if e != nil {
+			return e
+		}
+		user.Username = "client_contact"
+		return tx.SaveUser(ctx, user)
+	}); err != nil {
+		t.Fatal(err)
+	}
 	var sends []map[string]any
 	createdTopics, reopenedTopics := 0, 0
 	var deletedTopics []int64
@@ -79,6 +90,13 @@ func TestWorkflowQueuesUntilClaimAndPreservesMessagesAcrossTransfer(t *testing.T
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/file/") {
 			_, _ = w.Write([]byte("resolution-file"))
+			return
+		}
+		if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/") {
+			if err := r.ParseMultipartForm(1 << 20); err != nil {
+				t.Error(err)
+			}
+			w.Write([]byte(`{"ok":true,"result":{"message_id":999}}`))
 			return
 		}
 		var p map[string]any
@@ -98,6 +116,8 @@ func TestWorkflowQueuesUntilClaimAndPreservesMessagesAcrossTransfer(t *testing.T
 			reopenedTopics++
 		case "getFile":
 			result = map[string]any{"file_id": "resolution-file", "file_path": "resolution.bin", "file_size": 15}
+		case "sendDocument":
+			result = map[string]any{"message_id": counter}
 		case "sendMessage":
 			sends = append(sends, p)
 			result = map[string]any{"message_id": counter, "chat": map[string]any{"id": p["chat_id"]}}
@@ -135,7 +155,10 @@ func TestWorkflowQueuesUntilClaimAndPreservesMessagesAcrossTransfer(t *testing.T
 		t.Fatal("queue did not drain")
 	}
 	drain()
-	ticket, err := svc.Create(ctx, 1, domain.IT, "Cannot log in")
+	if err = store.PutDraft(ctx, 1, domain.Draft{Generation: "integration-form", Step: "confirm", Department: domain.IT, Text: "Cannot log in", Attachments: []domain.Message{{TelegramChatID: 1, TelegramMessageID: 8, FileID: "initial-file", MediaType: "document", FileName: "initial.txt", Text: "Initial file"}}}); err != nil {
+		t.Fatal(err)
+	}
+	ticket, err := svc.CreateDraft(ctx, 1, "integration-form")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +184,7 @@ func TestWorkflowQueuesUntilClaimAndPreservesMessagesAcrossTransfer(t *testing.T
 	if err = svc.AddMessage(ctx, 1, ticket.ID, domain.Message{Text: "before-transfer", TelegramChatID: 1, TelegramMessageID: 10}, false); err != nil {
 		t.Fatal(err)
 	}
-	if err = svc.Transfer(ctx, 2, ticket.ID, domain.OneC, "1C account issue"); err != nil {
+	if err = svc.TransferWithMessage(ctx, 2, ticket.ID, domain.OneC, "1C account issue", domain.Message{TelegramChatID: -1001, TelegramMessageID: 15, FileID: "transfer-file", MediaType: "document", FileName: "private.txt", Text: "Private transfer"}); err != nil {
 		t.Fatal(err)
 	}
 	if err = svc.AddMessage(ctx, 1, ticket.ID, domain.Message{Text: "after-transfer", TelegramChatID: 1, TelegramMessageID: 11}, false); err != nil {
@@ -200,6 +223,9 @@ func TestWorkflowQueuesUntilClaimAndPreservesMessagesAcrossTransfer(t *testing.T
 	if err = svc.AddMessage(ctx, 2, ticket.ID, domain.Message{Text: "Password reset", TelegramChatID: -1002, TelegramTopicID: active.TopicID, TelegramMessageID: 20}, true); err != nil {
 		t.Fatal(err)
 	}
+	if err = svc.EditMessage(ctx, 2, ticket.ID, domain.Message{TelegramChatID: -1002, TelegramMessageID: 20, Text: "Password reset corrected before delivery"}); err != nil {
+		t.Fatal(err)
+	}
 	pending, _ := store.Ticket(ctx, ticket.ID)
 	if pending.FirstResponseAt != nil {
 		t.Fatal("first response recorded before delivery")
@@ -209,6 +235,49 @@ func TestWorkflowQueuesUntilClaimAndPreservesMessagesAcrossTransfer(t *testing.T
 	if delivered.FirstResponseAt == nil {
 		t.Fatal("delivered response missing timestamp")
 	}
+	if err = svc.EditMessage(ctx, 2, ticket.ID, domain.Message{TelegramChatID: -1002, TelegramMessageID: 20, Text: "Password reset corrected after delivery"}); err != nil {
+		t.Fatal(err)
+	}
+	drain()
+	mu.Lock()
+	responseTexts := []string{}
+	for _, send := range sends {
+		if send["chat_id"] == float64(1) {
+			text, _ := send["text"].(string)
+			if strings.Contains(text, "Password reset") {
+				responseTexts = append(responseTexts, text)
+			}
+		}
+	}
+	mu.Unlock()
+	if len(responseTexts) != 3 || responseTexts[0] != "Password reset" || !strings.Contains(responseTexts[1], "corrected before delivery") || !strings.Contains(responseTexts[2], "corrected after delivery") {
+		t.Fatal("corrections out of order", responseTexts)
+	}
+	latestMessages, e := store.Messages(ctx, ticket.ID)
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, message := range latestMessages {
+		if message.Direction == "outbound" {
+			message.Text = "Password reset"
+			message.EditedAt = nil
+			raw, _ := json.Marshal(message)
+			if err = worker.Handle(ctx, domain.Operation{ID: 99999, Kind: "client_message", TicketID: ticket.ID, Payload: raw}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	mu.Lock()
+	lateOriginals := 0
+	for _, send := range sends {
+		if send["chat_id"] == float64(1) && send["text"] == "Password reset" {
+			lateOriginals++
+		}
+	}
+	mu.Unlock()
+	if lateOriginals != 1 {
+		t.Fatal("obsolete original sent after correction", lateOriginals)
+	}
 	if err = svc.CloseWithMessage(ctx, 2, ticket.ID, "Reset credentials", domain.Message{Text: "Reset credentials", TelegramChatID: -1002, TelegramMessageID: 21, FileID: "resolution-file", MediaType: "document", FileName: "resolution.txt", FileSize: 15}); err != nil {
 		t.Fatal(err)
 	}
@@ -216,6 +285,24 @@ func TestWorkflowQueuesUntilClaimAndPreservesMessagesAcrossTransfer(t *testing.T
 	closed, _ := store.Ticket(ctx, ticket.ID)
 	if closed.Status != domain.Closed || closed.ClosedBy != 2 {
 		t.Fatalf("closure missing: %+v", closed)
+	}
+	foundContact, foundTransfer, foundClose := false, false, false
+	mu.Lock()
+	for _, send := range sends {
+		text, _ := send["text"].(string)
+		if strings.Contains(text, "@client_contact") && send["chat_id"] == float64(-1001) {
+			foundContact = true
+		}
+		if text == "Передано в отдел 1С" && send["chat_id"] == float64(-1001) {
+			foundTransfer = true
+		}
+		if text == "Тикет закрыт инженером" && send["chat_id"] == float64(-1002) && send["message_thread_id"] == float64(active.TopicID) {
+			foundClose = true
+		}
+	}
+	mu.Unlock()
+	if !foundContact || !foundTransfer || !foundClose {
+		t.Fatalf("missing UI: contact=%v transfer=%v close=%v", foundContact, foundTransfer, foundClose)
 	}
 	if os.Getenv("TEST_BACKUP_TOOLS") == "1" {
 		if err = scheduler.CleanupTick(ctx); err != nil {
@@ -226,6 +313,17 @@ func TestWorkflowQueuesUntilClaimAndPreservesMessagesAcrossTransfer(t *testing.T
 			t.Fatalf("wrong deleted topic: %v expected %d", deletedTopics, active.TopicID)
 		}
 	}
+	adapter := telegram.NewAdapter(client, store, svc, cfg)
+	if err = adapter.Handle(ctx, telegram.Update{Message: &telegram.Message{ID: 80, From: telegram.Person{ID: 1}, Chat: telegram.Chat{ID: 1, Type: "private"}, Text: fmt.Sprintf("/ticket %d", ticket.ID)}}); err != nil {
+		t.Fatal(err)
+	}
+	archivedMessages, e := store.Messages(ctx, ticket.ID)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if err = adapter.Handle(ctx, telegram.Update{Callback: &telegram.Callback{ID: "file", From: telegram.Person{ID: 1}, Message: &telegram.Message{Chat: telegram.Chat{ID: 1, Type: "private"}}, Data: fmt.Sprintf("historyfile:%d:%d", ticket.ID, archivedMessages[0].ID)}}); err != nil {
+		t.Fatal(err)
+	}
 	if err = svc.Reopen(ctx, 1, ticket.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +333,7 @@ func TestWorkflowQueuesUntilClaimAndPreservesMessagesAcrossTransfer(t *testing.T
 		t.Fatal("reopen must queue ticket without reopening topic before claim")
 	}
 	messages, _ := store.Messages(ctx, ticket.ID)
-	if len(messages) != 5 {
+	if len(messages) != 7 {
 		t.Fatalf("archive lost messages: %d", len(messages))
 	}
 	last := messages[len(messages)-1]
