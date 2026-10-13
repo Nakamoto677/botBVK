@@ -101,7 +101,7 @@ func TestCancelConfirmationDeclineRestartRepeatAndCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	last := (*requests)[len(*requests)-1]
-	if last["text"] != "Вы уверены, что хотите завершить заявку?" {
+	if last["text"] != "Точно проблема решена?" {
 		t.Fatal(last)
 	}
 	raw, _ := json.Marshal(last["reply_markup"])
@@ -196,7 +196,7 @@ func TestCancelCommandWithoutReasonStartsConfirmation(t *testing.T) {
 	if err := a.ticketCommand(context.Background(), m); err != nil {
 		t.Fatal(err)
 	}
-	if svc.calls != 0 || (*requests)[len(*requests)-1]["text"] != "Вы уверены, что хотите завершить заявку?" {
+	if svc.calls != 0 || (*requests)[len(*requests)-1]["text"] != "Точно проблема решена?" {
 		t.Fatal("command bypassed confirmation")
 	}
 }

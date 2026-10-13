@@ -315,9 +315,7 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 		_, err = w.send(ctx, team.ChatID, team.QueueTopicID, payload.Text, nil)
 		return err
 	case "notify_client":
-		buttons := clientTicketButtons(t)
-		_, err = w.send(ctx, t.ClientID, 0, payload.Text, buttons)
-		return err
+		return w.clientNotification(ctx, t, payload.Text)
 	case "archive_message":
 		var msg domain.Message
 		if err = json.Unmarshal(op.Payload, &msg); err != nil {

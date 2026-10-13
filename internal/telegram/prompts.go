@@ -92,7 +92,11 @@ func (a *Adapter) beginCancel(ctx context.Context, actor int64, m *Message, id i
 	if err = a.replacePrompt(ctx, scope(actor, m), p); err != nil {
 		return err
 	}
-	return a.sayAux(ctx, m, actor, actionScenario(id), "Вы уверены, что хотите завершить заявку?", [][]Button{{{Text: "Да, завершить", Data: fmt.Sprintf("cancelconfirm:%d:%s", id, p.FlowID)}, {Text: "Нет, продолжить", Data: fmt.Sprintf("promptcancel:%d:%s", id, p.FlowID)}}})
+	question := "Вы уверены, что хотите завершить заявку?"
+	if u.Role == "client" {
+		question = "Точно проблема решена?"
+	}
+	return a.sayAux(ctx, m, actor, actionScenario(id), question, [][]Button{{{Text: "Да, завершить", Data: fmt.Sprintf("cancelconfirm:%d:%s", id, p.FlowID)}, {Text: "Нет, продолжить", Data: fmt.Sprintf("promptcancel:%d:%s", id, p.FlowID)}}})
 }
 func (a *Adapter) promptCallback(ctx context.Context, c *Callback, action string, id int64, parts []string) error {
 	if c.Message == nil {

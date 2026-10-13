@@ -174,3 +174,10 @@ func TestHistoryCannotCrossDepartmentGroups(t *testing.T) {
 		t.Fatal("IT history allowed in 1C group")
 	}
 }
+
+func (s *adapterStore) ActiveTicket(_ context.Context, id int64) (domain.Ticket, error) {
+	if s.ticket.ID > 0 && s.ticket.ClientID == id && s.ticket.Status.Active() {
+		return s.ticket, nil
+	}
+	return domain.Ticket{}, domain.ErrNotFound
+}

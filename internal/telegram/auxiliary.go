@@ -19,10 +19,13 @@ func (a *Adapter) sayAux(ctx context.Context, m *Message, actor int64, scenario,
 	if err != nil {
 		return err
 	}
-	if sent.ID <= 0 {
+	return a.recordAux(ctx, m, actor, scenario, sent.ID)
+}
+func (a *Adapter) recordAux(ctx context.Context, m *Message, actor int64, scenario string, id int64) error {
+	if id <= 0 {
 		return nil
 	}
-	aux := domain.AuxiliaryMessage{UserID: actor, ChatID: m.Chat.ID, TopicID: m.ThreadID, Scenario: scenario, MessageID: sent.ID}
+	aux := domain.AuxiliaryMessage{UserID: actor, ChatID: m.Chat.ID, TopicID: m.ThreadID, Scenario: scenario, MessageID: id}
 	if store, ok := a.store.(domain.WorkflowStore); ok {
 		return store.SaveAuxiliary(ctx, aux)
 	}

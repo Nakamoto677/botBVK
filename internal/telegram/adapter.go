@@ -138,6 +138,20 @@ func pause(ctx context.Context, d time.Duration) bool {
 }
 func (a *Adapter) respondError(ctx context.Context, u Update, err error) {
 	text := "Действие недоступно: " + err.Error()
+	var private *Message
+	var actor int64
+	if u.Callback != nil {
+		private = u.Callback.Message
+		actor = u.Callback.From.ID
+	} else if u.Message != nil {
+		private = u.Message
+		actor = u.Message.From.ID
+	}
+	if private != nil && private.Chat.Type == "private" {
+		if user, e := a.store.User(ctx, actor); e == nil && user.Role == "client" {
+			text = clientErrorText(err)
+		}
+	}
 	if u.Callback != nil {
 		_ = a.client.Answer(ctx, u.Callback.ID, text)
 	} else if u.Message != nil && (u.Message.Chat.Type == "private" || a.trustedGroup(u.Message.Chat.ID)) {
@@ -232,6 +246,9 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 	if text == "/help" {
 		return a.help(ctx, m, user)
 	}
+	if text == "/cancel_draft" {
+		return a.cancelClientDraft(ctx, m)
+	}
 	if consumed, e := a.consumePrompt(ctx, m, user); consumed {
 		return e
 	}
@@ -276,6 +293,11 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 		} else if !errors.Is(err, domain.ErrNotFound) {
 			return err
 		}
+		a.cleanupBestEffort(ctx, scope(m.From.ID, m), "client_home")
+		a.cleanupBestEffort(ctx, scope(m.From.ID, m), "draft")
+		if err := a.clientScreen(ctx, m, "draft", "Создание заявки.", clientDraftKeyboard); err != nil {
+			return err
+		}
 		return a.sayAux(ctx, m, m.From.ID, "draft", "Выберите направление.", departmentButtons("new"))
 	}
 	if strings.HasPrefix(text, "/") {
@@ -307,12 +329,12 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 			return err
 		}
 		a.cleanupBestEffort(ctx, scope(m.From.ID, m), "draft")
-		return a.sayAux(ctx, m, m.From.ID, "draft", "Создать заявку?\n"+d.Text, [][]Button{{{Text: "Отправить", Data: "submit"}, {Text: "Отменить", Data: "cancel"}}})
+		return a.sayAux(ctx, m, m.From.ID, "draft", "Создать заявку?\n"+d.Text, [][]Button{{{Text: "Отправить", Data: "submit"}, {Text: clientCancelDraftLabel, Data: "cancel"}}})
 	}
 	t, err := a.store.ActiveTicket(ctx, m.From.ID)
 	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) {
-			return a.say(ctx, m, "Нажмите «📝 Новая заявка» в меню, чтобы описать проблему.", nil)
+			return a.say(ctx, m, "Нажмите «Создать заявку» в меню, чтобы описать проблему.", nil)
 		}
 		return err
 	}
@@ -380,7 +402,7 @@ func (a *Adapter) callback(ctx context.Context, c *Callback) error {
 	case "approve", "reject":
 		err = a.service.ApproveAccess(ctx, c.From.ID, id, action == "approve")
 	case "new":
-		if c.Message == nil || c.Message.Chat.Type != "private" {
+		if c.Message == nil || c.Message.Chat.Type != "private" || c.Message.Chat.ID != c.From.ID {
 			return domain.ErrForbidden
 		}
 		user, e := a.store.User(ctx, c.From.ID)
@@ -393,12 +415,20 @@ func (a *Adapter) callback(ctx context.Context, c *Callback) error {
 		if len(parts) != 2 || !domain.Department(parts[1]).Valid() {
 			return domain.ErrInvalid
 		}
+		if _, e := a.store.ActiveTicket(ctx, c.From.ID); e == nil {
+			return domain.ErrConflict
+		} else if !errors.Is(e, domain.ErrNotFound) {
+			return e
+		}
 		if err := a.saveDraft(ctx, c.From.ID, draft{Department: domain.Department(parts[1])}); err != nil {
 			return err
 		}
 		a.cleanupBestEffort(ctx, scope(c.From.ID, c.Message), "draft")
-		err = a.sayAux(ctx, c.Message, c.From.ID, "draft", "Опишите проблему текстом. Вложения отправьте после создания заявки.", nil)
+		err = a.clientScreen(ctx, c.Message, "draft", "Опишите проблему текстом. Вложения отправьте после создания заявки.", clientDraftKeyboard)
 	case "submit":
+		if c.Message == nil || c.Message.Chat.Type != "private" || c.Message.Chat.ID != c.From.ID {
+			return domain.ErrForbidden
+		}
 		d, ok, e := a.getDraft(ctx, c.From.ID)
 		if e != nil {
 			return e
@@ -417,10 +447,10 @@ func (a *Adapter) callback(ctx context.Context, c *Callback) error {
 		}
 	case "cancel":
 		if id == 0 {
-			err = a.deleteDraft(ctx, c.From.ID)
-			if err == nil && c.Message != nil {
-				a.cleanupBestEffort(ctx, scope(c.From.ID, c.Message), "draft")
+			if c.Message == nil || c.Message.Chat.Type != "private" || c.Message.Chat.ID != c.From.ID {
+				return domain.ErrForbidden
 			}
+			err = a.cancelClientDraft(ctx, c.Message)
 		} else {
 			err = a.beginCancel(ctx, c.From.ID, c.Message, id)
 		}

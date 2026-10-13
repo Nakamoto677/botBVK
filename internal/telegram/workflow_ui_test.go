@@ -155,7 +155,7 @@ func TestApprovedClientReceivesPersistentSimpleMenu(t *testing.T) {
 		t.Fatal(capture.bodies)
 	}
 	markup, _ := json.Marshal(capture.bodies[0]["reply_markup"])
-	for _, label := range []string{"Новая заявка", "Мои заявки", "Отменить заявку"} {
+	for _, label := range []string{"Создать заявку", "Помощь"} {
 		if !strings.Contains(string(markup), label) {
 			t.Fatal(string(markup))
 		}

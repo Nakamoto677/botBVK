@@ -86,10 +86,10 @@ func clientTicketButtons(t domain.Ticket) [][]Button {
 	return buttons
 }
 
-var menuAliases = map[string]string{"📝 Новая заявка": "/new", "📋 Мои заявки": "/tickets", "💬 Текущая заявка": "/current", "❌ Отменить заявку": "/cancel_current", "ℹ️ Помощь": "/help", "📊 Отчёт": "/report"}
+var menuAliases = map[string]string{"Создать заявку": "/new", "Помощь": "/help", "Отменить заявку": "/cancel_current", "Отменить подачу заявки": "/cancel_draft", "📝 Новая заявка": "/new", "📋 Мои заявки": "/tickets", "💬 Текущая заявка": "/current", "❌ Отменить заявку": "/cancel_current", "ℹ️ Помощь": "/help", "📊 Отчёт": "/report"}
 var staffKeyboard = [][]string{{"📋 Мои заявки", "📊 Отчёт"}, {"ℹ️ Помощь"}}
 var engineerKeyboard = [][]string{{"📋 Мои заявки"}, {"ℹ️ Помощь"}}
-var clientKeyboard = [][]string{{"📝 Новая заявка", "📋 Мои заявки"}, {"💬 Текущая заявка", "❌ Отменить заявку"}, {"ℹ️ Помощь"}}
+var clientKeyboard = [][]string{{"Создать заявку", "Помощь"}}
 
 func (a *Adapter) menu(ctx context.Context, m *Message, u domain.User) error {
 	if u.Role == "engineer" {
@@ -98,13 +98,13 @@ func (a *Adapter) menu(ctx context.Context, m *Message, u domain.User) error {
 	if u.Role != "client" {
 		return a.client.SendKeyboard(ctx, m.Chat.ID, "Работайте с кнопками заявок в группе отдела. Выберите список заявок, отчёт или помощь.", staffKeyboard)
 	}
-	return a.client.SendKeyboard(ctx, m.Chat.ID, "Выберите действие в меню. Дополнения к текущей заявке можно отправлять обычными сообщениями.", clientKeyboard)
+	return a.clientMenu(ctx, m, u)
 }
 func (a *Adapter) help(ctx context.Context, m *Message, u domain.User) error {
 	if u.Role != "client" {
 		return a.say(ctx, m, "В группе отдела: возьмите заявку кнопкой. Обычные сообщения и вложения инженеров текущего отдела в актуальном топике автоматически уходят клиенту. Служебный ввод для закрытия и передачи не пересылается. Кнопки Закрыть и Передать зададут нужные вопросы. /history ID — переписка, /tickets — список, /report — отчёт для администратора. Для отмены ввода нажмите Отмена.", nil)
 	}
-	return a.client.SendKeyboard(ctx, m.Chat.ID, "Новая заявка: выберите направление и опишите проблему. До взятия в работу дополнения сохраняются в заявке; после назначения их увидит специалист. Одна активная заявка одновременно. Кнопка Мои заявки открывает историю, а Отменить заявку — отмену с подтверждением.", clientKeyboard)
+	return a.sayAux(ctx, m, u.ID, "client_home", "Чтобы обратиться в поддержку, нажмите «Создать заявку», выберите отдел и опишите проблему. Специалист ответит прямо здесь.\n\nИстория: /tickets. Повторное открытие: /reopen ID.", nil)
 }
 func (a *Adapter) showTicket(ctx context.Context, m *Message, u domain.User, t domain.Ticket) error {
 	if !historyAuthorized(u, t) || !a.historyDestination(m, u, t) {
@@ -123,6 +123,9 @@ func (a *Adapter) showTicket(ctx context.Context, m *Message, u domain.User, t d
 		return err
 	}
 	buttons := clientTicketButtons(t)
+	if u.Role == "client" && t.Status.Active() {
+		buttons = [][]Button{{{Text: "Отменить заявку", Data: fmt.Sprintf("cancel:%d", t.ID)}}}
+	}
 	if u.Role == "engineer" {
 		buttons = [][]Button{{{Text: "История", Data: fmt.Sprintf("history:%d", t.ID)}}}
 		team := a.cfg.Departments[t.Department]
