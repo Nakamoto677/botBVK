@@ -86,7 +86,7 @@ func (s *Store) DeleteWorkflow(ctx context.Context, user, chat, topic int64, sce
 // attachment still needs durable processing, including a failed operation.
 func (s *Store) CleanupSettled(ctx context.Context, ticketID int64) (bool, error) {
 	var unsettled bool
-	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM bvk_updates WHERE NOT finished) OR EXISTS(SELECT 1 FROM bvk_outbox WHERE ticket_id=$1 AND state IN ('pending','processing','failed') AND kind IN ('archive_message','client_message','team_message','create_topic','reopen_topic'))`, ticketID).Scan(&unsettled)
+	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM bvk_updates WHERE NOT finished) OR EXISTS(SELECT 1 FROM bvk_outbox WHERE ticket_id=$1 AND state IN ('pending','processing','failed') AND kind IN ('archive_message','client_message','team_message','create_topic','reopen_topic','refresh_card','close_topic'))`, ticketID).Scan(&unsettled)
 	return !unsettled, err
 }
 
@@ -99,7 +99,7 @@ func (s *Store) CleanupRetry(ctx context.Context, ticketID int64) error {
 
 func (s *Store) CleanupProblem(ctx context.Context, ticketID int64) (string, error) {
 	var kind, state, lastError string
-	err := s.pool.QueryRow(ctx, `SELECT kind,state,last_error FROM bvk_outbox WHERE ticket_id=$1 AND state IN ('pending','processing','failed') AND kind IN ('archive_message','client_message','team_message','create_topic','reopen_topic') ORDER BY CASE WHEN state='failed' THEN 0 ELSE 1 END,id LIMIT 1`, ticketID).Scan(&kind, &state, &lastError)
+	err := s.pool.QueryRow(ctx, `SELECT kind,state,last_error FROM bvk_outbox WHERE ticket_id=$1 AND state IN ('pending','processing','failed') AND kind IN ('archive_message','client_message','team_message','create_topic','reopen_topic','refresh_card','close_topic') ORDER BY CASE WHEN state='failed' THEN 0 ELSE 1 END,id LIMIT 1`, ticketID).Scan(&kind, &state, &lastError)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "обработка уже принятых входящих сообщений ещё не завершена", nil
@@ -108,7 +108,7 @@ func (s *Store) CleanupProblem(ctx context.Context, ticketID int64) (string, err
 	}
 	// Return a bounded operator-facing description, never raw errors that might
 	// contain URLs, filesystem credentials or PostgreSQL connection secrets.
-	label := map[string]string{"archive_message": "сохранение вложения", "client_message": "доставка клиенту", "team_message": "доставка инженерам", "create_topic": "создание топика", "reopen_topic": "подготовка топика"}[kind]
+	label := map[string]string{"archive_message": "сохранение вложения", "client_message": "доставка клиенту", "team_message": "доставка инженерам", "create_topic": "создание топика", "reopen_topic": "подготовка топика", "refresh_card": "обновление карточки", "close_topic": "закрытие топика"}[kind]
 	if state == "failed" {
 		lower := strings.ToLower(lastError)
 		switch {

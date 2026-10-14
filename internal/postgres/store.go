@@ -36,6 +36,9 @@ var engineerCardsMigration string
 //go:embed company_sync.sql
 var companySyncMigration string
 
+//go:embed recover_missing_telegram_targets.sql
+var recoverMissingTelegramTargetsMigration string
+
 type Store struct {
 	pool           *pgxpool.Pool
 	operationReady chan struct{}
@@ -126,6 +129,16 @@ func (s *Store) Migrate(ctx context.Context) error {
 		}
 		if marker.RowsAffected() != 0 {
 			_, err = tx.Exec(ctx, companySyncMigration)
+		}
+		if err != nil {
+			return err
+		}
+		marker, err = tx.Exec(ctx, "INSERT INTO bvk_migrations(version) VALUES('008_recover_missing_telegram_targets') ON CONFLICT DO NOTHING")
+		if err != nil {
+			return err
+		}
+		if marker.RowsAffected() != 0 {
+			_, err = tx.Exec(ctx, recoverMissingTelegramTargetsMigration)
 		}
 		return err
 	})

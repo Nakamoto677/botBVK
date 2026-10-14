@@ -76,6 +76,66 @@ func TestClosedTicketRefreshShowsCommentInQueueCard(t *testing.T) {
 	}
 }
 
+func TestClosedTicketRefreshReplacesDeletedQueueCard(t *testing.T) {
+	var calls []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var p struct {
+			ChatID    int64 `json:"chat_id"`
+			MessageID int64 `json:"message_id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&p)
+		calls = append(calls, r.URL.Path)
+		if strings.HasSuffix(r.URL.Path, "editMessageText") {
+			if p.ChatID == -200 && p.MessageID == 30 {
+				_, _ = w.Write([]byte(`{"ok":false,"error_code":400,"description":"Bad Request: message to edit not found"}`))
+				return
+			}
+			if p.ChatID == -100 && p.MessageID == 20 {
+				_, _ = w.Write([]byte(`{"ok":false,"error_code":400,"description":"Bad Request: message to edit not found"}`))
+				return
+			}
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":99}}`))
+	}))
+	defer server.Close()
+	client := NewClient("test")
+	client.BaseURL = server.URL
+	ticket := domain.Ticket{ID: 7, ClientID: 1, CompanyID: 10, Department: domain.IT, Status: domain.Closed, TopicChatID: -200, TopicID: 9, TopicMessageID: 30, QueueMessageID: 20, Resolution: "Готово"}
+	store := &workerStore{ticket: ticket, current: ticket}
+	worker := NewWorker(client, store, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100, QueueTopicID: 1}}})
+	worker.interval = 0
+	if err := worker.Handle(t.Context(), domain.Operation{Kind: "refresh_card", TicketID: 7}); err != nil {
+		t.Fatal(err)
+	}
+	if store.current.QueueMessageID != 99 || len(calls) != 3 || !strings.HasSuffix(calls[2], "sendMessage") {
+		t.Fatalf("deleted queue card was not replaced: id=%d calls=%v", store.current.QueueMessageID, calls)
+	}
+}
+
+func TestCloseTopicTreatsMissingThreadAsAlreadyClosed(t *testing.T) {
+	for _, missingDuringNotice := range []bool{false, true} {
+		t.Run(fmt.Sprint(missingDuringNotice), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if missingDuringNotice == strings.HasSuffix(r.URL.Path, "sendMessage") {
+					_, _ = w.Write([]byte(`{"ok":false,"error_code":400,"description":"Bad Request: message thread not found"}`))
+					return
+				}
+				_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":99}}`))
+			}))
+			defer server.Close()
+			client := NewClient("test")
+			client.BaseURL = server.URL
+			ticket := domain.Ticket{ID: 7, Department: domain.IT, Status: domain.Closed}
+			store := &workerStore{ticket: ticket, current: ticket}
+			worker := NewWorker(client, store, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100}}})
+			worker.interval = 0
+			if err := worker.Handle(t.Context(), domain.Operation{ID: 10, Kind: "close_topic", TicketID: 7, Payload: json.RawMessage(`{"chat_id":-100,"topic_id":9,"text":"Тикет закрыт инженером"}`)}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestClaimTopicReplaysDeferredMessagesWithoutDuplicates(t *testing.T) {
 	messages := []domain.Message{{ID: 1, AuthorID: 12, Direction: "inbound", Text: "First detail", DeferredDelivery: true}, {ID: 2, AuthorID: 12, Direction: "inbound", Text: "Second detail", DeferredDelivery: true}}
 	calls := 0

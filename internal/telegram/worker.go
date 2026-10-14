@@ -412,10 +412,16 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 		}
 		if notice != "" {
 			if err = w.topicClosingNotice(ctx, op, payload.ChatID, payload.TopicID, notice); err != nil {
-				return err
+				if !topicMissing(err) {
+					return err
+				}
+				if payload.Retire {
+					return w.retire(ctx, t.ID, payload.ChatID, payload.TopicID)
+				}
+				return nil
 			}
 		}
-		if err = w.client.CloseTopic(ctx, payload.ChatID, payload.TopicID); err != nil {
+		if err = w.client.CloseTopic(ctx, payload.ChatID, payload.TopicID); err != nil && !topicMissing(err) {
 			return err
 		}
 		if payload.Retire {
@@ -527,7 +533,7 @@ func (w *Worker) refresh(ctx context.Context, t domain.Ticket) error {
 		if err = w.rate(ctx, t.TopicChatID); err != nil {
 			return err
 		}
-		if err = messageEditError(w.client.Call(ctx, "editMessageText", map[string]any{"chat_id": t.TopicChatID, "message_id": t.TopicMessageID, "text": text, "parse_mode": "HTML", "reply_markup": Markup{Buttons: buttons}}, nil)); err != nil {
+		if err = messageEditError(w.client.Call(ctx, "editMessageText", map[string]any{"chat_id": t.TopicChatID, "message_id": t.TopicMessageID, "text": text, "parse_mode": "HTML", "reply_markup": Markup{Buttons: buttons}}, nil)); err != nil && !(messageToEditMissing(err) && !t.Status.Active()) {
 			return err
 		}
 	}
@@ -541,11 +547,9 @@ func (w *Worker) refresh(ctx context.Context, t domain.Ticket) error {
 			return err
 		}
 		err := w.client.Call(ctx, "editMessageText", map[string]any{"chat_id": team.ChatID, "message_id": t.QueueMessageID, "text": text, "parse_mode": "HTML", "reply_markup": Markup{cardButtons(t)}}, nil)
-		var api *APIError
-		if errors.As(err, &api) && strings.Contains(api.Description, "message is not modified") {
-			return nil
+		if !messageToEditMissing(err) {
+			return messageEditError(err)
 		}
-		return err
 	}
 	sent, err := w.sendEngineerCard(ctx, team.ChatID, team.QueueTopicID, text, cardButtons(t))
 	if err != nil {
@@ -556,7 +560,7 @@ func (w *Worker) refresh(ctx context.Context, t domain.Ticket) error {
 		if e != nil {
 			return e
 		}
-		if now.TopicID != t.TopicID || now.Department != t.Department {
+		if now.TopicID != t.TopicID || now.Department != t.Department || now.QueueMessageID != t.QueueMessageID {
 			return nil
 		}
 		now.QueueMessageID = sent.ID
@@ -787,6 +791,23 @@ func messageEditError(err error) error {
 	}
 	return err
 }
+func messageToEditMissing(err error) bool {
+	var api *APIError
+	return errors.As(err, &api) && api.Code == 400 && strings.Contains(strings.ToLower(api.Description), "message to edit not found")
+}
+func topicMissing(err error) bool {
+	var api *APIError
+	if !errors.As(err, &api) || api.Code != 400 {
+		return false
+	}
+	description := strings.ToLower(api.Description)
+	for _, marker := range []string{"topic_id_invalid", "topic not found", "message thread not found", "message_thread_id_invalid"} {
+		if strings.Contains(description, marker) {
+			return true
+		}
+	}
+	return false
+}
 func (w *Worker) messageRoute(ctx context.Context, t domain.Ticket, m domain.Message) (int64, int64, error) {
 	if t.TopicID != 0 && !t.RoutingPending && (m.RoutingDepartment == "" || m.RoutingDepartment == t.Department) {
 		return t.TopicChatID, t.TopicID, nil
@@ -923,14 +944,8 @@ func auxiliaryDeleteError(err error) error {
 	return err
 }
 func topicDeleteError(err error) error {
-	var api *APIError
-	if errors.As(err, &api) && api.Code == 400 {
-		description := strings.ToLower(api.Description)
-		for _, marker := range []string{"topic_id_invalid", "topic not found", "message thread not found", "message_thread_id_invalid"} {
-			if strings.Contains(description, marker) {
-				return nil
-			}
-		}
+	if topicMissing(err) {
+		return nil
 	}
 	return err
 }

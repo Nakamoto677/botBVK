@@ -104,3 +104,41 @@ func TestCleanupFencesAcceptedInboxUntilProcessed(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestCleanupWaitsForCardAndTopicAndRecoversMissingTargets(t *testing.T) {
+	s := testStore(t)
+	v := seed(t, s)
+	ctx := context.Background()
+	if _, err := s.pool.Exec(ctx, `INSERT INTO bvk_outbox(kind,ticket_id,payload,state,last_error) VALUES
+		('close_topic',$1,'{}','failed','telegram 400: Bad Request: message thread not found'),
+		('refresh_card',$1,'{}','failed','telegram 400: Bad Request: message to edit not found'),
+		('client_message',$1,'{}','failed','telegram 403: Forbidden')`, v.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `DELETE FROM bvk_migrations WHERE version='008_recover_missing_telegram_targets'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for kind, want := range map[string]string{"close_topic": "pending", "refresh_card": "pending", "client_message": "failed"} {
+		var state string
+		if err := s.pool.QueryRow(ctx, `SELECT state FROM bvk_outbox WHERE ticket_id=$1 AND kind=$2`, v.ID, kind).Scan(&state); err != nil || state != want {
+			t.Fatalf("%s state=%s want=%s err=%v", kind, state, want, err)
+		}
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE bvk_outbox SET state='done' WHERE ticket_id=$1 AND kind='client_message'`, v.ID); err != nil {
+		t.Fatal(err)
+	}
+	settled, err := s.CleanupSettled(ctx, v.ID)
+	if err != nil || settled {
+		t.Fatalf("cleanup ignored card/topic work: settled=%v err=%v", settled, err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE bvk_outbox SET state='done' WHERE ticket_id=$1 AND kind IN ('close_topic','refresh_card')`, v.ID); err != nil {
+		t.Fatal(err)
+	}
+	settled, err = s.CleanupSettled(ctx, v.ID)
+	if err != nil || !settled {
+		t.Fatalf("cleanup still blocked after card/topic completion: settled=%v err=%v", settled, err)
+	}
+}
