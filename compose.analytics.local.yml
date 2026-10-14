@@ -1,0 +1,28 @@
+services:
+  metabase:
+    image: ${METABASE_IMAGE:-metabase/metabase:v0.64.1.x}
+    container_name: bvk-metabase-local
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    env_file:
+      - ./data/metabase-local/metabase.env
+    environment:
+      MB_DB_TYPE: postgres
+      MB_JETTY_HOST: 0.0.0.0
+      MB_JETTY_PORT: 3000
+      MB_SITE_URL: http://localhost:3000
+      MB_REPORT_TIMEZONE: Asia/Irkutsk
+      MB_SITE_LOCALE: ru
+      MB_ENABLE_PUBLIC_SHARING: "false"
+      MB_ENABLE_EMBEDDING: "false"
+      MB_LOAD_SAMPLE_CONTENT: "false"
+      JAVA_TOOL_OPTIONS: -Xmx1024m
+    mem_limit: 2g
+    networks:
+      - bot_database
+
+networks:
+  bot_database:
+    external: true
+    name: ${BVK_SOURCE_NETWORK:-bot-bvk_default}

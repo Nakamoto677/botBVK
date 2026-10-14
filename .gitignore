@@ -5,3 +5,5 @@ data/
 bin/
 *.exe
 coverage.out
+__pycache__/
+analytics/metabase/import-state*.json

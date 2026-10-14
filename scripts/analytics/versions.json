@@ -1,0 +1,13 @@
+{
+  "metabase": "v0.64.1",
+  "java": "21.0.12.1+1",
+  "caddy": "v2.11.7",
+  "nssm": "2.24",
+  "sha256": {
+    "metabase.jar": "REPLACE_WITH_VERIFIED_SHA256",
+    "caddy.exe": "REPLACE_WITH_VERIFIED_SHA256",
+    "java.exe": "REPLACE_WITH_VERIFIED_SHA256",
+    "nssm.exe": "REPLACE_WITH_VERIFIED_SHA256",
+    "bvk-analytics.exe": "REPLACE_WITH_BUILD_SHA256"
+  }
+}

@@ -1,0 +1,2217 @@
+{
+  "format": 2,
+  "compatibility_version": "v0.64.1",
+  "collection": "BVK — аналитика поддержки",
+  "dashboards": {
+    "support": {
+      "name": "Поддержка BVK",
+      "tabs": {
+        "overview": "Обзор",
+        "attention": "Требуют внимания",
+        "employees": "Сотрудники",
+        "reports": "Подробно",
+        "guide": "Как читать"
+      },
+      "layout": {
+        "overview": [
+          {
+            "text": "**Нажмите число для списка заявок.** Без дат — текущий месяц. «Сейчас» — очередь на момент снимка.",
+            "key": "intro",
+            "width": 24,
+            "height": 2
+          },
+          {
+            "card": "received_count",
+            "width": 6,
+            "height": 3
+          },
+          {
+            "card": "closed_count",
+            "width": 6,
+            "height": 3
+          },
+          {
+            "card": "active_now_count",
+            "width": 6,
+            "height": 3
+          },
+          {
+            "card": "attention_count",
+            "width": 6,
+            "height": 3
+          },
+          {
+            "card": "flow",
+            "width": 24,
+            "height": 7
+          },
+          {
+            "card": "comparison",
+            "width": 24,
+            "height": 5
+          },
+          {
+            "text": "**Как читать сравнение.** «Ранее» — такой же по длительности интервал перед началом периода, с учётом времени снимка. Разница показана в заявках; рост не всегда означает улучшение.",
+            "key": "compare_help",
+            "width": 24,
+            "height": 2
+          },
+          {
+            "card": "received_department",
+            "width": 12,
+            "height": 6
+          },
+          {
+            "card": "received_company",
+            "width": 12,
+            "height": 6
+          }
+        ],
+        "attention": [
+          {
+            "text": "**Где нужна помощь сейчас.** Даты периода не влияют на эту вкладку. Отдел, сотрудник и компания сужают текущую очередь. Одна заявка может иметь несколько причин.",
+            "key": "attention_intro",
+            "width": 24,
+            "height": 2
+          },
+          {
+            "card": "attention_summary",
+            "width": 24,
+            "height": 3
+          },
+          {
+            "card": "unassigned_count",
+            "width": 6,
+            "height": 3
+          },
+          {
+            "card": "response_overdue_count",
+            "width": 6,
+            "height": 3
+          },
+          {
+            "card": "idle_overdue_count",
+            "width": 6,
+            "height": 3
+          },
+          {
+            "card": "waiting_overdue_count",
+            "width": 6,
+            "height": 3
+          },
+          {
+            "card": "attention_list",
+            "width": 24,
+            "height": 8
+          },
+          {
+            "text": "**Вся открытая очередь.** Если список внимания пуст, проверьте общую нагрузку ниже.",
+            "key": "queue_intro",
+            "width": 24,
+            "height": 2
+          },
+          {
+            "card": "active_now_count",
+            "width": 8,
+            "height": 3
+          },
+          {
+            "card": "waiting_now_count",
+            "width": 8,
+            "height": 3
+          },
+          {
+            "card": "unanswered_count",
+            "width": 8,
+            "height": 3
+          },
+          {
+            "card": "oldest_list",
+            "width": 24,
+            "height": 8
+          }
+        ],
+        "employees": [
+          {
+            "text": "**Кто закрывает заявки и кому нужна помощь.** Закрытия — за период, нагрузка — сейчас. Нажмите число закрытий или нагрузки для списка. Срок решения — длительность цикла, а не трудозатраты сотрудника.",
+            "key": "team_intro",
+            "width": 24,
+            "height": 3
+          },
+          {
+            "card": "employees",
+            "width": 24,
+            "height": 9
+          },
+          {
+            "card": "first_response",
+            "width": 24,
+            "height": 5
+          },
+          {
+            "text": "**Без единого рейтинга.** Учитывайте сложность задач, размер выборки и ожидание клиента. Закрытие относится к автору события; первый ответ — к действительно ответившему сотруднику.",
+            "key": "team_help",
+            "width": 24,
+            "height": 2
+          }
+        ],
+        "reports": [
+          {
+            "text": "**Результаты за период.** Даты включаются целиком; текущий день ограничен временем снимка. Для точного списка нажмите показатель.",
+            "key": "reports_intro",
+            "width": 24,
+            "height": 2
+          },
+          {
+            "card": "received_count",
+            "width": 6,
+            "height": 3
+          },
+          {
+            "card": "closed_count",
+            "width": 6,
+            "height": 3
+          },
+          {
+            "card": "cancelled_count",
+            "width": 6,
+            "height": 3
+          },
+          {
+            "card": "reopened_count",
+            "width": 6,
+            "height": 3
+          },
+          {
+            "card": "resolution_summary",
+            "width": 24,
+            "height": 6
+          },
+          {
+            "card": "first_response",
+            "width": 24,
+            "height": 5
+          },
+          {
+            "card": "backlog_count",
+            "width": 24,
+            "height": 3
+          },
+          {
+            "card": "backlog_department",
+            "width": 12,
+            "height": 6
+          },
+          {
+            "card": "backlog_company",
+            "width": 12,
+            "height": 6
+          }
+        ],
+        "guide": [
+          {
+            "text": "### Как читать панель\n\n**Обзор** — главные числа и динамика. **Требуют внимания** — текущие проблемы. **Сотрудники** — результаты и нагрузка. **Подробно** — сроки и состав очереди.\n\nФильтры отдела, компании и сотрудника сохраняются при переходе из числа в список. Номер заявки открывает её историю. Назад к отбору — кнопкой браузера.\n\n**Период:** пустые даты означают текущий месяц по Иркутску. **Сейчас:** последний минутный снимок независимо от дат. Ноль означает отсутствие заявок; пустая длительность — отсутствие измерений.",
+            "key": "guide",
+            "width": 24,
+            "height": 7
+          },
+          {
+            "text": "### Что именно считаем\n\n**Закрыто:** каждая заявка один раз за период, по её последнему закрытию в этом периоде. Сумма дневных закрытий может отличаться из-за повторных циклов.\n\n**Сотрудник:** поступления — первый назначенный, закрытия — автор закрытия, текущая очередь — назначенный сейчас. Поэтому показатели одного сотрудника не обязаны сходиться в баланс.\n\n**Медиана:** половина измеренных сроков меньше этого значения. Рабочие часы учитывают календарь поддержки. Размер выборки указан рядом; срок включает ожидание клиента.\n\n**Качество истории:** отсутствие выявленных пробелов не гарантирует полноту старых событий. При предупреждении о задержке ориентируйтесь на время снимка.",
+            "key": "definitions",
+            "width": 24,
+            "height": 8
+          },
+          {
+            "card": "freshness",
+            "width": 24,
+            "height": 4
+          },
+          {
+            "card": "operations",
+            "width": 24,
+            "height": 5
+          },
+          {
+            "card": "queue_balance",
+            "width": 24,
+            "height": 5
+          }
+        ]
+      }
+    },
+    "ticket": {
+      "name": "Карточка заявки",
+      "tabs": {}
+    }
+  },
+  "cards": [
+    {
+      "key": "received_count",
+      "name": "Поступило за период",
+      "sql": "sql/received_count.sql",
+      "display": "scalar",
+      "description": "Дата первоначального создания. Сотрудник — первый назначенный; отдел — исторический при создании. Неизвестные значения не заменяются текущими.",
+      "dashboard": "support",
+      "tab": "overview",
+      "width": 6,
+      "height": 4,
+      "target": "received_list",
+      "settings": {
+        "scalar.decimals": 0
+      }
+    },
+    {
+      "key": "received_list",
+      "name": "Поступившие заявки",
+      "sql": "sql/received_list.sql",
+      "display": "table",
+      "description": "Дата первоначального создания. Сотрудник — первый назначенный; отдел — исторический при создании. Неизвестные значения не заменяются текущими.",
+      "dashboard": null,
+      "tab": "attention",
+      "width": 24,
+      "height": 8,
+      "target": "ticket",
+      "settings": {
+        "table.cell_column": false,
+        "table.pivot": false,
+        "table.columns": [
+          {
+            "name": "Номер",
+            "enabled": true
+          },
+          {
+            "name": "Описание",
+            "enabled": true
+          },
+          {
+            "name": "Компания",
+            "enabled": true
+          },
+          {
+            "name": "Отдел отбора",
+            "enabled": true
+          },
+          {
+            "name": "Сотрудник отбора",
+            "enabled": true
+          },
+          {
+            "name": "Сейчас",
+            "enabled": true
+          },
+          {
+            "name": "Создана",
+            "enabled": false
+          },
+          {
+            "name": "Дата отбора",
+            "enabled": false
+          },
+          {
+            "name": "Возраст, кал. ч",
+            "enabled": false
+          },
+          {
+            "name": "Первый ответ, раб. мин",
+            "enabled": false
+          },
+          {
+            "name": "Без ответа, раб. мин",
+            "enabled": false
+          },
+          {
+            "name": "Без инженера, раб. ч",
+            "enabled": false
+          },
+          {
+            "name": "Ожидание клиента, раб. ч",
+            "enabled": false
+          },
+          {
+            "name": "Причины внимания",
+            "enabled": false
+          },
+          {
+            "name": "Качество истории",
+            "enabled": false
+          }
+        ]
+      }
+    },
+    {
+      "key": "closed_count",
+      "name": "Закрыто за период",
+      "sql": "sql/closed_count.sql",
+      "display": "scalar",
+      "description": "Последнее закрытие заявки внутри периода выбирается до фильтра отдела/сотрудника. Сотрудник — фактический автор этого закрытия.",
+      "dashboard": "support",
+      "tab": "overview",
+      "width": 6,
+      "height": 4,
+      "target": "closed_list",
+      "settings": {
+        "scalar.decimals": 0
+      }
+    },
+    {
+      "key": "closed_list",
+      "name": "Закрытые заявки",
+      "sql": "sql/closed_list.sql",
+      "display": "table",
+      "description": "Последнее закрытие заявки внутри периода выбирается до фильтра отдела/сотрудника. Сотрудник — фактический автор этого закрытия.",
+      "dashboard": null,
+      "tab": "attention",
+      "width": 24,
+      "height": 8,
+      "target": "ticket",
+      "settings": {
+        "table.cell_column": false,
+        "table.pivot": false,
+        "table.columns": [
+          {
+            "name": "Номер",
+            "enabled": true
+          },
+          {
+            "name": "Описание",
+            "enabled": true
+          },
+          {
+            "name": "Компания",
+            "enabled": true
+          },
+          {
+            "name": "Отдел отбора",
+            "enabled": true
+          },
+          {
+            "name": "Сотрудник отбора",
+            "enabled": true
+          },
+          {
+            "name": "Сейчас",
+            "enabled": true
+          },
+          {
+            "name": "Решение, раб. ч",
+            "enabled": true
+          },
+          {
+            "name": "Решение, кал. ч",
+            "enabled": false
+          },
+          {
+            "name": "Ожидание цикла, раб. ч",
+            "enabled": false
+          },
+          {
+            "name": "Без ожидания цикла, раб. ч",
+            "enabled": false
+          },
+          {
+            "name": "Создана",
+            "enabled": false
+          },
+          {
+            "name": "Дата отбора",
+            "enabled": false
+          },
+          {
+            "name": "Возраст, кал. ч",
+            "enabled": false
+          },
+          {
+            "name": "Первый ответ, раб. мин",
+            "enabled": false
+          },
+          {
+            "name": "Без ответа, раб. мин",
+            "enabled": false
+          },
+          {
+            "name": "Без инженера, раб. ч",
+            "enabled": false
+          },
+          {
+            "name": "Ожидание клиента, раб. ч",
+            "enabled": false
+          },
+          {
+            "name": "Причины внимания",
+            "enabled": false
+          },
+          {
+            "name": "Качество истории",
+            "enabled": false
+          }
+        ]
+      }
+    },
+    {
+      "key": "cancelled_count",
+      "name": "Отменено за период",
+      "sql": "sql/cancelled_count.sql",
+      "display": "scalar",
+      "description": "Уникальные заявки с отменой за период; сотрудник — автор последней отмены внутри периода.",
+      "dashboard": "support",
+      "tab": "overview",
+      "width": 6,
+      "height": 4,
+      "target": "cancelled_list",
+      "settings": {
+        "scalar.decimals": 0
+      }
+    },
+    {
+      "key": "cancelled_list",
+      "name": "Отменённые заявки",
+      "sql": "sql/cancelled_list.sql",
+      "display": "table",
+      "description": "Уникальные заявки с отменой за период; сотрудник — автор последней отмены внутри периода.",
+      "dashboard": null,
+      "tab": "attention",
+      "width": 24,
+      "height": 8,
+      "target": "ticket",
+      "settings": {
+        "table.cell_column": false,
+        "table.pivot": false,
+        "table.columns": [
+          {
+            "name": "Номер",
+            "enabled": true
+          },
+          {
+            "name": "Описание",
+            "enabled": true
+          },
+          {
+            "name": "Компания",
+            "enabled": true
+          },
+          {
+            "name": "Отдел отбора",
+            "enabled": true
+          },
+          {
+            "name": "Сотрудник отбора",
+            "enabled": true
+          },
+          {
+            "name": "Сейчас",
+            "enabled": true
+          },
+          {
+            "name": "Создана",
+            "enabled": false
+          },
+          {
+            "name": "Дата отбора",
+            "enabled": false
+          },
+          {
+            "name": "Возраст, кал. ч",
+            "enabled": false
+          },
+          {
+            "name": "Первый ответ, раб. мин",
+            "enabled": false
+          },
+          {
+            "name": "Без ответа, раб. мин",
+            "enabled": false
+          },
+          {
+            "name": "Без инженера, раб. ч",
+            "enabled": false
+          },
+          {
+            "name": "Ожидание клиента, раб. ч",
+            "enabled": false
+          },
+          {
+            "name": "Причины внимания",
+            "enabled": false
+          },
+          {
+            "name": "Качество истории",
+            "enabled": false
+          }
+        ]
+      }
+    },
+    {
+      "key": "reopened_count",
+      "name": "Открыто повторно",
+      "sql": "sql/reopened_count.sql",
+      "display": "scalar",
+      "description": "Уникальные заявки с повторным открытием за период; сотрудник — автор последнего открытия внутри периода.",
+      "dashboard": "support",
+      "tab": "overview",
+      "width": 6,
+      "height": 4,
+      "target": "reopened_list",
+      "settings": {
+        "scalar.decimals": 0
+      }
+    },
+    {
+      "key": "reopened_list",
+      "name": "Повторно открытые заявки",
+      "sql": "sql/reopened_list.sql",
+      "display": "table",
+      "description": "Уникальные заявки с повторным открытием за период; сотрудник — автор последнего открытия внутри периода.",
+      "dashboard": null,
+      "tab": "attention",
+      "width": 24,
+      "height": 8,
+      "target": "ticket",
+      "settings": {
+        "table.cell_column": false,
+        "table.pivot": false,
+        "table.columns": [
+          {
+            "name": "Номер",
+            "enabled": true
+          },
+          {
+            "name": "Описание",
+            "enabled": true
+          },
+          {
+            "name": "Компания",
+            "enabled": true
+          },
+          {
+            "name": "Отдел отбора",
+            "enabled": true
+          },
+          {
+            "name": "Сотрудник отбора",
+            "enabled": true
+          },
+          {
+            "name": "Сейчас",
+            "enabled": true
+          },
+          {
+            "name": "Создана",
+            "enabled": false
+          },
+          {
+            "name": "Дата отбора",
+            "enabled": false
+          },
+          {
+            "name": "Возраст, кал. ч",
+            "enabled": false
+          },
+          {
+            "name": "Первый ответ, раб. мин",
+            "enabled": false
+          },
+          {
+            "name": "Без ответа, раб. мин",
+            "enabled": false
+          },
+          {
+            "name": "Без инженера, раб. ч",
+            "enabled": false
+          },
+          {
+            "name": "Ожидание клиента, раб. ч",
+            "enabled": false
+          },
+          {
+            "name": "Причины внимания",
+            "enabled": false
+          },
+          {
+            "name": "Качество истории",
+            "enabled": false
+          }
+        ]
+      }
+    },
+    {
+      "key": "backlog_count",
+      "name": "Очередь на конец периода",
+      "sql": "sql/backlog_count.sql",
+      "display": "scalar",
+      "description": "Состояние непосредственно перед исключённой правой границей периода. Сотрудник — назначенный тогда. Дата создания не ограничивается.",
+      "dashboard": "support",
+      "tab": "overview",
+      "width": 6,
+      "height": 4,
+      "target": "backlog_list",
+      "settings": {
+        "scalar.decimals": 0
+      }
+    },
+    {
+      "key": "backlog_list",
+      "name": "Очередь на конец периода",
+      "sql": "sql/backlog_list.sql",
+      "display": "table",
+      "description": "Состояние непосредственно перед исключённой правой границей периода. Сотрудник — назначенный тогда. Дата создания не ограничивается.",
+      "dashboard": null,
+      "tab": "attention",
+      "width": 24,
+      "height": 8,
+      "target": "ticket",
+      "settings": {
+        "table.cell_column": false,
+        "table.pivot": false,
+        "table.columns": [
+          {
+            "name": "Номер",
+            "enabled": true
+          },
+          {
+            "name": "Описание",
+            "enabled": true
+          },
+          {
+            "name": "Компания",
+            "enabled": true
+          },
+          {
+            "name": "Отдел отбора",
+            "enabled": true
+          },
+          {
+            "name": "Сотрудник отбора",
+            "enabled": true
+          },
+          {
+            "name": "Сейчас",
+            "enabled": true
+          },
+          {
+            "name": "Создана",
+            "enabled": false
+          },
+          {
+            "name": "Дата отбора",
+            "enabled": false
+          },
+          {
+            "name": "Возраст, кал. ч",
+            "enabled": false
+          },
+          {
+            "name": "Первый ответ, раб. мин",
+            "enabled": false
+          },
+          {
+            "name": "Без ответа, раб. мин",
+            "enabled": false
+          },
+          {
+            "name": "Без инженера, раб. ч",
+            "enabled": false
+          },
+          {
+            "name": "Ожидание клиента, раб. ч",
+            "enabled": false
+          },
+          {
+            "name": "Причины внимания",
+            "enabled": false
+          },
+          {
+            "name": "Качество истории",
+            "enabled": false
+          }
+        ]
+      }
+    },
+    {
+      "key": "active_now_count",
+      "name": "Открыто сейчас",
+      "sql": "sql/active_now_count.sql",
+      "display": "scalar",
+      "description": "Текущее состояние; сотрудник — текущий назначенный. Пороги рассчитаны календарём и конфигурацией бота. Даты периода не ограничивают этот блок.",
+      "dashboard": "support",
+      "tab": "overview",
+      "width": 6,
+      "height": 4,
+      "target": "active_now_list",
+      "settings": {
+        "scalar.decimals": 0
+      }
+    },
+    {
+      "key": "active_now_list",
+      "name": "Открытые заявки",
+      "sql": "sql/active_now_list.sql",
+      "display": "table",
+      "description": "",
+      "dashboard": null,
+      "tab": "attention",
+      "width": 24,
+      "height": 8,
+      "target": "ticket",
+      "settings": {
+        "table.cell_column": false,
+        "table.pivot": false,
+        "table.columns": [
+          {
+            "name": "Номер",
+            "enabled": true
+          },
+          {
+            "name": "Описание",
+            "enabled": true
+          },
+          {
+            "name": "Компания",
+            "enabled": true
+          },
+          {
+            "name": "Отдел отбора",
+            "enabled": true
+          },
+          {
+            "name": "Сотрудник отбора",
+            "enabled": true
+          },
+          {
+            "name": "Сейчас",
+            "enabled": true
+          },
+          {
+            "name": "Создана",
+            "enabled": false
+          },
+          {
+            "name": "Дата отбора",
+            "enabled": false
+          },
+          {
+            "name": "Возраст, кал. ч",
+            "enabled": false
+          },
+          {
+            "name": "Первый ответ, раб. мин",
+            "enabled": false
+          },
+          {
+            "name": "Без ответа, раб. мин",
+            "enabled": false
+          },
+          {
+            "name": "Без инженера, раб. ч",
+            "enabled": false
+          },
+          {
+            "name": "Ожидание клиента, раб. ч",
+            "enabled": false
+          },
+          {
+            "name": "Причины внимания",
+            "enabled": false
+          },
+          {
+            "name": "Качество истории",
+            "enabled": false
+          }
+        ]
+      }
+    },
+    {
+      "key": "unassigned_count",
+      "name": "Без исполнителя",
+      "sql": "sql/unassigned_count.sql",
+      "display": "scalar",
+      "description": "Текущее состояние; сотрудник — текущий назначенный. Пороги рассчитаны календарём и конфигурацией бота. Даты периода не ограничивают этот блок.",
+      "dashboard": "support",
+      "tab": "overview",
+      "width": 6,
+      "height": 4,
+      "target": "unassigned_list",
+      "settings": {
+        "scalar.decimals": 0
+      }
+    },
+    {
+      "key": "unassigned_list",
+      "name": "Заявки без исполнителя",
+      "sql": "sql/unassigned_list.sql",
+      "display": "table",
+      "description": "",
+      "dashboard": "attention",
+      "tab": "attention",
+      "width": 24,
+      "height": 8,
+      "target": "ticket",
+      "settings": {
+        "table.cell_column": false,
+        "table.pivot": false,
+        "table.columns": [
+          {
+            "name": "Номер",
+            "enabled": true
+          },
+          {
+            "name": "Описание",
+            "enabled": true
+          },
+          {
+            "name": "Компания",
+            "enabled": true
+          },
+          {
+            "name": "Отдел отбора",
+            "enabled": true
+          },
+          {
+            "name": "Сотрудник отбора",
+            "enabled": true
+          },
+          {
+            "name": "Сейчас",
+            "enabled": true
+          },
+          {
+            "name": "Причины внимания",
+            "enabled": true
+          },
+          {
+            "name": "Создана",
+            "enabled": false
+          },
+          {
+            "name": "Дата отбора",
+            "enabled": false
+          },
+          {
+            "name": "Возраст, кал. ч",
+            "enabled": false
+          },
+          {
+            "name": "Первый ответ, раб. мин",
+            "enabled": false
+          },
+          {
+            "name": "Без ответа, раб. мин",
+            "enabled": false
+          },
+          {
+            "name": "Без инженера, раб. ч",
+            "enabled": false
+          },
+          {
+            "name": "Ожидание клиента, раб. ч",
+            "enabled": false
+          },
+          {
+            "name": "Качество истории",
+            "enabled": false
+          }
+        ]
+      }
+    },
+    {
+      "key": "unanswered_count",
+      "name": "Без первого ответа",
+      "sql": "sql/unanswered_count.sql",
+      "display": "scalar",
+      "description": "Текущее состояние; сотрудник — текущий назначенный. Пороги рассчитаны календарём и конфигурацией бота. Даты периода не ограничивают этот блок.",
+      "dashboard": "support",
+      "tab": "overview",
+      "width": 6,
+      "height": 4,
+      "target": "unanswered_list",
+      "settings": {
+        "scalar.decimals": 0
+      }
+    },
+    {
+      "key": "unanswered_list",
+      "name": "Заявки без первого ответа",
+      "sql": "sql/unanswered_list.sql",
+      "display": "table",
+      "description": "",
+      "dashboard": null,
+      "tab": "attention",
+      "width": 24,
+      "height": 8,
+      "target": "ticket",
+      "settings": {
+        "table.cell_column": false,
+        "table.pivot": false,
+        "table.columns": [
+          {
+            "name": "Номер",
+            "enabled": true
+          },
+          {
+            "name": "Описание",
+            "enabled": true
+          },
+          {
+            "name": "Компания",
+            "enabled": true
+          },
+          {
+            "name": "Отдел отбора",
+            "enabled": true
+          },
+          {
+            "name": "Сотрудник отбора",
+            "enabled": true
+          },
+          {
+            "name": "Сейчас",
+            "enabled": true
+          },
+          {
+            "name": "Создана",
+            "enabled": false
+          },
+          {
+            "name": "Дата отбора",
+            "enabled": false
+          },
+          {
+            "name": "Возраст, кал. ч",
+            "enabled": false
+          },
+          {
+            "name": "Первый ответ, раб. мин",
+            "enabled": false
+          },
+          {
+            "name": "Без ответа, раб. мин",
+            "enabled": false
+          },
+          {
+            "name": "Без инженера, раб. ч",
+            "enabled": false
+          },
+          {
+            "name": "Ожидание клиента, раб. ч",
+            "enabled": false
+          },
+          {
+            "name": "Причины внимания",
+            "enabled": false
+          },
+          {
+            "name": "Качество истории",
+            "enabled": false
+          }
+        ]
+      }
+    },
+    {
+      "key": "waiting_now_count",
+      "name": "Ждём клиента",
+      "sql": "sql/waiting_now_count.sql",
+      "display": "scalar",
+      "description": "Текущее состояние; сотрудник — текущий назначенный. Пороги рассчитаны календарём и конфигурацией бота. Даты периода не ограничивают этот блок.",
+      "dashboard": "support",
+      "tab": "overview",
+      "width": 6,
+      "height": 4,
+      "target": "waiting_now_list",
+      "settings": {
+        "scalar.decimals": 0
+      }
+    },
+    {
+      "key": "waiting_now_list",
+      "name": "Ждём ответа клиента",
+      "sql": "sql/waiting_now_list.sql",
+      "display": "table",
+      "description": "",
+      "dashboard": null,
+      "tab": "attention",
+      "width": 24,
+      "height": 8,
+      "target": "ticket",
+      "settings": {
+        "table.cell_column": false,
+        "table.pivot": false,
+        "table.columns": [
+          {
+            "name": "Номер",
+            "enabled": true
+          },
+          {
+            "name": "Описание",
+            "enabled": true
+          },
+          {
+            "name": "Компания",
+            "enabled": true
+          },
+          {
+            "name": "Отдел отбора",
+            "enabled": true
+          },
+          {
+            "name": "Сотрудник отбора",
+            "enabled": true
+          },
+          {
+            "name": "Сейчас",
+            "enabled": true
+          },
+          {
+            "name": "Создана",
+            "enabled": false
+          },
+          {
+            "name": "Дата отбора",
+            "enabled": false
+          },
+          {
+            "name": "Возраст, кал. ч",
+            "enabled": false
+          },
+          {
+            "name": "Первый ответ, раб. мин",
+            "enabled": false
+          },
+          {
+            "name": "Без ответа, раб. мин",
+            "enabled": false
+          },
+          {
+            "name": "Без инженера, раб. ч",
+            "enabled": false
+          },
+          {
+            "name": "Ожидание клиента, раб. ч",
+            "enabled": false
+          },
+          {
+            "name": "Причины внимания",
+            "enabled": false
+          },
+          {
+            "name": "Качество истории",
+            "enabled": false
+          }
+        ]
+      }
+    },
+    {
+      "key": "response_overdue_count",
+      "name": "Ответ просрочен",
+      "sql": "sql/response_overdue_count.sql",
+      "display": "scalar",
+      "description": "Текущее состояние; сотрудник — текущий назначенный. Пороги рассчитаны календарём и конфигурацией бота. Даты периода не ограничивают этот блок.",
+      "dashboard": "support",
+      "tab": "overview",
+      "width": 6,
+      "height": 4,
+      "target": "response_overdue_list",
+      "settings": {
+        "scalar.decimals": 0
+      }
+    },
+    {
+      "key": "response_overdue_list",
+      "name": "Просроченный первый ответ",
+      "sql": "sql/response_overdue_list.sql",
+      "display": "table",
+      "description": "",
+      "dashboard": "attention",
+      "tab": "attention",
+      "width": 24,
+      "height": 8,
+      "target": "ticket",
+      "settings": {
+        "table.cell_column": false,
+        "table.pivot": false,
+        "table.columns": [
+          {
+            "name": "Номер",
+            "enabled": true
+          },
+          {
+            "name": "Описание",
+            "enabled": true
+          },
+          {
+            "name": "Компания",
+            "enabled": true
+          },
+          {
+            "name": "Отдел отбора",
+            "enabled": true
+          },
+          {
+            "name": "Сотрудник отбора",
+            "enabled": true
+          },
+          {
+            "name": "Сейчас",
+            "enabled": true
+          },
+          {
+            "name": "Причины внимания",
+            "enabled": true
+          },
+          {
+            "name": "Создана",
+            "enabled": false
+          },
+          {
+            "name": "Дата отбора",
+            "enabled": false
+          },
+          {
+            "name": "Возраст, кал. ч",
+            "enabled": false
+          },
+          {
+            "name": "Первый ответ, раб. мин",
+            "enabled": false
+          },
+          {
+            "name": "Без ответа, раб. мин",
+            "enabled": false
+          },
+          {
+            "name": "Без инженера, раб. ч",
+            "enabled": false
+          },
+          {
+            "name": "Ожидание клиента, раб. ч",
+            "enabled": false
+          },
+          {
+            "name": "Качество истории",
+            "enabled": false
+          }
+        ]
+      }
+    },
+    {
+      "key": "idle_overdue_count",
+      "name": "Нет активности",
+      "sql": "sql/idle_overdue_count.sql",
+      "display": "scalar",
+      "description": "Текущее состояние; сотрудник — текущий назначенный. Пороги рассчитаны календарём и конфигурацией бота. Даты периода не ограничивают этот блок.",
+      "dashboard": "support",
+      "tab": "overview",
+      "width": 6,
+      "height": 4,
+      "target": "idle_overdue_list",
+      "settings": {
+        "scalar.decimals": 0
+      }
+    },
+    {
+      "key": "idle_overdue_list",
+      "name": "Заявки без активности инженера",
+      "sql": "sql/idle_overdue_list.sql",
+      "display": "table",
+      "description": "",
+      "dashboard": "attention",
+      "tab": "attention",
+      "width": 24,
+      "height": 8,
+      "target": "ticket",
+      "settings": {
+        "table.cell_column": false,
+        "table.pivot": false,
+        "table.columns": [
+          {
+            "name": "Номер",
+            "enabled": true
+          },
+          {
+            "name": "Описание",
+            "enabled": true
+          },
+          {
+            "name": "Компания",
+            "enabled": true
+          },
+          {
+            "name": "Отдел отбора",
+            "enabled": true
+          },
+          {
+            "name": "Сотрудник отбора",
+            "enabled": true
+          },
+          {
+            "name": "Сейчас",
+            "enabled": true
+          },
+          {
+            "name": "Причины внимания",
+            "enabled": true
+          },
+          {
+            "name": "Создана",
+            "enabled": false
+          },
+          {
+            "name": "Дата отбора",
+            "enabled": false
+          },
+          {
+            "name": "Возраст, кал. ч",
+            "enabled": false
+          },
+          {
+            "name": "Первый ответ, раб. мин",
+            "enabled": false
+          },
+          {
+            "name": "Без ответа, раб. мин",
+            "enabled": false
+          },
+          {
+            "name": "Без инженера, раб. ч",
+            "enabled": false
+          },
+          {
+            "name": "Ожидание клиента, раб. ч",
+            "enabled": false
+          },
+          {
+            "name": "Качество истории",
+            "enabled": false
+          }
+        ]
+      }
+    },
+    {
+      "key": "waiting_overdue_count",
+      "name": "Клиент долго не отвечает",
+      "sql": "sql/waiting_overdue_count.sql",
+      "display": "scalar",
+      "description": "Текущее состояние; сотрудник — текущий назначенный. Пороги рассчитаны календарём и конфигурацией бота. Даты периода не ограничивают этот блок.",
+      "dashboard": "support",
+      "tab": "overview",
+      "width": 6,
+      "height": 4,
+      "target": "waiting_overdue_list",
+      "settings": {
+        "scalar.decimals": 0
+      }
+    },
+    {
+      "key": "waiting_overdue_list",
+      "name": "Длительное ожидание клиента",
+      "sql": "sql/waiting_overdue_list.sql",
+      "display": "table",
+      "description": "",
+      "dashboard": "attention",
+      "tab": "attention",
+      "width": 24,
+      "height": 8,
+      "target": "ticket",
+      "settings": {
+        "table.cell_column": false,
+        "table.pivot": false,
+        "table.columns": [
+          {
+            "name": "Номер",
+            "enabled": true
+          },
+          {
+            "name": "Описание",
+            "enabled": true
+          },
+          {
+            "name": "Компания",
+            "enabled": true
+          },
+          {
+            "name": "Отдел отбора",
+            "enabled": true
+          },
+          {
+            "name": "Сотрудник отбора",
+            "enabled": true
+          },
+          {
+            "name": "Сейчас",
+            "enabled": true
+          },
+          {
+            "name": "Причины внимания",
+            "enabled": true
+          },
+          {
+            "name": "Создана",
+            "enabled": false
+          },
+          {
+            "name": "Дата отбора",
+            "enabled": false
+          },
+          {
+            "name": "Возраст, кал. ч",
+            "enabled": false
+          },
+          {
+            "name": "Первый ответ, раб. мин",
+            "enabled": false
+          },
+          {
+            "name": "Без ответа, раб. мин",
+            "enabled": false
+          },
+          {
+            "name": "Без инженера, раб. ч",
+            "enabled": false
+          },
+          {
+            "name": "Ожидание клиента, раб. ч",
+            "enabled": false
+          },
+          {
+            "name": "Качество истории",
+            "enabled": false
+          }
+        ]
+      }
+    },
+    {
+      "key": "attention_count",
+      "name": "Требуют внимания",
+      "sql": "sql/attention_count.sql",
+      "display": "scalar",
+      "description": "Текущее состояние; сотрудник — текущий назначенный. Пороги рассчитаны календарём и конфигурацией бота. Даты периода не ограничивают этот блок.",
+      "dashboard": "support",
+      "tab": "overview",
+      "width": 6,
+      "height": 4,
+      "target": "attention_list",
+      "settings": {
+        "scalar.decimals": 0
+      }
+    },
+    {
+      "key": "attention_list",
+      "name": "Заявки, требующие внимания",
+      "sql": "sql/attention_list.sql",
+      "display": "table",
+      "description": "",
+      "dashboard": null,
+      "tab": "attention",
+      "width": 24,
+      "height": 8,
+      "target": "ticket",
+      "settings": {
+        "table.cell_column": false,
+        "table.pivot": false,
+        "table.columns": [
+          {
+            "name": "Номер",
+            "enabled": true
+          },
+          {
+            "name": "Описание",
+            "enabled": true
+          },
+          {
+            "name": "Компания",
+            "enabled": true
+          },
+          {
+            "name": "Отдел отбора",
+            "enabled": true
+          },
+          {
+            "name": "Сотрудник отбора",
+            "enabled": true
+          },
+          {
+            "name": "Сейчас",
+            "enabled": true
+          },
+          {
+            "name": "Причины внимания",
+            "enabled": true
+          },
+          {
+            "name": "Создана",
+            "enabled": false
+          },
+          {
+            "name": "Дата отбора",
+            "enabled": false
+          },
+          {
+            "name": "Возраст, кал. ч",
+            "enabled": false
+          },
+          {
+            "name": "Первый ответ, раб. мин",
+            "enabled": false
+          },
+          {
+            "name": "Без ответа, раб. мин",
+            "enabled": false
+          },
+          {
+            "name": "Без инженера, раб. ч",
+            "enabled": false
+          },
+          {
+            "name": "Ожидание клиента, раб. ч",
+            "enabled": false
+          },
+          {
+            "name": "Качество истории",
+            "enabled": false
+          }
+        ]
+      }
+    },
+    {
+      "key": "oldest_count",
+      "name": "Самые старые активные заявки",
+      "sql": "sql/oldest_count.sql",
+      "display": "scalar",
+      "description": "Текущее состояние; сотрудник — текущий назначенный. Пороги рассчитаны календарём и конфигурацией бота. Даты периода не ограничивают этот блок.",
+      "dashboard": "support",
+      "tab": "overview",
+      "width": 6,
+      "height": 4,
+      "target": "oldest_list",
+      "settings": {
+        "scalar.decimals": 0
+      }
+    },
+    {
+      "key": "oldest_list",
+      "name": "Все открытые — сначала старые",
+      "sql": "sql/oldest_list.sql",
+      "display": "table",
+      "description": "",
+      "dashboard": "attention",
+      "tab": "attention",
+      "width": 24,
+      "height": 8,
+      "target": "ticket",
+      "settings": {
+        "table.cell_column": false,
+        "table.pivot": false,
+        "table.columns": [
+          {
+            "name": "Номер",
+            "enabled": true
+          },
+          {
+            "name": "Описание",
+            "enabled": true
+          },
+          {
+            "name": "Компания",
+            "enabled": true
+          },
+          {
+            "name": "Отдел отбора",
+            "enabled": true
+          },
+          {
+            "name": "Сотрудник отбора",
+            "enabled": true
+          },
+          {
+            "name": "Сейчас",
+            "enabled": true
+          },
+          {
+            "name": "Создана",
+            "enabled": false
+          },
+          {
+            "name": "Дата отбора",
+            "enabled": false
+          },
+          {
+            "name": "Возраст, кал. ч",
+            "enabled": false
+          },
+          {
+            "name": "Первый ответ, раб. мин",
+            "enabled": false
+          },
+          {
+            "name": "Без ответа, раб. мин",
+            "enabled": false
+          },
+          {
+            "name": "Без инженера, раб. ч",
+            "enabled": false
+          },
+          {
+            "name": "Ожидание клиента, раб. ч",
+            "enabled": false
+          },
+          {
+            "name": "Причины внимания",
+            "enabled": false
+          },
+          {
+            "name": "Качество истории",
+            "enabled": false
+          }
+        ]
+      }
+    },
+    {
+      "key": "freshness",
+      "name": "Обновление и качество данных",
+      "sql": "sql/freshness.sql",
+      "display": "table",
+      "description": "",
+      "dashboard": "support",
+      "tab": "overview",
+      "width": 24,
+      "height": 4,
+      "target": null,
+      "settings": {
+        "table.cell_column": false,
+        "table.pivot": false
+      }
+    },
+    {
+      "key": "flow",
+      "name": "Как меняется поток заявок",
+      "sql": "sql/flow.sql",
+      "display": "line",
+      "description": "Сумма дневных уникальных закрытий может отличаться от уникальных закрытий за весь период: повторные циклы одной заявки.",
+      "dashboard": "support",
+      "tab": "overview",
+      "width": 24,
+      "height": 8,
+      "target": null,
+      "settings": {
+        "graph.dimensions": [
+          "Дата"
+        ],
+        "graph.metrics": [
+          "Поступило",
+          "Закрыто уникальных за день",
+          "Очередь на конец дня"
+        ],
+        "graph.colors": [
+          "#509EE3",
+          "#2DAD8D",
+          "#A989C5"
+        ],
+        "graph.y_axis.title_text": "Заявки",
+        "graph.x_axis.title_text": "Дата · Иркутск",
+        "graph.show_values": false,
+        "graph.y_axis.auto_split": false
+      }
+    },
+    {
+      "key": "received_department",
+      "name": "Поступления по отделам",
+      "sql": "sql/received_department.sql",
+      "display": "bar",
+      "description": "",
+      "dashboard": "support",
+      "tab": "overview",
+      "width": 12,
+      "height": 6,
+      "target": null,
+      "settings": {
+        "graph.dimensions": [
+          "Отдел"
+        ],
+        "graph.metrics": [
+          "Заявок"
+        ],
+        "graph.colors": [
+          "#509EE3"
+        ],
+        "graph.show_values": true
+      }
+    },
+    {
+      "key": "backlog_department",
+      "name": "Очередь на конец периода по отделам",
+      "sql": "sql/backlog_department.sql",
+      "display": "table",
+      "description": "",
+      "dashboard": "support",
+      "tab": "overview",
+      "width": 12,
+      "height": 6,
+      "target": null,
+      "settings": {
+        "table.cell_column": false,
+        "table.pivot": false
+      }
+    },
+    {
+      "key": "received_company",
+      "name": "Поступления по компаниям",
+      "sql": "sql/received_company.sql",
+      "display": "bar",
+      "description": "",
+      "dashboard": "support",
+      "tab": "overview",
+      "width": 12,
+      "height": 6,
+      "target": null,
+      "settings": {
+        "graph.dimensions": [
+          "Компания"
+        ],
+        "graph.metrics": [
+          "Заявок"
+        ],
+        "graph.colors": [
+          "#509EE3"
+        ],
+        "graph.show_values": true
+      }
+    },
+    {
+      "key": "backlog_company",
+      "name": "Очередь на конец периода по компаниям",
+      "sql": "sql/backlog_company.sql",
+      "display": "table",
+      "description": "",
+      "dashboard": "support",
+      "tab": "overview",
+      "width": 12,
+      "height": 6,
+      "target": null,
+      "settings": {
+        "table.cell_column": false,
+        "table.pivot": false
+      }
+    },
+    {
+      "key": "resolution",
+      "name": "Срок решения последнего закрытия за период",
+      "sql": "sql/resolution.sql",
+      "display": "table",
+      "description": "Продолжительность цикла включает ожидание клиента. Это возраст цикла, а не личные трудозатраты автора закрытия. NULL исключены из статистики, выборка рядом.",
+      "dashboard": "support",
+      "tab": "overview",
+      "width": 24,
+      "height": 6,
+      "target": "closed_list",
+      "settings": {
+        "table.cell_column": false,
+        "table.pivot": false
+      }
+    },
+    {
+      "key": "first_response",
+      "name": "Первый подтверждённый ответ за период",
+      "sql": "sql/first_response.sql",
+      "display": "table",
+      "description": "Выборка по дате доставки ответа в цикле. Сотрудник — фактический автор первого подтверждённого ответа. NULL не равен нулю.",
+      "dashboard": "support",
+      "tab": "overview",
+      "width": 24,
+      "height": 5,
+      "target": "response_list",
+      "settings": {
+        "table.cell_column": false,
+        "table.pivot": false,
+        "column_settings": {
+          "[\"name\", \"Среднее, раб. мин\"]": {
+            "decimals": 2
+          },
+          "[\"name\", \"Медиана, раб. мин\"]": {
+            "decimals": 2
+          },
+          "[\"name\", \"Среднее, кал. мин\"]": {
+            "decimals": 2
+          }
+        }
+      }
+    },
+    {
+      "key": "operations",
+      "name": "Операции за период (не уникальные заявки)",
+      "sql": "sql/operations.sql",
+      "display": "table",
+      "description": "",
+      "dashboard": "support",
+      "tab": "overview",
+      "width": 24,
+      "height": 5,
+      "target": null,
+      "settings": {
+        "table.cell_column": false,
+        "table.pivot": false
+      }
+    },
+    {
+      "key": "response_list",
+      "name": "Первые ответы — циклы",
+      "sql": "sql/response_list.sql",
+      "display": "table",
+      "description": "",
+      "dashboard": null,
+      "tab": null,
+      "width": 12,
+      "height": 6,
+      "target": "ticket",
+      "settings": {
+        "table.cell_column": false,
+        "table.pivot": false
+      }
+    },
+    {
+      "key": "transfer_list",
+      "name": "Передачи — операции",
+      "sql": "sql/transfer_list.sql",
+      "display": "table",
+      "description": "",
+      "dashboard": null,
+      "tab": null,
+      "width": 12,
+      "height": 6,
+      "target": "ticket",
+      "settings": {
+        "table.cell_column": false,
+        "table.pivot": false
+      }
+    },
+    {
+      "key": "returns_list",
+      "name": "Возвраты после закрытий сотрудника",
+      "sql": "sql/returns_list.sql",
+      "display": "table",
+      "description": "",
+      "dashboard": null,
+      "tab": null,
+      "width": 12,
+      "height": 6,
+      "target": "ticket",
+      "settings": {
+        "table.cell_column": false,
+        "table.pivot": false
+      }
+    },
+    {
+      "key": "queue_balance",
+      "name": "Проверка баланса очереди",
+      "sql": "sql/queue_balance.sql",
+      "display": "table",
+      "description": "Проверка операций и состояний по компании/отделу. Фильтр сотрудника не применяется: автор закрытия отличается от назначенного. Входящие/исходящие передачи компенсируются при всех отделах. Неполная история может давать расхождение.",
+      "dashboard": "support",
+      "tab": "overview",
+      "width": 24,
+      "height": 7,
+      "target": null,
+      "settings": {
+        "table.cell_column": false,
+        "table.pivot": false
+      }
+    },
+    {
+      "key": "employees",
+      "name": "Результаты и нагрузка команды",
+      "sql": "sql/employees.sql",
+      "display": "table",
+      "description": "Закрытия: автор последнего закрытия внутри периода. Нагрузка: назначенный сейчас. Ответ: фактический автор доставки. Возвраты: предыдущий закрывший. Длительность цикла не равна трудозатратам. Исторический отдел событий и циклов; текущие отделы показаны только для справки.",
+      "dashboard": "support",
+      "tab": "employees",
+      "width": 24,
+      "height": 12,
+      "target": null,
+      "settings": {
+        "table.cell_column": false,
+        "table.pivot": false,
+        "table.columns": [
+          {
+            "name": "Сотрудник",
+            "enabled": true
+          },
+          {
+            "name": "Закрыл за период",
+            "enabled": true
+          },
+          {
+            "name": "Назначено сейчас",
+            "enabled": true
+          },
+          {
+            "name": "Ожидают клиента",
+            "enabled": true
+          },
+          {
+            "name": "Решение: медиана, раб. ч",
+            "enabled": true
+          },
+          {
+            "name": "Решение: выборка",
+            "enabled": true
+          },
+          {
+            "name": "Возвраты после его закрытий",
+            "enabled": true
+          },
+          {
+            "name": "ID сотрудника",
+            "enabled": false
+          },
+          {
+            "name": "Текущие отделы",
+            "enabled": false
+          },
+          {
+            "name": "Решение: среднее, раб. ч",
+            "enabled": false
+          },
+          {
+            "name": "Решение: мин, раб. ч",
+            "enabled": false
+          },
+          {
+            "name": "Решение: макс, раб. ч",
+            "enabled": false
+          },
+          {
+            "name": "Первый ответ: среднее, раб. мин",
+            "enabled": false
+          },
+          {
+            "name": "Первый ответ: медиана, раб. мин",
+            "enabled": false
+          },
+          {
+            "name": "Ответ: выборка",
+            "enabled": false
+          },
+          {
+            "name": "Передачи",
+            "enabled": false
+          }
+        ],
+        "column_settings": {
+          "[\"name\", \"Закрыл за период\"]": {
+            "column_title": "Закрыто"
+          },
+          "[\"name\", \"Назначено сейчас\"]": {
+            "column_title": "В работе"
+          },
+          "[\"name\", \"Ожидают клиента\"]": {
+            "column_title": "Ждём клиента"
+          },
+          "[\"name\", \"Решение: медиана, раб. ч\"]": {
+            "column_title": "Медиана · раб. ч",
+            "decimals": 2
+          },
+          "[\"name\", \"Решение: выборка\"]": {
+            "column_title": "Выборка"
+          },
+          "[\"name\", \"Возвраты после его закрытий\"]": {
+            "column_title": "Возвраты"
+          },
+          "[\"name\", \"Решение: среднее, раб. ч\"]": {
+            "decimals": 2
+          },
+          "[\"name\", \"Решение: мин, раб. ч\"]": {
+            "decimals": 2
+          },
+          "[\"name\", \"Решение: макс, раб. ч\"]": {
+            "decimals": 2
+          },
+          "[\"name\", \"Первый ответ: среднее, раб. мин\"]": {
+            "decimals": 2
+          },
+          "[\"name\", \"Первый ответ: медиана, раб. мин\"]": {
+            "decimals": 2
+          }
+        }
+      }
+    },
+    {
+      "key": "ticket",
+      "name": "Карточка заявки",
+      "sql": "sql/ticket.sql",
+      "display": "table",
+      "description": "",
+      "dashboard": "ticket",
+      "tab": null,
+      "width": 24,
+      "height": 14,
+      "target": null,
+      "settings": {
+        "table.cell_column": false,
+        "table.pivot": false
+      }
+    },
+    {
+      "key": "ticket_cycles",
+      "name": "Циклы и результаты закрытий",
+      "sql": "sql/ticket_cycles.sql",
+      "display": "table",
+      "description": "",
+      "dashboard": "ticket",
+      "tab": null,
+      "width": 24,
+      "height": 8,
+      "target": null,
+      "settings": {
+        "table.cell_column": false,
+        "table.pivot": false,
+        "table.columns": [
+          {
+            "name": "Цикл",
+            "enabled": true
+          },
+          {
+            "name": "Начало",
+            "enabled": true
+          },
+          {
+            "name": "Завершение",
+            "enabled": true
+          },
+          {
+            "name": "Результат",
+            "enabled": true
+          },
+          {
+            "name": "Закрывший",
+            "enabled": true
+          },
+          {
+            "name": "Описание результата",
+            "enabled": true
+          },
+          {
+            "name": "Срок, раб. ч",
+            "enabled": true
+          },
+          {
+            "name": "Отдел",
+            "enabled": false
+          },
+          {
+            "name": "Срок, кал. ч",
+            "enabled": false
+          },
+          {
+            "name": "Ожидание, раб. ч",
+            "enabled": false
+          },
+          {
+            "name": "Без ожидания, раб. ч",
+            "enabled": false
+          },
+          {
+            "name": "Первый ответ, раб. мин",
+            "enabled": false
+          },
+          {
+            "name": "Автор ответа",
+            "enabled": false
+          },
+          {
+            "name": "Неполная история",
+            "enabled": false
+          }
+        ]
+      }
+    },
+    {
+      "key": "ticket_history",
+      "name": "История заявки",
+      "sql": "sql/ticket_history.sql",
+      "display": "table",
+      "description": "",
+      "dashboard": "ticket",
+      "tab": null,
+      "width": 24,
+      "height": 12,
+      "target": null,
+      "settings": {
+        "table.cell_column": false,
+        "table.pivot": false,
+        "table.columns": [
+          {
+            "name": "Дата",
+            "enabled": true
+          },
+          {
+            "name": "Событие",
+            "enabled": true
+          },
+          {
+            "name": "Автор",
+            "enabled": true
+          },
+          {
+            "name": "Отдел",
+            "enabled": true
+          },
+          {
+            "name": "Описание",
+            "enabled": true
+          },
+          {
+            "name": "Событие №",
+            "enabled": false
+          },
+          {
+            "name": "Откуда",
+            "enabled": false
+          },
+          {
+            "name": "Куда",
+            "enabled": false
+          },
+          {
+            "name": "Назначенный",
+            "enabled": false
+          },
+          {
+            "name": "Статус",
+            "enabled": false
+          },
+          {
+            "name": "Цикл",
+            "enabled": false
+          },
+          {
+            "name": "Неполные сведения",
+            "enabled": false
+          }
+        ]
+      }
+    },
+    {
+      "key": "filter_departments",
+      "name": "Отделы для фильтра",
+      "sql": "sql/filter_departments.sql",
+      "display": "table",
+      "description": "",
+      "dashboard": null,
+      "tab": null,
+      "width": 12,
+      "height": 6,
+      "target": null,
+      "settings": {
+        "table.cell_column": false,
+        "table.pivot": false
+      }
+    },
+    {
+      "key": "filter_employees",
+      "name": "Сотрудники для фильтра",
+      "sql": "sql/filter_employees.sql",
+      "display": "table",
+      "description": "",
+      "dashboard": null,
+      "tab": null,
+      "width": 12,
+      "height": 6,
+      "target": null,
+      "settings": {
+        "table.cell_column": false,
+        "table.pivot": false
+      }
+    },
+    {
+      "key": "filter_companies",
+      "name": "Компании для фильтра",
+      "sql": "sql/filter_companies.sql",
+      "display": "table",
+      "description": "",
+      "dashboard": null,
+      "tab": null,
+      "width": 12,
+      "height": 6,
+      "target": null,
+      "settings": {
+        "table.cell_column": false,
+        "table.pivot": false
+      }
+    },
+    {
+      "key": "status",
+      "name": "Свежесть данных",
+      "sql": "sql/status.sql",
+      "display": "table",
+      "description": "",
+      "dashboard": null,
+      "tab": null,
+      "width": 24,
+      "height": 3,
+      "target": null,
+      "settings": {
+        "table.cell_column": false,
+        "table.pivot": false
+      }
+    },
+    {
+      "key": "attention_summary",
+      "name": "Состояние очереди",
+      "sql": "sql/attention_summary.sql",
+      "display": "table",
+      "description": "",
+      "dashboard": null,
+      "tab": null,
+      "width": 24,
+      "height": 3,
+      "target": null,
+      "settings": {
+        "table.cell_column": false,
+        "table.pivot": false
+      }
+    },
+    {
+      "key": "comparison",
+      "name": "Изменения к предыдущему периоду",
+      "sql": "sql/comparison.sql",
+      "display": "table",
+      "description": "Ранее — интервал той же длительности непосредственно перед началом выбранного периода. Текущий период обрезан временем снимка. Изменение — разница в заявках, не оценка качества.",
+      "dashboard": null,
+      "tab": null,
+      "width": 24,
+      "height": 5,
+      "target": null,
+      "settings": {
+        "table.cell_column": false,
+        "table.pivot": false
+      }
+    },
+    {
+      "key": "resolution_summary",
+      "name": "Сколько занимает решение",
+      "sql": "sql/resolution_summary.sql",
+      "display": "table",
+      "description": "",
+      "dashboard": null,
+      "tab": null,
+      "width": 24,
+      "height": 6,
+      "target": "closed_list",
+      "settings": {
+        "table.cell_column": false,
+        "table.pivot": false,
+        "column_settings": {
+          "[\"name\", \"Медиана\"]": {
+            "decimals": 2
+          },
+          "[\"name\", \"Среднее\"]": {
+            "decimals": 2
+          },
+          "[\"name\", \"Минимум\"]": {
+            "decimals": 2
+          },
+          "[\"name\", \"Максимум\"]": {
+            "decimals": 2
+          }
+        }
+      }
+    }
+  ]
+}
