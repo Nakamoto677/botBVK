@@ -36,8 +36,14 @@ var engineerCardsMigration string
 //go:embed company_sync.sql
 var companySyncMigration string
 
-type Store struct{ pool *pgxpool.Pool }
-type transaction struct{ tx pgx.Tx }
+type Store struct {
+	pool           *pgxpool.Pool
+	operationReady chan struct{}
+}
+type transaction struct {
+	tx       pgx.Tx
+	enqueued int
+}
 
 var _ domain.Store = (*Store)(nil)
 var _ domain.Tx = (*transaction)(nil)
@@ -51,10 +57,14 @@ func New(ctx context.Context, dsn string) (*Store, error) {
 		p.Close()
 		return nil, err
 	}
-	return &Store{pool: p}, nil
+	return &Store{pool: p, operationReady: make(chan struct{}, 64)}, nil
 }
 func (s *Store) Close()                         { s.pool.Close() }
 func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
+
+// OperationReady wakes local workers after a committed enqueue. Workers also
+// poll periodically to recover rows from a previous process or external writer.
+func (s *Store) OperationReady() <-chan struct{} { return s.operationReady }
 func (s *Store) Migrate(ctx context.Context) error {
 	return s.Transact(ctx, func(t domain.Tx) error {
 		tx := t.(*transaction).tx
@@ -141,10 +151,21 @@ func (s *Store) Transact(ctx context.Context, fn func(domain.Tx) error) error {
 		return err
 	}
 	defer tx.Rollback(context.Background())
-	if err = fn(&transaction{tx}); err != nil {
+	work := &transaction{tx: tx}
+	if err = fn(work); err != nil {
 		return mapError(err)
 	}
-	return mapError(tx.Commit(ctx))
+	if err = tx.Commit(ctx); err != nil {
+		return mapError(err)
+	}
+	for i := 0; i < work.enqueued; i++ {
+		select {
+		case s.operationReady <- struct{}{}:
+		default:
+			return nil
+		}
+	}
+	return nil
 }
 
 type querier interface {
@@ -333,7 +354,10 @@ func (t *transaction) Enqueue(ctx context.Context, v domain.Operation) error {
 	if len(v.Payload) == 0 {
 		v.Payload = json.RawMessage(`{}`)
 	}
-	_, err := t.tx.Exec(ctx, "INSERT INTO bvk_outbox(kind,ticket_id,payload,available_at) VALUES($1,$2,$3,COALESCE($4::timestamptz,now())) ON CONFLICT DO NOTHING", v.Kind, v.TicketID, v.Payload, available)
+	tag, err := t.tx.Exec(ctx, "INSERT INTO bvk_outbox(kind,ticket_id,payload,available_at) VALUES($1,$2,$3,COALESCE($4::timestamptz,now())) ON CONFLICT DO NOTHING", v.Kind, v.TicketID, v.Payload, available)
+	if err == nil && tag.RowsAffected() > 0 && (available == nil || !available.After(time.Now())) {
+		t.enqueued++
+	}
 	return err
 }
 func (t *transaction) RequestAccess(ctx context.Context, userID, companyID int64) error {
@@ -478,6 +502,14 @@ func (s *Store) LastUpdateID(ctx context.Context) (int64, error) {
 	var id int64
 	err := s.pool.QueryRow(ctx, "SELECT COALESCE(max(id),0) FROM bvk_updates").Scan(&id)
 	return id, err
+}
+
+// RecoverOperations is called only after the process has acquired the bot's
+// singleton lock. It removes the old process's leases without changing retry
+// backoff for operations that are already pending.
+func (s *Store) RecoverOperations(ctx context.Context) error {
+	_, err := s.pool.Exec(ctx, "UPDATE bvk_outbox SET state='pending',lease_until=NULL,available_at=now() WHERE state='processing'")
+	return err
 }
 func (s *Store) NextOperation(ctx context.Context) (domain.Operation, error) {
 	var v domain.Operation

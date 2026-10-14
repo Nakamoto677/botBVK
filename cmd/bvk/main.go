@@ -100,6 +100,9 @@ func run() error {
 	if !acquired {
 		return fmt.Errorf("another bot instance is active; pilot permits one instance")
 	}
+	if err = store.RecoverOperations(ctx); err != nil {
+		return fmt.Errorf("recover outbox after restart: %w", err)
+	}
 	calendar := tickets.DefaultCalendar()
 	calendar.StartHour = cfg.StartHour
 	calendar.EndHour = cfg.EndHour
@@ -116,8 +119,7 @@ func run() error {
 	tc.BusinessHoursText = fmt.Sprintf("Обработка: Пн–Пт, %02d:00–%02d:00 по Иркутску. Заявки принимаются круглосуточно.", cfg.StartHour, cfg.EndHour)
 	tc.ReportCSV = func(ctx context.Context) (string, error) { return report.CSV(ctx, store, calendar) }
 	adapter := telegram.NewAdapter(client, store, service, tc)
-	worker := telegram.NewWorker(client, store, tc)
-	errs := make(chan error, 6)
+	errs := make(chan error, 16)
 	var runners sync.WaitGroup
 	launch := func(fn func(context.Context) error) {
 		runners.Add(1)
@@ -148,7 +150,9 @@ func run() error {
 		}
 	}()
 	launch(adapter.Run)
-	launch(worker.Run)
+	for range 8 {
+		launch(telegram.NewWorker(client, store, tc).Run)
+	}
 	launch(scheduler.Run)
 	launch(scheduler.RunCleanup)
 	slog.Info("support bot started", "business_timezone", "Asia/Irkutsk", "health_address", cfg.HealthAddress)

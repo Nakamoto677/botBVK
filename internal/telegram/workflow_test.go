@@ -49,6 +49,33 @@ func TestQueuedTicketDoesNotCreateTopicAndShowsNames(t *testing.T) {
 	}
 }
 
+func TestClosedTicketRefreshShowsCommentInQueueCard(t *testing.T) {
+	var queueText string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var p map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+			t.Fatal(err)
+		}
+		if p["chat_id"] == float64(-100) && p["message_id"] == float64(20) {
+			queueText, _ = p["text"].(string)
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
+	}))
+	defer server.Close()
+	client := NewClient("test")
+	client.BaseURL = server.URL
+	ticket := domain.Ticket{ID: 7, ClientID: 1, CompanyID: 10, Department: domain.IT, Status: domain.Closed, QueueMessageID: 20, Resolution: "Пароль <секрет>"}
+	store := &workerStore{ticket: ticket, current: ticket}
+	worker := NewWorker(client, store, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100, QueueTopicID: 1}}})
+	worker.interval = 0
+	if err := worker.Handle(t.Context(), domain.Operation{Kind: "refresh_card", TicketID: 7}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(queueText, "Пароль &lt;секрет&gt;") || strings.Contains(queueText, "<секрет>") {
+		t.Fatal("queue card did not contain escaped staff comment", queueText)
+	}
+}
+
 func TestClaimTopicReplaysDeferredMessagesWithoutDuplicates(t *testing.T) {
 	messages := []domain.Message{{ID: 1, AuthorID: 12, Direction: "inbound", Text: "First detail", DeferredDelivery: true}, {ID: 2, AuthorID: 12, Direction: "inbound", Text: "Second detail", DeferredDelivery: true}}
 	calls := 0
@@ -145,6 +172,24 @@ func TestCloseAndTransferButtonsCaptureScopedTextAndCaption(t *testing.T) {
 	callback.Data = "close:7"
 	if err := adapter.Handle(context.Background(), Update{Callback: callback}); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatal("unassigned engineer can close", err)
+	}
+}
+
+func TestCloseFromQueueCapturesPrivateComment(t *testing.T) {
+	client, _ := capturedClient()
+	u := domain.User{ID: 2, Role: "engineer", Approved: true, Departments: []domain.Department{domain.IT}}
+	ticket := domain.Ticket{ID: 7, Department: domain.IT, Status: domain.InProgress, AssigneeID: 2, TopicChatID: -100, TopicID: 10, QueueMessageID: 20}
+	service := &adapterService{}
+	a := NewAdapter(client, &adapterStore{user: u, ticket: ticket}, service, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100, QueueTopicID: 1}}})
+	origin := &Message{ID: 20, Chat: Chat{ID: -100, Type: "supergroup"}, ThreadID: 1}
+	if err := a.Handle(t.Context(), Update{Callback: &Callback{ID: "close-queue", From: Person{ID: 2}, Message: origin, Data: "close:7"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Handle(t.Context(), Update{Message: &Message{ID: 21, From: Person{ID: 2}, Chat: origin.Chat, ThreadID: 1, Text: "Исправлено в очереди"}}); err != nil {
+		t.Fatal(err)
+	}
+	if service.closedID != 7 || service.closeText != "Исправлено в очереди" || len(service.messages) != 0 {
+		t.Fatal("queue close was relayed or lost", service)
 	}
 }
 

@@ -540,8 +540,66 @@ func TestCloseAttachmentPreservesSourceAndArchivesAtomically(t *testing.T) {
 	if got.ID == 99 || got.AuthorID != 2 || got.TicketID != ticket.ID || got.Direction != "service" || got.TelegramChatID != -100 || got.TelegramMessageID != 123 || got.FileID != "file" || got.Text != msg.Text || got.ArchivePath != "" || got.SHA256 != "" || got.DeferredDelivery || !got.CreatedAt.Equal(s.now()) {
 		t.Fatal(got)
 	}
-	if f.ops[before].Kind != "archive_message" || f.ops[before+1].Kind != "close_topic" || f.tickets[ticket.ID].Status != domain.Closed {
+	if f.ops[before].Kind != "archive_message" || f.ops[before+1].Kind != "refresh_card" || f.ops[before+2].Kind != "close_topic" || f.tickets[ticket.ID].Status != domain.Closed {
 		t.Fatal("action order")
+	}
+}
+
+func TestCloseKeepsCommentPrivateAndPreservesAnalyticsAcrossReopen(t *testing.T) {
+	s, f := setup()
+	ticket, err := s.Create(t.Context(), 1, domain.IT, "help")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Claim(t.Context(), 2, ticket.ID); err != nil {
+		t.Fatal(err)
+	}
+	for cycle, comment := range []string{"Первое закрытие", "Повторное закрытие"} {
+		if cycle == 1 {
+			if err := s.Reopen(t.Context(), 1, ticket.ID); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Claim(t.Context(), 2, ticket.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := s.Close(t.Context(), 3, ticket.ID, comment); !errors.Is(err, domain.ErrForbidden) {
+			t.Fatal("other department closed ticket", err)
+		}
+		before := len(f.ops)
+		if err := s.Close(t.Context(), 2, ticket.ID, comment); err != nil {
+			t.Fatal(err)
+		}
+		closed := f.tickets[ticket.ID]
+		if closed.Resolution != comment || closed.Status != domain.Closed {
+			t.Fatal("comment not retained on ticket", closed)
+		}
+		op := f.ops[len(f.ops)-1]
+		var notification struct {
+			Text string `json:"text"`
+		}
+		if op.Kind != "notify_client" || json.Unmarshal(op.Payload, &notification) != nil || notification.Text != ClientClosedNotification || len(f.ops) <= before {
+			t.Fatal("private comment exposed in notification", op)
+		}
+		if err := s.Close(t.Context(), 2, ticket.ID, "again"); !errors.Is(err, domain.ErrConflict) {
+			t.Fatal("repeated close accepted", err)
+		}
+	}
+	closedComments := []string{}
+	for _, event := range f.events {
+		if event.Kind != "closed" {
+			continue
+		}
+		var data struct {
+			Resolution string `json:"resolution"`
+		}
+		if err := json.Unmarshal(event.Data, &data); err != nil {
+			t.Fatal(err)
+		}
+		closedComments = append(closedComments, data.Resolution)
+	}
+	if len(closedComments) != 2 || closedComments[0] != "Первое закрытие" || closedComments[1] != "Повторное закрытие" {
+		t.Fatal("analytics lost close events", closedComments)
 	}
 }
 func TestActionAttachmentRollbackOnForbiddenOrOutboxFailure(t *testing.T) {

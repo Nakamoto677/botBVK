@@ -55,7 +55,7 @@ func (a *Adapter) beginStaffPrompt(ctx context.Context, c *Callback, id int64, a
 		if err = a.replacePrompt(ctx, key, p); err != nil {
 			return err
 		}
-		return a.promptText(ctx, c.Message, c.From.ID, id, "напишите итог решения следующим сообщением.")
+		return a.promptText(ctx, c.Message, c.From.ID, id, "напишите служебный комментарий закрытия следующим сообщением. Клиенту он не отправляется.")
 	}
 	p.Phase = "department"
 	if err = a.replacePrompt(ctx, key, p); err != nil {

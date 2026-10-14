@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"bot-bvk/internal/domain"
+	"bot-bvk/internal/tickets"
 	"context"
 	"encoding/json"
 	"errors"
@@ -64,12 +65,15 @@ func TestMinimalClientFlowDraftCancelAcceptedAndFinished(t *testing.T) {
 	}
 	send("/start")
 	assertReplyLabels(t, (*requests)[len(*requests)-1], "Создать заявку", "Помощь")
+	before := len(*requests)
 	send("Создать заявку")
-	assertReplyLabels(t, (*requests)[len(*requests)-2], clientCancelDraftLabel)
+	if len(*requests) != before+1 || (*requests)[len(*requests)-1]["text"] != draftDepartmentText {
+		t.Fatal("department selection should be the only new message", *requests)
+	}
 	raw, _ := json.Marshal((*requests)[len(*requests)-1]["reply_markup"])
 	var options Markup
 	json.Unmarshal(raw, &options)
-	if len(options.Buttons) != 3 || len(options.Buttons[0]) != 2 || len(options.Buttons[1]) != 2 {
+	if len(options.Buttons) != 3 || len(options.Buttons[0]) != 2 || len(options.Buttons[1]) != 2 || options.Buttons[2][0].Text != clientCancelDraftLabel {
 		t.Fatal(string(raw))
 	}
 	send(clientCancelDraftLabel)
@@ -80,10 +84,13 @@ func TestMinimalClientFlowDraftCancelAcceptedAndFinished(t *testing.T) {
 	send("Создать заявку")
 	callback("new:it:" + a.drafts[1].Generation)
 	// callback message is sent by the bot, but temporary messages belong to client.
-	if len(s.aux[auxKey{1, 1, 0, "client_kept"}]) != 6 {
+	if len(s.aux[auxKey{1, 1, 0, "client_kept"}]) != 4 {
 		t.Fatal("bot author used as client scenario actor")
 	}
 	assertReplyLabels(t, (*requests)[len(*requests)-3], clientCancelDraftLabel)
+	if (*requests)[len(*requests)-3]["text"] != draftDescriptionText {
+		t.Fatal("description prompt missing")
+	}
 	send("Не работает компьютер")
 	raw, _ = json.Marshal((*requests)[len(*requests)-1]["reply_markup"])
 	if !strings.Contains(string(raw), clientCancelDraftLabel) || !strings.Contains(string(raw), "submit") {
@@ -94,7 +101,7 @@ func TestMinimalClientFlowDraftCancelAcceptedAndFinished(t *testing.T) {
 	if err := a.callback(ctx, &Callback{From: m.From, Message: botMsg, Data: "submit:" + a.drafts[1].Generation}); err == nil {
 		t.Fatal("failed submission accepted")
 	}
-	if len(a.drafts) != 1 || len(s.aux[auxKey{1, 1, 0, "client_kept"}]) != 7 {
+	if len(a.drafts) != 1 || len(s.aux[auxKey{1, 1, 0, "client_kept"}]) != 5 {
 		t.Fatal("failure removed retry UI")
 	}
 	svc.createErr = nil
@@ -128,7 +135,7 @@ func TestMinimalClientFlowDraftCancelAcceptedAndFinished(t *testing.T) {
 		t.Fatal(last)
 	}
 	assertReplyLabels(t, last, "Создать заявку", "Помощь")
-	if len(s.aux) != 2 || len(s.aux[auxKey{1, 1, 0, "client_home"}]) != 1 || len(s.aux[auxKey{1, 1, 0, "client_kept"}]) != 8 {
+	if len(s.aux) != 2 || len(s.aux[auxKey{1, 1, 0, "client_home"}]) != 1 || len(s.aux[auxKey{1, 1, 0, "client_kept"}]) != 6 {
 		t.Fatalf("auxiliary UI retained: %v", s.aux)
 	}
 	if len(s.storedMessages) != 1 || s.storedMessages[0].ID != 44 {
@@ -154,6 +161,47 @@ func TestStaleDraftCancelAndDepartmentCannotAffectActiveTicket(t *testing.T) {
 	}
 }
 
+func TestClientDraftPhotoAndResumeKeepActions(t *testing.T) {
+	ctx := context.Background()
+	a, s, cancel, m, requests := clientUIFixture(t)
+	s.ticket = domain.Ticket{}
+	svc := &minimalClientService{cancelUIService: cancel}
+	a.service = svc
+	m.Text = "/new"
+	if err := a.Handle(ctx, Update{Message: m}); err != nil {
+		t.Fatal(err)
+	}
+	token := a.drafts[1].Generation
+	m.Text = "/form"
+	if err := a.Handle(ctx, Update{Message: m}); err != nil {
+		t.Fatal(err)
+	}
+	if (*requests)[len(*requests)-1]["text"] != draftDepartmentText {
+		t.Fatal("resumed department prompt changed")
+	}
+	botMessage := &Message{ID: 101, Chat: m.Chat}
+	if err := a.callback(ctx, &Callback{ID: "c", From: m.From, Message: botMessage, Data: "new:it:" + token}); err != nil {
+		t.Fatal(err)
+	}
+	m.ID++
+	m.Text = ""
+	m.Caption = "Не работает компьютер"
+	m.Photo = []File{{ID: "photo-1"}}
+	if err := a.Handle(ctx, Update{Message: m}); err != nil {
+		t.Fatal(err)
+	}
+	d := a.drafts[1]
+	if d.Step != "confirm" || d.Text != m.Caption || len(d.Attachments) != 1 || d.Attachments[0].FileID != "photo-1" {
+		t.Fatal("photo draft was not prepared", d)
+	}
+	if err := a.callback(ctx, &Callback{ID: "c", From: m.From, Message: botMessage, Data: "submit:" + d.Generation}); err != nil {
+		t.Fatal(err)
+	}
+	if svc.createCalls != 1 || s.ticket.Description != m.Caption {
+		t.Fatal("photo draft was not submitted")
+	}
+}
+
 func TestLateApprovalPreservesActiveMenuAndRegistersTemporaryMessage(t *testing.T) {
 	a, s, _, _, requests := clientUIFixture(t)
 	w := NewWorker(a.client, s, Config{})
@@ -170,7 +218,7 @@ func TestLateApprovalPreservesActiveMenuAndRegistersTemporaryMessage(t *testing.
 func TestClientMilestonesSurviveCompletionAndTemporaryQuestionsAreCleaned(t *testing.T) {
 	ctx := context.Background()
 	a, s, _, m, _ := clientUIFixture(t)
-	texts := []string{"Создание заявки.", "Выберите направление.", "Опишите проблему текстом. Вложения отправьте после создания заявки.", "Создать заявку?\nОписание", clientAcceptedText, "Инженер взял заявку в работу.", "Подача заявки отменена. Вы можете создать новую."}
+	texts := []string{"Создание заявки.", "Выберите направление.", draftDepartmentText, "Опишите проблему текстом. Вложения отправьте после создания заявки.", draftDescriptionText, "Создать заявку?\nОписание", clientAcceptedText, "Инженер взял заявку в работу.", "Подача заявки отменена. Вы можете создать новую."}
 	for _, text := range texts {
 		if err := a.sayAux(ctx, m, 1, "draft", text, nil); err != nil {
 			t.Fatal(err)
@@ -210,5 +258,21 @@ func TestClientMilestonesSurviveCompletionAndTemporaryQuestionsAreCleaned(t *tes
 	group := &Message{Chat: Chat{ID: -100, Type: "supergroup"}, ThreadID: 10}
 	if got := clientAuxScenario(group, "action:7", texts[0]); got != "action:7" {
 		t.Fatal(got)
+	}
+}
+
+func TestOldQueuedCloseNotificationDoesNotLeakComment(t *testing.T) {
+	client, requests := uiClient(t)
+	w := NewWorker(client, &adapterStore{}, Config{})
+	w.interval = 0
+	for _, status := range []domain.Status{domain.Closed, domain.New} {
+		ticket := domain.Ticket{ID: 7, ClientID: 1, Status: status}
+		if err := w.clientNotification(t.Context(), ticket, "Заявка закрыта. Результат: SECRET_COMMENT"); err != nil {
+			t.Fatal(err)
+		}
+		last := (*requests)[len(*requests)-1]
+		if last["text"] != tickets.ClientClosedNotification {
+			t.Fatal("old notification exposed comment", last)
+		}
 	}
 }

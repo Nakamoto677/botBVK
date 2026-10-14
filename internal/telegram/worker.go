@@ -19,22 +19,29 @@ import (
 type Worker struct {
 	currentOperation int64
 
-	client   *Client
-	store    domain.Store
-	cfg      Config
-	lastChat map[int64]time.Time
-	interval time.Duration
+	client       *Client
+	store        domain.Store
+	cfg          Config
+	interval     time.Duration
+	lastRateChat int64
 }
 
 func NewWorker(c *Client, s domain.Store, cfg Config) *Worker {
-	return &Worker{client: c, store: s, cfg: cfg, lastChat: make(map[int64]time.Time), interval: 3100 * time.Millisecond}
+	return &Worker{client: c, store: s, cfg: cfg, interval: 3100 * time.Millisecond}
 }
 func (w *Worker) Run(ctx context.Context) error {
+	var ready <-chan struct{}
+	if notifier, ok := w.store.(interface{ OperationReady() <-chan struct{} }); ok {
+		ready = notifier.OperationReady()
+	}
 	for ctx.Err() == nil {
 		op, err := w.store.NextOperation(ctx)
 		if errors.Is(err, domain.ErrNotFound) {
-			if !pause(ctx, time.Second) {
-				break
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-ready:
+			case <-time.After(250 * time.Millisecond):
 			}
 			continue
 		}
@@ -48,6 +55,9 @@ func (w *Worker) Run(ctx context.Context) error {
 			if errors.As(err, &api) {
 				if api.RetryAfter > 0 {
 					delay = time.Duration(api.RetryAfter) * time.Second
+					if api.Code == 429 {
+						w.client.limiter.coolDown(w.lastRateChat, delay)
+					}
 				}
 				dead = (api.Code >= 400 && api.Code < 500 && api.Code != 429) || (op.Kind == "create_topic" && api.Ambiguous)
 			}
@@ -84,12 +94,12 @@ func (w *Worker) Run(ctx context.Context) error {
 	return ctx.Err()
 }
 func (w *Worker) rate(ctx context.Context, chat int64) error {
-	wait := time.Until(w.lastChat[chat].Add(w.interval))
-	if wait > 0 && !pause(ctx, wait) {
-		return ctx.Err()
+	w.lastRateChat = chat
+	interval := w.interval
+	if chat > 0 && interval > 0 {
+		interval = time.Second
 	}
-	w.lastChat[chat] = time.Now()
-	return nil
+	return w.client.limiter.wait(ctx, chat, interval)
 }
 func (w *Worker) send(ctx context.Context, chat, topic int64, text string, buttons [][]Button) (Message, error) {
 	if w.currentOperation > 0 {
@@ -111,6 +121,7 @@ func card(t domain.Ticket) string {
 func cardButtons(t domain.Ticket) [][]Button { return engineerQueueButtons(t) }
 func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 	w.currentOperation = op.ID
+	w.lastRateChat = 0
 	var payload struct {
 		Text              string            `json:"text"`
 		UserID            int64             `json:"user_id"`

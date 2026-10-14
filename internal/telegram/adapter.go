@@ -65,7 +65,22 @@ func (a *Adapter) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	offset := last + 1
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	wake := make(chan struct{}, 1)
+	done := make(chan error, 2)
+	go func() { done <- a.pollUpdates(runCtx, last+1, wake) }()
+	go func() { done <- a.processPending(runCtx, wake) }()
+	err = <-done
+	cancel()
+	<-done
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
+}
+
+func (a *Adapter) processPending(ctx context.Context, wake <-chan struct{}) error {
 	for ctx.Err() == nil {
 		pending, err := a.store.PendingUpdates(ctx, 100)
 		if err != nil {
@@ -76,11 +91,21 @@ func (a *Adapter) Run(ctx context.Context) error {
 				return err
 			}
 		}
-		pollTimeout := 50
-		if len(pending) > 0 {
-			pollTimeout = 0
+		if len(pending) == 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-wake:
+			case <-time.After(250 * time.Millisecond):
+			}
 		}
-		updates, err := a.client.updatesTimeout(ctx, offset, pollTimeout)
+	}
+	return ctx.Err()
+}
+
+func (a *Adapter) pollUpdates(ctx context.Context, offset int64, wake chan<- struct{}) error {
+	for ctx.Err() == nil {
+		updates, err := a.client.updatesTimeout(ctx, offset, 50)
 		if err != nil {
 			if !pause(ctx, 2*time.Second) {
 				break
@@ -101,6 +126,12 @@ func (a *Adapter) Run(ctx context.Context) error {
 			}
 			if u.ID >= offset {
 				offset = u.ID + 1
+			}
+		}
+		if len(updates) > 0 {
+			select {
+			case wake <- struct{}{}:
+			default:
 			}
 		}
 	}
@@ -284,10 +315,7 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 		}
 		a.cleanupBestEffort(ctx, scope(m.From.ID, m), "client_home")
 		a.cleanupBestEffort(ctx, scope(m.From.ID, m), "draft")
-		if err := a.clientScreen(ctx, m, "draft", "Создание заявки.", clientDraftKeyboard); err != nil {
-			return err
-		}
-		return a.sayAux(ctx, m, m.From.ID, "draft", "Выберите направление.", draftDepartments(d))
+		return a.sayAux(ctx, m, m.From.ID, "draft", draftDepartmentText, draftDepartments(d))
 	}
 	if strings.HasPrefix(text, "/") {
 		return a.help(ctx, m, user)

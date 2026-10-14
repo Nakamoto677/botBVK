@@ -16,6 +16,8 @@ type Service struct {
 	now   func() time.Time
 }
 
+const ClientClosedNotification = "Инженер закрыл заявку.\nОбращайтесь в любое время, мы всегда рады помочь!"
+
 func New(store domain.Store) *Service {
 	return &Service{store: store, now: func() time.Time { return time.Now().UTC() }}
 }
@@ -320,15 +322,15 @@ func (s *Service) close(ctx context.Context, actorID, ticketID int64, resolution
 		if err := s.completionCleanup(ctx, tx, *t, actorID); err != nil {
 			return err
 		}
+		if err := s.enqueue(ctx, tx, *t, "refresh_card", nil); err != nil {
+			return err
+		}
 		if t.TopicChatID != 0 && t.TopicID != 0 {
 			if err := s.enqueue(ctx, tx, *t, "close_topic", map[string]any{"chat_id": t.TopicChatID, "topic_id": t.TopicID, "text": "Тикет закрыт инженером"}); err != nil {
 				return err
 			}
 		}
-		if err := s.enqueue(ctx, tx, *t, "refresh_card", nil); err != nil {
-			return err
-		}
-		return s.notify(ctx, tx, *t, "Заявка закрыта. Результат: "+t.Resolution)
+		return s.notify(ctx, tx, *t, ClientClosedNotification)
 	})
 }
 func (s *Service) Reopen(ctx context.Context, actorID, ticketID int64) error {

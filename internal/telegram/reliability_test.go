@@ -142,6 +142,72 @@ func TestHistoryNeverLeaksServiceTextRevisionOrFile(t *testing.T) {
 		t.Fatal("other client authorized", err)
 	}
 }
+
+func TestCloseCommentVisibleOnlyToStaffThroughTicketAndHistory(t *testing.T) {
+	ctx := context.Background()
+	closedAt := time.Now()
+	ticket := domain.Ticket{ID: 7, ClientID: 1, CompanyID: 10, Department: domain.IT, Status: domain.Closed, ClosedAt: &closedAt, Resolution: "SECOND_SECRET"}
+	store := &adapterStore{ticket: ticket, storedMessages: []domain.Message{{ID: 1, Direction: "service", AuthorID: 2, Text: "SERVICE_SECRET", FileID: "SECRET_FILE", FileName: "SECRET_NAME"}, {ID: 2, Direction: "outbound", AuthorID: 2, Text: "Public reply"}}, events: []domain.Event{{Kind: "closed", Data: json.RawMessage(`{"resolution":"FIRST_SECRET"}`)}, {Kind: "reopened"}, {Kind: "closed", Data: json.RawMessage(`{"resolution":"SECOND_SECRET"}`)}}}
+	client, capture := capturedClient()
+	a := NewAdapter(client, store, nil, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100, QueueTopicID: 1}}})
+	for _, reopened := range []bool{false, true} {
+		store.ticket = ticket
+		if reopened {
+			store.ticket.Status = domain.New
+			store.ticket.Resolution = ""
+			store.ticket.ClosedAt = nil
+		}
+		store.user = domain.User{ID: 1, Role: "client", Approved: true, CompanyID: 10}
+		start := len(capture.bodies)
+		for _, command := range []string{"/ticket 7", "/history 7"} {
+			if err := a.Handle(ctx, Update{Message: &Message{From: Person{ID: 1}, Chat: Chat{ID: 1, Type: "private"}, Text: command}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for page := 1; ; page++ {
+			err := a.historyPage(ctx, &Message{Chat: Chat{ID: 1, Type: "private"}}, store.user, store.ticket, page, 0)
+			if errors.Is(err, domain.ErrInvalid) {
+				break
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		raw, _ := json.Marshal(capture.bodies[start:])
+		for _, secret := range []string{"FIRST_SECRET", "SECOND_SECRET", "SERVICE_SECRET", "SECRET_FILE", "SECRET_NAME"} {
+			if strings.Contains(string(raw), secret) {
+				t.Fatal("client received service data", secret, string(raw))
+			}
+		}
+		if err := a.historyFile(ctx, &Message{Chat: Chat{ID: 1, Type: "private"}}, store.user, store.ticket, 1); !errors.Is(err, domain.ErrForbidden) {
+			t.Fatal("client obtained service file", err)
+		}
+	}
+	store.user = domain.User{ID: 2, Role: "engineer", Approved: true, Departments: []domain.Department{domain.IT}}
+	start := len(capture.bodies)
+	for page := 0; ; page++ {
+		err := a.historyPage(ctx, &Message{Chat: Chat{ID: 2, Type: "private"}}, store.user, store.ticket, page, 0)
+		if errors.Is(err, domain.ErrInvalid) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw, _ := json.Marshal(capture.bodies[start:])
+	for _, secret := range []string{"FIRST_SECRET", "SECOND_SECRET", "SERVICE_SECRET", "SECRET_NAME"} {
+		if !strings.Contains(string(raw), secret) {
+			t.Fatal("staff history missing service data", secret, string(raw))
+		}
+	}
+	store.user = domain.User{ID: 3, Role: "engineer", Approved: true, Departments: []domain.Department{domain.OneC}}
+	if err := a.historyPage(ctx, &Message{Chat: Chat{ID: 3, Type: "private"}}, store.user, store.ticket, 0, 0); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatal("other department read staff history", err)
+	}
+	if err := a.historyFile(ctx, &Message{Chat: Chat{ID: 3, Type: "private"}}, store.user, store.ticket, 1); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatal("other department obtained service file", err)
+	}
+}
 func TestHistoryLocalFileVerifiesHashAndRoot(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "attachment.bin")
@@ -301,6 +367,16 @@ func TestPermanentUpdateDoesNotStopPollingOrOtherClients(t *testing.T) {
 			if polls == 1 {
 				w.Write([]byte(`{"ok":true,"result":[{"update_id":1,"message":{"message_id":1,"from":{"id":99},"chat":{"id":99,"type":"private"},"text":"/report"}},{"update_id":2,"message":{"message_id":2,"from":{"id":99},"chat":{"id":99,"type":"private"},"text":"/report"}},{"update_id":3,"message":{"message_id":3,"from":{"id":1},"chat":{"id":1,"type":"private"},"text":"/new"}}]}`))
 				return
+			}
+			// Polling now runs independently of inbox processing. Let the
+			// durable batch finish before ending this test process.
+			deadline := time.Now().Add(3 * time.Second)
+			for time.Now().Before(deadline) {
+				d, err := store.LoadDraft(context.Background(), 1)
+				if err == nil && d.Step == "department" {
+					break
+				}
+				time.Sleep(5 * time.Millisecond)
 			}
 			cancel()
 			w.Write([]byte(`{"ok":true,"result":[]}`))

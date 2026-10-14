@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"bot-bvk/internal/domain"
+	"bot-bvk/internal/tickets"
 	"context"
 	"errors"
 	"fmt"
@@ -9,8 +10,8 @@ import (
 	"strings"
 )
 
-const clientAcceptedText = "Заявка принята!\nВ ближайшее время в этот чат вам ответит специалист)"
-const clientFinishedText = "Рады, что ваша проблема решилась)\nОбращайтесь в любое время, мы всегда рады помочь!"
+const clientAcceptedText = "Заявка принята!\nВ ближайшее время в этот чат вам ответит специалист."
+const clientFinishedText = "Рады, что ваша проблема решилась.\nОбращайтесь в любое время, мы всегда рады помочь!"
 const clientCancelDraftLabel = "Отменить подачу заявки"
 
 var clientDraftKeyboard = [][]string{{clientCancelDraftLabel}}
@@ -71,6 +72,11 @@ func (a *Adapter) cancelClientDraft(ctx context.Context, m *Message) error {
 	return a.clientHome(ctx, m, "Подача заявки отменена. Вы можете создать новую.")
 }
 func (w *Worker) clientNotification(ctx context.Context, t domain.Ticket, text string) error {
+	// Sanitize notifications queued by older versions before the service comment
+	// became private, including notifications processed after a reopen.
+	if strings.HasPrefix(text, "Заявка закрыта. Результат: ") {
+		text = tickets.ClientClosedNotification
+	}
 	accepted := text == "Заявка принята и поставлена в очередь."
 	cancelled := text == "Заявка завершена по вашему запросу."
 	// An older queued notification must never restore an active menu after completion.
@@ -164,7 +170,7 @@ func clientAuxScenario(m *Message, scenario, text string) string {
 		return scenario
 	}
 	switch strings.TrimSpace(text) {
-	case "Создание заявки.", "Выберите направление.", "Опишите проблему текстом. Вложения отправьте после создания заявки.", draftDescriptionText, clientAcceptedText, "Инженер взял заявку в работу.", "Подача заявки отменена. Вы можете создать новую.":
+	case "Создание заявки.", "Выберите направление.", draftDepartmentText, "Опишите проблему текстом. Вложения отправьте после создания заявки.", draftDescriptionText, clientAcceptedText, "Инженер взял заявку в работу.", "Подача заявки отменена. Вы можете создать новую.":
 		return "client_kept"
 	}
 	if strings.HasPrefix(text, "Создать заявку?\n") || text == "Создать заявку?" {

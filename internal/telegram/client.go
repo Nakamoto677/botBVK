@@ -17,10 +17,11 @@ type Client struct {
 	Token   string
 	BaseURL string
 	HTTP    *http.Client
+	limiter *rateLimiter
 }
 
 func NewClient(token string) *Client {
-	return &Client{Token: token, BaseURL: "https://api.telegram.org", HTTP: &http.Client{Timeout: 65 * time.Second}}
+	return &Client{Token: token, BaseURL: "https://api.telegram.org", HTTP: &http.Client{Timeout: 65 * time.Second}, limiter: newRateLimiter()}
 }
 
 type APIError struct {

@@ -54,22 +54,24 @@ func (a *Adapter) historyPage(ctx context.Context, m *Message, u domain.User, t 
 		return err
 	}
 	header := fmt.Sprintf("Заявка #%d · %s · %s\nКлиент: %s\nОтдел: %s\nВремя: Иркутск (UTC+8)\nИсходное обращение:\n%s", t.ID, company, statusName(t.Status), client, departmentName(t.Department), t.Description)
-	resolution := ""
-	for _, e := range events {
-		if e.Kind == "closed" {
-			var v struct {
-				Resolution string `json:"resolution"`
-			}
-			if json.Unmarshal(e.Data, &v) == nil {
-				resolution = v.Resolution
+	if u.Role != "client" {
+		resolution := ""
+		for _, e := range events {
+			if e.Kind == "closed" {
+				var v struct {
+					Resolution string `json:"resolution"`
+				}
+				if json.Unmarshal(e.Data, &v) == nil {
+					resolution = v.Resolution
+				}
 			}
 		}
-	}
-	if resolution == "" {
-		resolution = t.Resolution
-	}
-	if resolution != "" {
-		header += "\n\nИтог последнего закрытия:\n" + resolution
+		if resolution == "" {
+			resolution = t.Resolution
+		}
+		if resolution != "" {
+			header += "\n\nСлужебный комментарий последнего закрытия:\n" + resolution
+		}
 	}
 	pages := []historyPage{}
 	appendPage := func(text string, buttons [][]Button) {
@@ -116,6 +118,14 @@ func (a *Adapter) historyPage(ctx context.Context, m *Message, u domain.User, t 
 	}
 	if u.Role != "client" {
 		for _, e := range events {
+			if e.Kind == "closed" {
+				var v struct {
+					Resolution string `json:"resolution"`
+				}
+				if json.Unmarshal(e.Data, &v) == nil && v.Resolution != "" {
+					appendPage(fmt.Sprintf("%s · Закрытие заявки\nСлужебный комментарий:\n%s", e.CreatedAt.In(irkutsk).Format("02.01.2006 15:04"), v.Resolution), nil)
+				}
+			}
 			if e.Kind == "transferred" {
 				var v struct {
 					From   domain.Department `json:"from"`

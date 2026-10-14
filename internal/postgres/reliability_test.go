@@ -31,7 +31,7 @@ func TestQuarantineSurvivesRestartAndOrdersDependencies(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Fresh store handle reads the same durable state; no in-memory retry counters.
-	restarted := &Store{s.pool}
+	restarted := &Store{pool: s.pool}
 	pending, err = restarted.PendingUpdates(ctx, 100)
 	if err != nil || len(pending) != 1 || pending[0].ID != 3 {
 		t.Fatalf("quarantine blocked unrelated actor or released dependent: %v %v", pending, err)

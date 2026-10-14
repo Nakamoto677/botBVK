@@ -218,3 +218,15 @@ func TestTransferPromptCommentAndControlCleanup(t *testing.T) {
 		}
 	}
 }
+
+func TestClosedQueueCardEscapesPrivateCommentAndReopenClearsIt(t *testing.T) {
+	ticket := domain.Ticket{ID: 7, Department: domain.IT, Status: domain.Closed, Resolution: "Исправлено <пароль> & доступ"}
+	text := engineerCardText(ticket, "Клиент", "Компания", "Инженер")
+	if !strings.Contains(text, "Служебный комментарий закрытия") || !strings.Contains(text, "Исправлено &lt;пароль&gt; &amp; доступ") || strings.Contains(text, "<пароль>") {
+		t.Fatal("closed queue card missing or unsafe", text)
+	}
+	ticket.Status = domain.New
+	if strings.Contains(engineerCardText(ticket, "Клиент", "Компания", "Инженер"), "пароль") {
+		t.Fatal("reopened card kept stale close comment")
+	}
+}

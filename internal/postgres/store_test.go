@@ -47,7 +47,7 @@ func testStore(t *testing.T) *Store {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &Store{pool}
+	s := &Store{pool: pool}
 	t.Cleanup(func() { s.Close(); base.Exec(context.Background(), "DROP SCHEMA "+name+" CASCADE"); base.Close() })
 	if err = s.Migrate(ctx); err != nil {
 		t.Fatal(err)
@@ -78,6 +78,30 @@ func seed(t *testing.T, s *Store) domain.Ticket {
 		t.Fatal(err)
 	}
 	return v
+}
+
+func TestRecoverOperationsAfterRestart(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if err := s.Transact(ctx, func(tx domain.Tx) error {
+		return tx.Enqueue(ctx, domain.Operation{Kind: "ui_screen", Payload: json.RawMessage(`{"user_id":1}`)})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	op, err := s.NextOperation(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.NextOperation(ctx); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("leased operation selected twice: %v", err)
+	}
+	if err := s.RecoverOperations(ctx); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := s.NextOperation(ctx)
+	if err != nil || recovered.ID != op.ID || recovered.Attempts != op.Attempts+1 {
+		t.Fatalf("operation not recovered: %+v, %v", recovered, err)
+	}
 }
 func TestTicketConcurrencyAndArchive(t *testing.T) {
 	s := testStore(t)

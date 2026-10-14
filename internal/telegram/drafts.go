@@ -10,7 +10,8 @@ import (
 	"fmt"
 )
 
-const draftDescriptionText = "Опишите проблему текстом или подписью к вложению. Вложение сохранится вместе с заявкой."
+const draftDepartmentText = "Выберите примерное направление проблемы"
+const draftDescriptionText = "📝 Опишите проблему\n\nРасскажите, что произошло и когда это началось. Можно отправить текст или приложить фото либо файл с описанием в подписи — вложение сохранится вместе с заявкой.\n\nПосле этого вы сможете проверить заявку перед отправкой."
 
 func draftGeneration() string {
 	var b [12]byte
@@ -74,7 +75,7 @@ func (a *Adapter) resumeDraft(ctx context.Context, m *Message) error {
 		}
 	}
 	if d.Step == "department" {
-		return a.sayAux(ctx, m, m.From.ID, "draft", "Выберите направление.", draftDepartments(d))
+		return a.sayAux(ctx, m, m.From.ID, "draft", draftDepartmentText, draftDepartments(d))
 	}
 	if d.Step == "confirm" {
 		return a.confirmDraft(ctx, m, d)

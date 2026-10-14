@@ -43,6 +43,9 @@ func engineerCardText(t domain.Ticket, client, company, assignee string) string 
 		description = "Описание не указано"
 	}
 	text := fmt.Sprintf("<b>Заявка #%d · %s</b>\n\n<b>Компания:</b> %s\n<b>Клиент:</b> %s\n<b>Отдел:</b> %s\n<b>Исполнитель:</b> %s\n\n<b>Описание</b>\n%s", t.ID, statusName(t.Status), engineerField(company, 120), engineerField(client, 100), departmentName(t.Department), engineerField(assignee, 100), html.EscapeString(engineerTextBound(description, 2400)))
+	if t.Status == domain.Closed && t.Resolution != "" {
+		text += "\n\n<b>Служебный комментарий закрытия</b>\n" + html.EscapeString(engineerTextBound(strings.TrimSpace(t.Resolution), 1000))
+	}
 	if t.RoutingPending {
 		text += "\n\n<i>Создаём топик. Кнопки появятся после подготовки.</i>"
 	}
