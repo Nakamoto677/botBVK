@@ -14,8 +14,8 @@ from urllib.error import HTTPError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 ROOT=Path(__file__).resolve().parent
-LABELS={'start_date':'Начало периода','end_date':'Конец периода','department':'Отдел','employee':'Сотрудник','company':'Компания','ticket_id':'Номер заявки'}
-TYPES={'start_date':'date','end_date':'date','department':'text','employee':'number','company':'number','ticket_id':'number'}
+LABELS={'start_date':'Начало периода','end_date':'Конец периода','row_start':'Начало строки','row_end':'Конец строки','department':'Отдел','employee':'Сотрудник','company':'Компания','ticket_id':'Номер заявки'}
+TYPES={'start_date':'date','end_date':'date','row_start':'date','row_end':'date','department':'text','employee':'number','company':'number','ticket_id':'number'}
 
 def tags(sql):
     return {name:{'id':str(uuid.uuid5(uuid.NAMESPACE_URL,'bvk-metabase:'+name)),'name':name,'display-name':LABELS[name],'type':TYPES[name],'required':name=='ticket_id'} for name in dict.fromkeys(re.findall(r'\{\{(\w+)\}\}',sql))}
@@ -106,13 +106,11 @@ def main():
         existing_cards={d.get('card_id'):d['id'] for d in existing.get('dashcards',[])}
         dc=[]; positions={}
         selected=[c for c in cards if c['dashboard']==key or c['key']==spec.get('list_card')]
-        # Explicit, task-oriented layout. Every tab retains a compact freshness strip.
-        fresh=next(c for c in cards if c['key']=='status')
+        # Explicit, task-oriented layout.
         if key=='support':
             by_key={c['key']:c for c in cards}
             selected=[]
             for tab,items in spec['layout'].items():
-                selected.append(dict(fresh,tab=tab))
                 for item in items:
                     if 'card' in item:
                         selected.append(dict(by_key[item['card']],tab=tab,width=item['width'],height=item['height']))
@@ -120,7 +118,7 @@ def main():
                         selected.append(dict(item,tab=tab))
         else:
             back={'key':'back','text':f"[← Обзор поддержки](/dashboard/{state['dashboards']['support']}#refresh=60) · Чтобы вернуться к прежним фильтрам, используйте «Назад» в браузере.",'tab':None,'width':24,'height':2}
-            selected=[back,fresh]+selected
+            selected=[back]+selected
         used=set()
         for i,c in enumerate(selected):
             tab=c['tab'] if key=='support' else None
@@ -143,22 +141,31 @@ def main():
             identifier=old if old is not None else -(i+100)
             used.add(identifier)
             available=questions[c['key']]['dataset_query']['native']['template-tags']
-            names=['ticket_id'] if key=='ticket' else common
+            names=['ticket_id'] if key=='ticket' else common + (['row_start','row_end'] if key in ('received_list','closed_list','cancelled_list') else [])
             settings=dict(c.get('settings',{}))
             if c['key'] in ('status','attention_summary'): settings['card.title']=None
             if c['target'] and c['target'].endswith('_list'):
                 settings['click_behavior']=click_dashboard(state['dashboards'][c['target']],common)
+            if c['key']=='flow':
+                settings.setdefault('column_settings',{})
+                for column,target in [('Поступило','received_list'),('Закрыто','closed_list'),('Отменено','cancelled_list')]:
+                    click=click_dashboard(state['dashboards'][target],common)
+                    click['parameterMapping'].update({'row_start':mapping('Начало строки','row_start','column'),'row_end':mapping('Конец строки','row_end','column')})
+                    settings['column_settings'].setdefault(json.dumps(['name',column],ensure_ascii=False),{})['click_behavior']=click
+                open_click=click_dashboard(state['dashboards']['backlog_list'],common)
+                open_click['parameterMapping']['end_date']=mapping('Конец строки','end_date','column')
+                settings['column_settings'].setdefault(json.dumps(['name','Открытые'],ensure_ascii=False),{})['click_behavior']=open_click
             if c['target']=='ticket':
                 settings['column_settings']={json.dumps(['name','Номер'],ensure_ascii=False):{'click_behavior':{'type':'link','linkType':'dashboard','targetId':state['dashboards']['ticket'],'parameterMapping':{'ticket_id':mapping('Номер','ticket_id','column')}}}}
             if c['key']=='employees':
                 settings.setdefault('column_settings',{})
-                for column,target in {'Закрыл за период':'closed_list','Назначено сейчас':'active_now_list','Ожидают клиента':'waiting_now_list','Ответ: выборка':'response_list','Возвраты после его закрытий':'returns_list','Передачи':'transfer_list'}.items():
+                for column,target in {'Закрыто за период':'closed_list','В работе сейчас':'active_now_list'}.items():
                     click=click_dashboard(state['dashboards'][target],common)
                     click['parameterMapping']['employee']=mapping('ID сотрудника','employee','column')
                     settings['column_settings'].setdefault(json.dumps(['name',column],ensure_ascii=False),{}).update({'click_behavior':click})
             dc.append({'id':identifier,'card_id':cardid,'row':row,'col':col,'size_x':width,'size_y':c['height'],'dashboard_tab_id':tabids.get(tab),'series':[],'visualization_settings':settings,'parameter_mappings':[{'parameter_id':n,'card_id':cardid,'target':['variable',['template-tag',n]]} for n in names if n in available]})
             positions[tab]=(row,col+width,max(rowheight,c['height']))
-        names=['ticket_id'] if key=='ticket' else common
+        names=['ticket_id'] if key=='ticket' else common + (['row_start','row_end'] if key in ('received_list','closed_list','cancelled_list') else [])
         api.call('PUT',f'dashboard/{did}',{'name':spec['name'],'description':'Все даты — Asia/Irkutsk. Период: оба календарных дня включительно; пустые даты — текущий месяц. «Сейчас» не ограничивается периодом. Исторические показатели используют участников события; неизвестные сведения не заменяются текущими. В меню обновления выберите 1 минуту.','parameters':params(names,state['cards']),'tabs':[{'id':tabids[k],'name':name} for k,name in spec['tabs'].items()],'dashcards':dc})
         print(f'{spec["name"]}: {args.url.rstrip("/")}/dashboard/{did}#refresh=60')
     if args.set_homepage:

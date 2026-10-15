@@ -167,7 +167,9 @@ type Draft struct {
 	Department  Department
 	Text        string
 	Attachments []Message
-	TicketID    int64
+	// Source IDs make appending descriptions idempotent across inbox retries.
+	MessageIDs []int64
+	TicketID   int64
 }
 type BoundDraftStore interface {
 	LoadDraft(context.Context, int64) (Draft, error)

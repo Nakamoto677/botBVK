@@ -46,7 +46,7 @@ func (a *Adapter) clientHome(ctx context.Context, m *Message, text string) error
 func (a *Adapter) clientMenu(ctx context.Context, m *Message, u domain.User) error {
 	t, err := a.store.ActiveTicket(ctx, u.ID)
 	if err == nil {
-		return a.clientScreen(ctx, m, clientTicketScenario(t.ID), "Напишите сообщение — специалист ответит в этом чате.", clientActiveKeyboard)
+		return a.clientScreen(ctx, m, clientTicketScenario(t.ID), "Напишите сообщение — специалист ответит прямо в этом чате", clientActiveKeyboard)
 	}
 	if !errors.Is(err, domain.ErrNotFound) {
 		return err
@@ -54,13 +54,13 @@ func (a *Adapter) clientMenu(ctx context.Context, m *Message, u domain.User) err
 	if d, exists, err := a.getDraft(ctx, u.ID); err != nil {
 		return err
 	} else if exists && d.Step != "submitted" {
-		return a.clientScreen(ctx, m, "draft", "Опишите проблему или отмените подачу заявки.", clientDraftKeyboard)
+		return a.clientScreen(ctx, m, "draft", "Опишите проблему или отмените подачу заявки", clientDraftKeyboard)
 	}
 	return a.clientHome(ctx, m, "Чем можем помочь?")
 }
 func (a *Adapter) cancelClientDraft(ctx context.Context, m *Message) error {
 	if _, err := a.store.ActiveTicket(ctx, m.Chat.ID); err == nil {
-		return a.say(ctx, m, "Заявка уже принята. Для её завершения нажмите «Отменить заявку».", nil)
+		return a.say(ctx, m, "Заявка уже принята. Для её завершения нажмите «Отменить заявку»", nil)
 	} else if !errors.Is(err, domain.ErrNotFound) {
 		return err
 	}
@@ -68,11 +68,11 @@ func (a *Adapter) cancelClientDraft(ctx context.Context, m *Message) error {
 		return err
 	}
 	a.cleanupBestEffort(ctx, scope(m.Chat.ID, m), "draft")
-	return a.clientHome(ctx, m, "Подача заявки отменена. Вы можете создать новую.")
+	return a.clientHome(ctx, m, "Подача заявки отменена. Вы можете создать новую!")
 }
 func (w *Worker) clientNotification(ctx context.Context, t domain.Ticket, text string) error {
-	accepted := text == "Заявка принята и поставлена в очередь."
-	cancelled := text == "Заявка завершена по вашему запросу."
+	accepted := text == "Заявка принята и поставлена в очередь" || text == "Заявка принята и поставлена в очередь."
+	cancelled := text == "Заявка завершена по вашему запросу" || text == "Заявка завершена по вашему запросу."
 	// An older queued notification must never restore an active menu after completion.
 	if !t.Status.Active() && accepted {
 		return nil
@@ -103,9 +103,6 @@ func (w *Worker) clientNotification(ctx context.Context, t domain.Ticket, text s
 		}
 		scenario = "client_home"
 	}
-	if err := w.rate(ctx, t.ClientID); err != nil {
-		return err
-	}
 	var sent Message
 	var sendErr error
 	sent, sendErr = w.textParts(ctx, w.operationSendKey("client_notice"), t.ClientID, 0, text, clientReplyMarkup(keyboard))
@@ -125,13 +122,13 @@ func clientErrorText(err error) string {
 	case errors.Is(err, domain.ErrConflict):
 		return "Этот шаг уже завершён или заявка изменилась. Откройте меню заново: /menu."
 	case errors.Is(err, domain.ErrForbidden):
-		return "Это действие недоступно для вашего аккаунта."
+		return "Это действие недоступно для вашего аккаунта"
 	case errors.Is(err, domain.ErrNotFound):
 		return "Заявка или этот шаг больше не доступны. Откройте меню: /menu."
 	case errors.Is(err, domain.ErrInvalid):
-		return "Не удалось выполнить действие. Проверьте ввод и попробуйте ещё раз."
+		return "Не удалось выполнить действие. Проверьте ввод и попробуйте ещё раз"
 	default:
-		return "Не удалось выполнить действие. Попробуйте ещё раз."
+		return "Не удалось выполнить действие. Попробуйте ещё раз"
 	}
 }
 
@@ -164,7 +161,7 @@ func clientAuxScenario(m *Message, scenario, text string) string {
 		return scenario
 	}
 	switch strings.TrimSpace(text) {
-	case "Создание заявки.", "Выберите направление.", "Опишите проблему текстом. Вложения отправьте после создания заявки.", draftDescriptionText, clientAcceptedText, "Инженер взял заявку в работу.", "Подача заявки отменена. Вы можете создать новую.":
+	case "Создание заявки.", "Создание заявки...", "Выберите направление.", "Опишите проблему текстом. Вложения отправьте после создания заявки.", draftDescriptionText, clientAcceptedText, "Инженер взял заявку в работу.", "Подача заявки отменена. Вы можете создать новую.", "Подача заявки отменена. Вы можете создать новую!":
 		return "client_kept"
 	}
 	if strings.HasPrefix(text, "Создать заявку?\n") || text == "Создать заявку?" {

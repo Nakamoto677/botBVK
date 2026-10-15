@@ -743,3 +743,70 @@ func TestFailedCompletionRollbackLeavesNoDeletionIntent(t *testing.T) {
 		t.Fatal("partial completion intent")
 	}
 }
+
+func (f *fakeStore) Ticket(_ context.Context, id int64) (domain.Ticket, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	ticket, ok := f.tickets[id]
+	if !ok {
+		return ticket, domain.ErrNotFound
+	}
+	return ticket, nil
+}
+
+type lockOrderStore struct {
+	*fakeStore
+	t *testing.T
+}
+type lockOrderTx struct {
+	domain.Tx
+	t       *testing.T
+	locked  map[int64]bool
+	ticket  bool
+	largest int64
+}
+
+func (s *lockOrderStore) Transact(ctx context.Context, fn func(domain.Tx) error) error {
+	return s.fakeStore.Transact(ctx, func(tx domain.Tx) error { return fn(&lockOrderTx{Tx: tx, t: s.t, locked: map[int64]bool{}}) })
+}
+func (tx *lockOrderTx) GetUser(ctx context.Context, id int64) (domain.User, error) {
+	if !tx.locked[id] {
+		if tx.ticket {
+			tx.t.Errorf("user %d locked after ticket", id)
+		}
+		if id < tx.largest {
+			tx.t.Errorf("user locks out of order: %d after %d", id, tx.largest)
+		}
+		tx.largest = id
+		tx.locked[id] = true
+	}
+	return tx.Tx.GetUser(ctx, id)
+}
+func (tx *lockOrderTx) GetTicket(ctx context.Context, id int64) (domain.Ticket, error) {
+	tx.ticket = true
+	return tx.Tx.GetTicket(ctx, id)
+}
+func TestAssignAndReopenLockUsersBeforeTicket(t *testing.T) {
+	s, f := setup()
+	ctx := t.Context()
+	ticket, err := s.Create(ctx, 1, domain.IT, "problem")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Claim(ctx, 2, ticket.ID); err != nil {
+		t.Fatal(err)
+	}
+	u := f.users[3]
+	u.Departments = []domain.Department{domain.IT}
+	f.users[3] = u
+	s.store = &lockOrderStore{fakeStore: f, t: t}
+	if err = s.Assign(ctx, 4, ticket.ID, 3); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Close(ctx, 4, ticket.ID, "fixed"); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Reopen(ctx, 4, ticket.ID); err != nil {
+		t.Fatal(err)
+	}
+}

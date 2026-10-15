@@ -225,3 +225,58 @@ func TestMissingAttachmentBlocksBackupAndDeletion(t *testing.T) {
 		t.Fatal("missing archive permitted deletion")
 	}
 }
+
+type cleanupFenceProbe struct {
+	*fakeStore
+	calls int
+}
+
+func (p *cleanupFenceProbe) Events(context.Context, int64) ([]domain.Event, error) {
+	return nil, errors.New("borrowed a second database connection")
+}
+func (p *cleanupFenceProbe) Messages(context.Context, int64) ([]domain.Message, error) {
+	return nil, errors.New("borrowed a second database connection")
+}
+func (p *cleanupFenceProbe) CleanupFence(context.Context, domain.Tx, int64) error {
+	p.calls++
+	return nil
+}
+
+type cleanupProofTx struct {
+	domain.Tx
+	store *fakeStore
+}
+
+func (p *cleanupProofTx) Events(context.Context, int64) ([]domain.Event, error) {
+	return p.store.events, nil
+}
+func (p *cleanupProofTx) Messages(context.Context, int64) ([]domain.Message, error) {
+	return p.store.messages, nil
+}
+func TestCleanupHashesProofBeforeGlobalFenceUsingTransactionConnection(t *testing.T) {
+	s, store, _ := completionFixture(t)
+	ctx := t.Context()
+	if err := s.CleanupTick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	probe := &cleanupFenceProbe{fakeStore: store}
+	s.Store = probe
+	tx := &cleanupProofTx{store: store}
+	if err := s.BeforeDelete(ctx, tx, store.ticket, -1001, 10); err != nil {
+		t.Fatal(err)
+	}
+	if probe.calls != 1 {
+		t.Fatal("acceptance fence missing")
+	}
+	dir := proofDirectory(store.events, "completion:1:3:-1001:10")
+	if err := os.WriteFile(filepath.Join(dir, "database.dump"), []byte("damaged"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	probe.calls = 0
+	if err := s.BeforeDelete(ctx, tx, store.ticket, -1001, 10); !errors.Is(err, domain.ErrConflict) {
+		t.Fatal(err)
+	}
+	if probe.calls != 0 {
+		t.Fatal("global fence held during proof hashing")
+	}
+}

@@ -139,18 +139,21 @@ func (s *Scheduler) once(ctx context.Context, t domain.Ticket, events []domain.E
 // BeforeDelete validates only a new explicit completion and its durable proof.
 // It is called while the worker holds the ticket lock to fence concurrent edits.
 func (s *Scheduler) BeforeDelete(ctx context.Context, tx domain.Tx, t domain.Ticket, chatID, topicID int64) error {
-	if fence, ok := s.Store.(interface {
-		CleanupFence(context.Context, domain.Tx, int64) error
+	var reader interface {
+		Events(context.Context, int64) ([]domain.Event, error)
+		Messages(context.Context, int64) ([]domain.Message, error)
+	} = s.Store
+	if transactional, ok := tx.(interface {
+		Events(context.Context, int64) ([]domain.Event, error)
+		Messages(context.Context, int64) ([]domain.Message, error)
 	}); ok {
-		if err := fence.CleanupFence(ctx, tx, t.ID); err != nil {
-			return err
-		}
+		reader = transactional
 	}
-	events, err := s.Store.Events(ctx, t.ID)
+	events, err := reader.Events(ctx, t.ID)
 	if err != nil {
 		return err
 	}
-	msgs, err := s.Store.Messages(ctx, t.ID)
+	msgs, err := reader.Messages(ctx, t.ID)
 	if err != nil {
 		return err
 	}
@@ -169,6 +172,13 @@ func (s *Scheduler) BeforeDelete(ctx context.Context, tx domain.Tx, t domain.Tic
 		manifest, err := archive.Load(dir)
 		if err != nil || !manifest.CoversCompletion(t, msgs, events, event) {
 			return domain.ErrConflict
+		}
+		// Hashing the backup only holds this ticket's row lock. Acquire the
+		// global acceptance fence last, then recheck newly accepted updates.
+		if fence, ok := s.Store.(interface {
+			CleanupFence(context.Context, domain.Tx, int64) error
+		}); ok {
+			return fence.CleanupFence(ctx, tx, t.ID)
 		}
 		return nil
 	}

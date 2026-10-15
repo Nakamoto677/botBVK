@@ -8,7 +8,7 @@ WITH selected AS (WITH bounds AS (
  SELECT DISTINCT ON (ticket_id) * FROM analytics.events, p
  WHERE kind='closed' AND occurred_at >= p.lo AND occurred_at < p.hi
  ORDER BY ticket_id, occurred_at DESC, id DESC
-), q AS (SELECT t.id AS ticket_id,t.department,t.assignee_id AS actor_id,t.created_at AS at FROM analytics.tickets t WHERE t.status IN ('new','in_progress','waiting_client') AND (t.no_assignee OR t.response_overdue OR t.idle_overdue OR t.waiting_overdue))
+), q AS (SELECT t.id AS ticket_id,t.department,t.assignee_id AS actor_id,t.created_at AS at FROM analytics.tickets t WHERE t.status IN ('new','in_progress','waiting_client') AND (t.no_assignee OR t.response_overdue OR t.idle_overdue))
 SELECT DISTINCT q.* FROM q JOIN analytics.tickets t ON t.id=q.ticket_id WHERE true
 [[ AND q.department = {{department}} ]]
 [[ AND q.actor_id = {{employee}} ]]

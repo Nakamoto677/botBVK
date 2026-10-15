@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -191,11 +192,21 @@ func (s *Service) create(ctx context.Context, actorID int64, department domain.D
 	})
 	return t, err
 }
-func (s *Service) mutate(ctx context.Context, actorID, ticketID int64, fn func(domain.Tx, domain.User, *domain.Ticket) error) error {
+func (s *Service) mutate(ctx context.Context, actorID, ticketID int64, fn func(domain.Tx, domain.User, *domain.Ticket) error, otherUsers ...int64) error {
 	return s.store.Transact(ctx, func(tx domain.Tx) error {
-		u, err := tx.GetUser(ctx, actorID)
-		if err != nil {
-			return err
+		// Lock users in ID order before the ticket, including assignment and
+		// reopening. A second user lock after the ticket can create a cycle.
+		ids := append([]int64{actorID}, otherUsers...)
+		slices.Sort(ids)
+		var u domain.User
+		for _, id := range slices.Compact(ids) {
+			user, err := tx.GetUser(ctx, id)
+			if err != nil {
+				return err
+			}
+			if id == actorID {
+				u = user
+			}
 		}
 		t, err := tx.GetTicket(ctx, ticketID)
 		if err != nil {
@@ -332,7 +343,14 @@ func (s *Service) close(ctx context.Context, actorID, ticketID int64, resolution
 	})
 }
 func (s *Service) Reopen(ctx context.Context, actorID, ticketID int64) error {
+	snapshot, err := s.store.Ticket(ctx, ticketID)
+	if err != nil {
+		return err
+	}
 	return s.mutate(ctx, actorID, ticketID, func(tx domain.Tx, u domain.User, t *domain.Ticket) error {
+		if t.ClientID != snapshot.ClientID {
+			return domain.ErrConflict
+		}
 		if !u.Approved || (!privileged(u) && (u.Role != "client" || u.ID != t.ClientID)) {
 			return domain.ErrForbidden
 		}
@@ -341,11 +359,6 @@ func (s *Service) Reopen(ctx context.Context, actorID, ticketID int64) error {
 		}
 		if !privileged(u) && s.now().Sub(*t.ClosedAt) > 7*24*time.Hour {
 			return domain.ErrConflict
-		}
-		if u.ID != t.ClientID {
-			if _, err := tx.GetUser(ctx, t.ClientID); err != nil {
-				return err
-			}
 		}
 		_, err := tx.ActiveTicket(ctx, t.ClientID)
 		if err == nil {
@@ -371,7 +384,7 @@ func (s *Service) Reopen(ctx context.Context, actorID, ticketID int64) error {
 			return err
 		}
 		return s.notify(ctx, tx, *t, "Заявка повторно открыта.")
-	})
+	}, snapshot.ClientID)
 }
 func (s *Service) SetWaiting(ctx context.Context, actorID, ticketID int64, waiting bool) error {
 	return s.mutate(ctx, actorID, ticketID, func(tx domain.Tx, u domain.User, t *domain.Ticket) error {
@@ -584,7 +597,7 @@ func (s *Service) Assign(ctx context.Context, actorID, ticketID, engineerID int6
 			return err
 		}
 		return s.notify(ctx, tx, *t, "По заявке назначен другой инженер.")
-	})
+	}, engineerID)
 }
 
 // activateTopic is called only when an engineer explicitly takes a queued request.

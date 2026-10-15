@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"bot-bvk/internal/domain"
 )
@@ -20,17 +21,33 @@ func renderSQL(sql string, filtered bool) string {
 		}
 		return s[2 : len(s)-2]
 	})
-	values := map[string]string{"start_date": "'2026-10-12'", "end_date": "'2026-10-13'", "department": "'it'", "employee": "20", "company": "1", "ticket_id": "1"}
+	values := map[string]string{"start_date": "'2026-10-12'", "end_date": "'2026-10-13'", "row_start": "'2026-10-12'", "row_end": "'2026-10-13'", "department": "'it'", "employee": "20", "company": "1", "ticket_id": "1"}
 	for name, value := range values {
 		sql = strings.ReplaceAll(sql, "{{"+name+"}}", value)
 	}
 	return sql
 }
 
+// Keep only the period filters when comparing the overview with its drilldowns.
+func renderWindowSQL(sql, start, end string) string {
+	sql = optionalSQL.ReplaceAllStringFunc(sql, func(s string) string {
+		if strings.Contains(s, "{{start_date}}") || strings.Contains(s, "{{end_date}}") {
+			return s[2 : len(s)-2]
+		}
+		return ""
+	})
+	sql = strings.ReplaceAll(sql, "{{start_date}}", "'"+start+"'")
+	return strings.ReplaceAll(sql, "{{end_date}}", "'"+end+"'")
+}
+
+func renderPeriodSQL(sql string) string {
+	return renderWindowSQL(sql, "2026-10-12", "2026-10-13")
+}
+
 func metabaseSource() Source {
 	src := Source{At: at(13, 16, 0), Companies: []domain.Company{{ID: 1, Name: "Компания"}}, Users: []domain.User{{ID: 100, Name: "Клиент", Role: "client"}, {ID: 10, Name: "Первый", Role: "engineer"}, {ID: 20, Name: "Второй", Role: "engineer"}}}
 	src.Tickets = []domain.Ticket{{ID: 1, ClientID: 100, CompanyID: 1, Department: domain.OneC, Status: domain.Closed, AssigneeID: 20, CreatedAt: at(9, 9, 0)}, {ID: 2, ClientID: 100, CompanyID: 1, Department: domain.IT, Status: domain.New, CreatedAt: at(12, 9, 0)}, {ID: 3, ClientID: 100, CompanyID: 1, Department: domain.IT, Status: domain.Cancelled, CreatedAt: at(12, 9, 0)}}
-	src.Events = []domain.Event{event(1, "created", at(9, 9, 0), 100, "null"), event(2, "claimed", at(9, 9, 5), 10, "null"), event(3, "message_delivered", at(12, 9, 10), 10, `{"source_message_id":1,"direction":"outbound"}`), event(4, "closed", at(12, 10, 0), 10, `{"resolution":"Первое"}`), event(5, "reopened", at(12, 11, 0), 100, `{"from":"it"}`), event(6, "transferred", at(12, 12, 0), 10, `{"from":"it","to":"1c"}`), event(7, "claimed", at(12, 12, 5), 20, "null"), event(8, "closed", at(12, 13, 0), 20, `{"resolution":"Второе"}`)}
+	src.Events = []domain.Event{event(1, "created", at(9, 9, 0), 100, "null"), event(2, "claimed", at(9, 9, 5), 10, "null"), event(3, "message_delivered", at(12, 9, 10), 10, `{"source_message_id":1,"direction":"outbound"}`), event(4, "closed", at(12, 10, 0), 10, `{"resolution":"Первое"}`), event(5, "reopened", at(12, 11, 0), 100, `{"from":"it"}`), event(6, "transferred", at(12, 12, 0), 10, `{"from":"it","to":"1c"}`), event(7, "claimed", at(12, 12, 5), 20, "null"), event(8, "closed", at(13, 13, 0), 20, `{"resolution":"Второе"}`)}
 	src.Messages = []domain.Message{{ID: 1, TicketID: 1, AuthorID: 10, Direction: "outbound", CreatedAt: at(12, 9, 5)}}
 	ev := event(9, "created", at(12, 9, 0), 100, "null")
 	ev.TicketID = 2
@@ -179,6 +196,104 @@ func TestMetabaseQueriesAndExactDrilldowns(t *testing.T) {
 	if n != 0 {
 		t.Fatal("empty period", n)
 	}
+	// The timeline assigns a repeated closure to its last day in the whole period.
+	flow, _ := os.ReadFile("../../analytics/metabase/sql/flow.sql")
+	rows, err = s.Pool.Query(ctx, renderPeriodSQL(string(flow)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var received, closed, cancelled int64
+	openByDay := map[string]int64{}
+	for rows.Next() {
+		var label string
+		var a, b, c, open int64
+		var first, last time.Time
+		if err = rows.Scan(&label, &a, &b, &c, &open, &first, &last); err != nil {
+			t.Fatal(err)
+		}
+		if b > 0 && first.Day() != 13 {
+			t.Fatalf("closure placed in wrong row: %s", label)
+		}
+		if !first.Equal(last) {
+			t.Fatalf("daily drilldown spans multiple days: %s – %s", first, last)
+		}
+		received, closed, cancelled = received+a, closed+b, cancelled+c
+		openByDay[first.Format("2006-01-02")] = open
+	}
+	rows.Close()
+	if received != 2 || closed != 1 || cancelled != 1 {
+		t.Fatalf("timeline totals: %d %d %d", received, closed, cancelled)
+	}
+	if openByDay["2026-10-12"] != 2 || openByDay["2026-10-13"] != 1 {
+		t.Fatalf("historical open queue: %v", openByDay)
+	}
+	backlog, _ := os.ReadFile("../../analytics/metabase/sql/backlog_list.sql")
+	for day, want := range map[string]int64{"2026-10-12": 2, "2026-10-13": 1} {
+		var count int64
+		query := "SELECT count(*) FROM (" + renderWindowSQL(string(backlog), "2026-10-12", day) + ") cell"
+		if err = s.Pool.QueryRow(ctx, query).Scan(&count); err != nil || count != want {
+			t.Fatalf("open cell %s: got %d, want %d: %v", day, count, want, err)
+		}
+	}
+	for start, wantRows := range map[string]int64{"2026-09-13": 5, "2026-09-12": 2, "2026-07-16": 2, "2026-07-15": 1} {
+		var count int64
+		query := "SELECT count(*) FROM (" + renderWindowSQL(string(flow), start, "2026-10-13") + ") grouped"
+		if err = s.Pool.QueryRow(ctx, query).Scan(&count); err != nil || count != wantRows {
+			t.Fatalf("grouping from %s: got %d, want %d: %v", start, count, wantRows, err)
+		}
+	}
+	var emptyLabel string
+	empty := renderWindowSQL(string(flow), "2026-10-14", "2026-10-14")
+	if err = s.Pool.QueryRow(ctx, "SELECT \"Дата / период\" FROM ("+empty+") grouped").Scan(&emptyLabel); err != nil || emptyLabel != "За выбранный период нет заявок" {
+		t.Fatalf("empty timeline: %q %v", emptyLabel, err)
+	}
+	for key, want := range map[string]int64{"received": received, "closed": closed, "cancelled": cancelled} {
+		raw, _ := os.ReadFile("../../analytics/metabase/sql/" + key + "_count.sql")
+		var count int64
+		if err = s.Pool.QueryRow(ctx, renderPeriodSQL(string(raw))).Scan(&count); err != nil || count != want {
+			t.Fatalf("%s timeline=%d card=%d: %v", key, want, count, err)
+		}
+	}
+	closedList, _ := os.ReadFile("../../analytics/metabase/sql/closed_list.sql")
+	for day, want := range map[string]int64{"2026-10-12": 0, "2026-10-13": 1} {
+		cellSQL := optionalSQL.ReplaceAllStringFunc(string(closedList), func(s string) string {
+			if strings.Contains(s, "{{start_date}}") || strings.Contains(s, "{{end_date}}") || strings.Contains(s, "{{row_start}}") || strings.Contains(s, "{{row_end}}") {
+				return s[2 : len(s)-2]
+			}
+			return ""
+		})
+		for key, value := range map[string]string{"start_date": "2026-10-12", "end_date": "2026-10-13", "row_start": day, "row_end": day} {
+			cellSQL = strings.ReplaceAll(cellSQL, "{{"+key+"}}", "'"+value+"'")
+		}
+		var count int64
+		if err = s.Pool.QueryRow(ctx, "SELECT count(*) FROM ("+cellSQL+") cell").Scan(&count); err != nil || count != want {
+			t.Fatalf("closed cell %s: got %d, want %d: %v", day, count, want, err)
+		}
+	}
+	team, _ := os.ReadFile("../../analytics/metabase/sql/employees.sql")
+	rows, err = s.Pool.Query(ctx, renderPeriodSQL(string(team)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var found bool
+	for rows.Next() {
+		values, e := rows.Values()
+		if e != nil {
+			t.Fatal(e)
+		}
+		if values[0] == int64(20) {
+			found = true
+			if values[2] != int64(1) || values[4] != "24 часа 55 мин" || values[5] != "24 часа 55 мин" || values[6] != "24 часа 55 мин" || values[7] != int64(1) {
+				t.Fatalf("employee result: %v", values)
+			}
+		}
+	}
+	rows.Close()
+	if !found {
+		t.Fatal("closing employee missing")
+	}
 }
 
 // A partial current period is compared with the same elapsed duration, not a
@@ -232,7 +347,10 @@ func TestMetabaseComparisonPartialPeriod(t *testing.T) {
 	if err = rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	for name, want := range map[string][3]int64{"Поступило": {2, 1, 1}, "Закрыто": {1, 0, 1}, "Отменено": {1, 0, 1}, "Открыто повторно": {1, 0, 1}} {
+	if len(got) != 3 {
+		t.Fatalf("expected three comparison metrics: %v", got)
+	}
+	for name, want := range map[string][3]int64{"Поступило": {2, 1, 1}, "Закрыто": {1, 0, 1}, "Отменено": {1, 0, 1}} {
 		if got[name] != want {
 			t.Fatalf("%s: got %v want %v", name, got[name], want)
 		}

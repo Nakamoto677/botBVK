@@ -52,7 +52,9 @@ func (s Store) Refresh(ctx context.Context, opts Options) (result Snapshot, err 
 		}
 	}()
 	var locked bool
-	if err = tx.QueryRow(ctx, "SELECT pg_try_advisory_xact_lock(731903)").Scan(&locked); err != nil {
+	// 731903 belongs to the bot's inbox/archive fence. Analytics must not hold
+	// that lock while calculating and publishing a potentially large snapshot.
+	if err = tx.QueryRow(ctx, "SELECT pg_try_advisory_xact_lock(731904)").Scan(&locked); err != nil {
 		return result, err
 	}
 	if !locked {

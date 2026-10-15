@@ -13,17 +13,17 @@ SELECT DISTINCT q.* FROM q JOIN analytics.tickets t ON t.id=q.ticket_id WHERE tr
 [[ AND q.department = {{department}} ]]
 [[ AND q.actor_id = {{employee}} ]]
 [[ AND t.company_id = {{company}} ]])
-SELECT t.id AS "Номер", t.description AS "Описание", coalesce(c.name,'Компания неизвестна') AS "Компания",
+SELECT t.id AS "Номер", coalesce(c.name,'Компания неизвестна') AS "Компания",
  coalesce(d.name,'Отдел неизвестен') AS "Отдел отбора", coalesce(u.name,CASE WHEN s.actor_id=t.client_id THEN coalesce(nullif(t.client_name,''),'Клиент #'||s.actor_id) WHEN s.actor_id IS NOT NULL THEN 'Неизвестный участник #'||s.actor_id ELSE 'Не назначен / автор неизвестен' END) AS "Сотрудник отбора",
  CASE t.status WHEN 'new' THEN 'Новая' WHEN 'in_progress' THEN 'В работе' WHEN 'waiting_client' THEN 'Ожидает клиента' WHEN 'closed' THEN 'Закрыта' ELSE 'Отменена' END AS "Сейчас",
- t.created_at AT TIME ZONE 'Asia/Irkutsk' AS "Создана", s.at AT TIME ZONE 'Asia/Irkutsk' AS "Дата отбора",
- round(extract(epoch FROM (r.snapshot_at-t.created_at))/3600.0,2) AS "Возраст, кал. ч",
+ coalesce(CASE WHEN elapsed.seconds IS NULL THEN NULL WHEN elapsed.seconds<60 THEN '< 1 мин' WHEN floor((elapsed.seconds) / 60)::bigint<60 THEN floor((elapsed.seconds) / 60)::bigint||' мин' ELSE (floor((elapsed.seconds) / 60)::bigint / 60)||' '||CASE WHEN (floor((elapsed.seconds) / 60)::bigint / 60)%10=1 AND (floor((elapsed.seconds) / 60)::bigint / 60)%100<>11 THEN 'час' WHEN (floor((elapsed.seconds) / 60)::bigint / 60)%10 BETWEEN 2 AND 4 AND (floor((elapsed.seconds) / 60)::bigint / 60)%100 NOT BETWEEN 12 AND 14 THEN 'часа' ELSE 'часов' END ||CASE WHEN (floor((elapsed.seconds) / 60)::bigint % 60)=0 THEN '' ELSE ' '||(floor((elapsed.seconds) / 60)::bigint % 60)||' мин' END END,'—') AS "Ожидает", t.created_at AT TIME ZONE 'Asia/Irkutsk' AS "Создана", s.at AT TIME ZONE 'Asia/Irkutsk' AS "Дата отбора",
+ round(extract(epoch FROM (elapsed.snapshot_at-t.created_at))/3600.0,2) AS "Возраст, кал. ч",
  round(t.first_response_work_seconds::numeric/60,2) AS "Первый ответ, раб. мин",
  round(t.response_waiting_work_seconds::numeric/60,2) AS "Без ответа, раб. мин",
  round(t.idle_work_seconds::numeric/3600,2) AS "Без инженера, раб. ч",
  round(t.waiting_work_seconds::numeric/3600,2) AS "Ожидание клиента, раб. ч",
- concat_ws('; ',CASE WHEN t.no_assignee THEN 'Без исполнителя' END,CASE WHEN t.response_overdue THEN 'Нет ответа дольше порога' END,CASE WHEN t.idle_overdue THEN 'Без инженера дольше порога' END,CASE WHEN t.waiting_overdue THEN 'Ожидание клиента дольше порога' END) AS "Причины внимания",
+ concat_ws('; ',CASE WHEN t.no_assignee THEN 'Без исполнителя' END,CASE WHEN t.response_overdue THEN 'Нет ответа дольше порога' END,CASE WHEN t.idle_overdue THEN 'Без инженера дольше порога' END) AS "Причины внимания",
  CASE WHEN t.incomplete THEN t.quality ELSE 'Полные сведения' END AS "Качество истории"
-FROM selected s JOIN analytics.tickets t ON t.id=s.ticket_id LEFT JOIN analytics.companies c ON c.id=t.company_id
+FROM selected s JOIN analytics.tickets t ON t.id=s.ticket_id CROSS JOIN LATERAL (SELECT r.snapshot_at,CASE WHEN r.snapshot_at>=coalesce(t.last_activity_at,t.created_at) THEN EXTRACT(EPOCH FROM (r.snapshot_at-coalesce(t.last_activity_at,t.created_at))) END AS seconds FROM analytics.refresh_state r WHERE r.id=1) elapsed LEFT JOIN analytics.companies c ON c.id=t.company_id
 LEFT JOIN analytics.departments d ON d.code=s.department LEFT JOIN analytics.employees u ON u.id=s.actor_id
-CROSS JOIN analytics.refresh_state r WHERE r.id=1 ORDER BY t.created_at,t.id
+ORDER BY t.created_at,t.id

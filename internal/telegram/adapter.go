@@ -61,26 +61,61 @@ func NewAdapter(c *Client, s domain.Store, v Service, cfg Config) *Adapter {
 	return &Adapter{client: c, store: s, service: v, cfg: cfg, drafts: make(map[int64]draft), prompts: make(map[promptKey]prompt), auxiliary: make(map[auxKey][]domain.AuxiliaryMessage)}
 }
 func (a *Adapter) Run(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	wake := make(chan struct{}, 1)
+	done := make(chan error, 1)
+	go func() { done <- a.poll(ctx, wake); close(done) }()
+	err := a.drainInbox(ctx, wake, done)
+	cancel()
+	<-done
+	return err
+}
+
+// Only this loop mutates adapter state. Polling can keep receiving durably while
+// a handler is busy; due retries never wait for a Telegram long poll to finish.
+func (a *Adapter) drainInbox(ctx context.Context, wake <-chan struct{}, done <-chan error) error {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for ctx.Err() == nil {
+		select {
+		case err := <-done:
+			return err
+		default:
+		}
+		// Re-evaluate dependencies after every action: it can create a ticket or
+		// change the workflow used to route the next message.
+		pending, err := a.store.PendingUpdates(ctx, 1)
+		if err != nil {
+			return err
+		}
+		if len(pending) > 0 {
+			if err = a.processUpdate(ctx, pending[0]); err != nil {
+				return err
+			}
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case err := <-done:
+			// Run also joins the polling goroutine.
+			return err
+		case <-wake:
+		case <-ticker.C:
+		}
+	}
+	return ctx.Err()
+}
+
+func (a *Adapter) poll(ctx context.Context, wake chan<- struct{}) error {
 	last, err := a.store.LastUpdateID(ctx)
 	if err != nil {
 		return err
 	}
 	offset := last + 1
 	for ctx.Err() == nil {
-		pending, err := a.store.PendingUpdates(ctx, 100)
-		if err != nil {
-			return err
-		}
-		for _, entry := range pending {
-			if err = a.processUpdate(ctx, entry); err != nil {
-				return err
-			}
-		}
-		pollTimeout := 50
-		if len(pending) > 0 {
-			pollTimeout = 0
-		}
-		updates, err := a.client.updatesTimeout(ctx, offset, pollTimeout)
+		updates, err := a.client.updatesTimeout(ctx, offset, 50)
 		if err != nil {
 			if !pause(ctx, 2*time.Second) {
 				break
@@ -101,6 +136,12 @@ func (a *Adapter) Run(ctx context.Context) error {
 			}
 			if u.ID >= offset {
 				offset = u.ID + 1
+			}
+		}
+		if len(updates) > 0 {
+			select {
+			case wake <- struct{}{}:
+			default:
 			}
 		}
 	}
@@ -278,6 +319,11 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 		} else if !errors.Is(err, domain.ErrNotFound) {
 			return err
 		}
+		if d, exists, err := a.getDraft(ctx, m.From.ID); err != nil {
+			return err
+		} else if exists && d.Step != "submitted" {
+			return a.resumeDraft(ctx, m)
+		}
 		d := draft{Generation: a.formGeneration(m), Step: "department"}
 		if err := a.saveDraft(ctx, m.From.ID, d); err != nil {
 			return err
@@ -313,27 +359,7 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 		if strings.HasPrefix(text, "/") {
 			return domain.ErrInvalid
 		}
-		d.Text = messageText(m)
-		if strings.TrimSpace(d.Text) == "" {
-			return a.say(ctx, m, "Добавьте описание текстом или подписью к вложению.", nil)
-		}
-		d.Generation = a.formGeneration(m)
-		d.Step = "confirm"
-		attachment := normalise(m, false)
-		if attachment.FileID != "" {
-			found := false
-			for _, v := range d.Attachments {
-				found = found || v.TelegramChatID == attachment.TelegramChatID && v.TelegramMessageID == attachment.TelegramMessageID
-			}
-			if !found {
-				d.Attachments = append(d.Attachments, attachment)
-			}
-		}
-		if err := a.saveDraft(ctx, m.From.ID, d); err != nil {
-			return err
-		}
-		a.cleanupBestEffort(ctx, scope(m.From.ID, m), "draft")
-		return a.confirmDraft(ctx, m, d)
+		return a.appendDraft(ctx, m, d)
 	}
 	t, err := a.store.ActiveTicket(ctx, m.From.ID)
 	if err != nil {
@@ -709,7 +735,25 @@ func (a *Adapter) receive(ctx context.Context, m *Message, t domain.Ticket, publ
 		return a.say(ctx, m, "Этот формат не поддерживается. Отправьте текст, фото, документ, голосовое или видео.", nil)
 	}
 	if err := a.service.AddMessage(ctx, m.From.ID, t.ID, msg, public); err != nil {
-		return err
+		if !errors.Is(err, domain.ErrConflict) || m.ID == 0 {
+			return err
+		}
+		// The transaction may have committed before FinishUpdate failed. A
+		// confirmed source is a receipt, not a new business conflict for the user.
+		messages, lookupErr := a.store.Messages(ctx, t.ID)
+		if lookupErr != nil {
+			return lookupErr
+		}
+		accepted := false
+		for _, saved := range messages {
+			if saved.AuthorID == m.From.ID && saved.TelegramChatID == m.Chat.ID && saved.TelegramMessageID == m.ID && (saved.Direction == "inbound" || saved.Direction == "outbound") {
+				accepted = true
+				break
+			}
+		}
+		if !accepted {
+			return err
+		}
 	}
 	if msg.FileSize > 20<<20 {
 		return a.say(ctx, m, "Вложение больше 20 МБ: оно передано, но не может быть скачано в независимый архив стандартным Bot API. Отправьте меньший файл или согласуйте другой способ передачи с поддержкой. Топик не будет удалён без архива.", nil)

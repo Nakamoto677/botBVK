@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"strings"
 	"time"
 )
 
@@ -34,6 +35,15 @@ func (a *Adapter) processUpdate(ctx context.Context, entry domain.StoredUpdate) 
 		err = a.Handle(ctx, u)
 		a.activeUpdate = 0
 		a.activeActor = 0
+	}
+	var contention *pgconn.PgError
+	if errors.As(err, &contention) && (contention.Code == "40001" || contention.Code == "40P01") {
+		if retry, ok := a.store.(domain.RetryInbox); ok {
+			// PostgreSQL rolled back this transaction. Keep the update pending;
+			// contention must not be reported as a completed business conflict.
+			return retry.RetryUpdate(ctx, entry.ID, "transaction contention", 100*time.Millisecond, false)
+		}
+		return err
 	}
 	if err == nil || businessError(err) {
 		if err != nil {
@@ -79,34 +89,81 @@ func (a *Adapter) processUpdate(ctx context.Context, entry domain.StoredUpdate) 
 	return nil
 }
 
-func (a *Adapter) queueScreen(ctx context.Context, m *Message, actor int64, scenario, text string, markup any) error {
+func (a *Adapter) queueScreen(ctx context.Context, m *Message, actor int64, scenario, text string, markup any, descriptionGeneration ...string) error {
 	if a.activeActor != 0 {
 		actor = a.activeActor
 	}
 	a.screenSequence++
-	raw, _ := json.Marshal(map[string]any{"user_id": actor, "chat_id": m.Chat.ID, "topic_id": m.ThreadID, "text": text, "markup": markup, "scenario": clientAuxScenario(m, scenario, text), "ui_key": fmt.Sprintf("%d:%d", a.activeUpdate, a.screenSequence)})
+	payload := map[string]any{"user_id": actor, "chat_id": m.Chat.ID, "topic_id": m.ThreadID, "text": text, "markup": markup, "scenario": clientAuxScenario(m, scenario, text), "ui_key": fmt.Sprintf("%d:%d", a.activeUpdate, a.screenSequence)}
+	var available time.Time
+	if len(descriptionGeneration) > 0 {
+		payload["draft_generation"] = descriptionGeneration[0]
+		payload["draft_step"] = "description"
+		available = time.Now().Add(350 * time.Millisecond)
+	}
+	if buttons, ok := markup.(Markup); ok && m.Chat.Type == "private" {
+		for _, row := range buttons.Buttons {
+			for _, button := range row {
+				if strings.HasPrefix(button.Data, "submit:") {
+					payload["draft_generation"] = strings.TrimPrefix(button.Data, "submit:")
+					// Briefly collect consecutive messages before showing their preview.
+					available = time.Now().Add(350 * time.Millisecond)
+				}
+			}
+		}
+	}
+	raw, _ := json.Marshal(payload)
 	return a.store.Transact(ctx, func(tx domain.Tx) error {
-		return tx.Enqueue(ctx, domain.Operation{Kind: "ui_screen", Payload: raw, State: "pending"})
+		return tx.Enqueue(ctx, domain.Operation{Kind: "ui_screen", Payload: raw, State: "pending", AvailableAt: available})
 	})
 }
 
 func (w *Worker) uiScreen(ctx context.Context, op domain.Operation) error {
 	var p struct {
-		UserID   int64           `json:"user_id"`
-		ChatID   int64           `json:"chat_id"`
-		TopicID  int64           `json:"topic_id"`
-		Text     string          `json:"text"`
-		Markup   json.RawMessage `json:"markup"`
-		Scenario string          `json:"scenario"`
+		UserID          int64           `json:"user_id"`
+		ChatID          int64           `json:"chat_id"`
+		TopicID         int64           `json:"topic_id"`
+		Text            string          `json:"text"`
+		Markup          json.RawMessage `json:"markup"`
+		Scenario        string          `json:"scenario"`
+		DraftGeneration string          `json:"draft_generation"`
+		DraftStep       string          `json:"draft_step"`
 	}
 	if json.Unmarshal(op.Payload, &p) != nil {
 		return domain.ErrInvalid
+	}
+	current := func() (bool, error) {
+		if p.DraftGeneration == "" {
+			return true, nil
+		}
+		store, ok := w.store.(domain.BoundDraftStore)
+		if !ok {
+			return true, nil
+		}
+		d, err := store.LoadDraft(ctx, p.UserID)
+		if errors.Is(err, domain.ErrNotFound) {
+			return false, nil
+		}
+		step := p.DraftStep
+		if step == "" {
+			step = "confirm"
+		}
+		return d.Generation == p.DraftGeneration && d.Step == step, err
+	}
+	if valid, err := current(); err != nil || !valid {
+		return err
 	}
 	parts := splitText(p.Text, messageLimit)
 	for i, text := range parts {
 		sent, err := w.confirmedPart(ctx, fmt.Sprintf("ui:%d", op.ID), i, func() (Message, error) {
 			if err := w.rate(ctx, p.ChatID); err != nil {
 				return Message{}, err
+			}
+			if valid, err := current(); err != nil || !valid {
+				if err != nil {
+					return Message{}, err
+				}
+				return Message{}, errObsoleteScreen
 			}
 			payload := map[string]any{"chat_id": p.ChatID, "text": text}
 			if p.TopicID != 0 {
@@ -119,6 +176,9 @@ func (w *Worker) uiScreen(ctx context.Context, op domain.Operation) error {
 			err := w.client.Call(ctx, "sendMessage", payload, &result)
 			return result, err
 		})
+		if errors.Is(err, errObsoleteScreen) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
@@ -130,3 +190,5 @@ func (w *Worker) uiScreen(ctx context.Context, op domain.Operation) error {
 	}
 	return nil
 }
+
+var errObsoleteScreen = errors.New("obsolete queued screen")

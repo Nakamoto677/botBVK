@@ -8,9 +8,51 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 )
 
-const draftDescriptionText = "Опишите проблему текстом или подписью к вложению. Вложение сохранится вместе с заявкой."
+const draftDescriptionText = "Опишите проблему одним или несколькими сообщениями. Можно добавить вложения. Когда всё готово, нажмите «Отправить»."
+
+func (a *Adapter) appendDraft(ctx context.Context, m *Message, d draft) error {
+	for _, id := range d.MessageIDs {
+		if m.ID != 0 && id == m.ID {
+			return a.confirmDraft(ctx, m, d)
+		}
+	}
+	text := strings.TrimSpace(messageText(m))
+	attachment := normalise(m, false)
+	if text == "" && attachment.FileID == "" {
+		return a.say(ctx, m, "Добавьте описание текстом или подписью к вложению.", nil)
+	}
+	if text != "" {
+		if d.Text != "" {
+			d.Text += "\n\n"
+		}
+		d.Text += text
+	}
+	if attachment.FileID != "" {
+		found := false
+		for _, v := range d.Attachments {
+			found = found || v.TelegramChatID == attachment.TelegramChatID && v.TelegramMessageID == attachment.TelegramMessageID
+		}
+		if !found {
+			d.Attachments = append(d.Attachments, attachment)
+		}
+	}
+	if m.ID != 0 {
+		d.MessageIDs = append(d.MessageIDs, m.ID)
+	}
+	d.Generation = a.formGeneration(m)
+	d.Step = "confirm"
+	if d.Text == "" {
+		d.Step = "description"
+	}
+	if err := a.saveDraft(ctx, m.From.ID, d); err != nil {
+		return err
+	}
+	a.cleanupBestEffort(ctx, scope(m.From.ID, m), "draft")
+	return a.confirmDraft(ctx, m, d)
+}
 
 func draftGeneration() string {
 	var b [12]byte
@@ -82,6 +124,13 @@ func (a *Adapter) resumeDraft(ctx context.Context, m *Message) error {
 	return a.clientScreen(ctx, m, "draft", draftDescriptionText, clientDraftKeyboard)
 }
 func (a *Adapter) confirmDraft(ctx context.Context, m *Message, d draft) error {
+	if d.Text == "" {
+		text := fmt.Sprintf("Вложений принято: %d. Теперь опишите проблему текстом.", len(d.Attachments))
+		if a.activeUpdate != 0 {
+			return a.queueScreen(ctx, m, m.From.ID, "draft", text, nil, d.Generation)
+		}
+		return a.say(ctx, m, text, nil)
+	}
 	text := "Создать заявку?\n" + previewText(d.Text, 3000)
 	if len(d.Attachments) > 0 {
 		text += fmt.Sprintf("\nВложений принято: %d. Они сохранятся вместе с заявкой.", len(d.Attachments))

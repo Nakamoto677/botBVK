@@ -103,10 +103,13 @@ class ImportTests(unittest.TestCase):
             overview = next(t['id'] for t in support['tabs'] if t['name'] == 'Обзор')
             overview_cards = [dc['card_id'] for dc in support['dashcards'] if dc['dashboard_tab_id'] == overview]
             self.assertEqual(4, sum(ident in overview_cards for key,ident in first['cards'].items() if key.endswith('_count')))
-            # Every tab retains freshness and no two tiles overlap after repeat imports.
+            self.assertEqual({first['cards'][key] for key in ('received_count','closed_count','cancelled_count','active_now_count')},
+                             {ident for ident in overview_cards if ident in {first['cards'][key] for key in ('received_count','closed_count','cancelled_count','active_now_count')}})
+            # No two tiles overlap after repeat imports.
             for tab in support['tabs']:
                 tiles=[dc for dc in support['dashcards'] if dc['dashboard_tab_id']==tab['id']]
-                self.assertIn(first['cards']['status'], [dc['card_id'] for dc in tiles])
+                self.assertNotIn(first['cards']['freshness'], [dc['card_id'] for dc in tiles])
+                self.assertNotIn(first['cards']['first_response'], [dc['card_id'] for dc in tiles])
                 for i,a in enumerate(tiles):
                     for b in tiles[i+1:]:
                         self.assertFalse(a['col'] < b['col']+b['size_x'] and b['col'] < a['col']+a['size_x'] and a['row'] < b['row']+b['size_y'] and b['row'] < a['row']+a['size_y'])
@@ -114,6 +117,22 @@ class ImportTests(unittest.TestCase):
                 click = dc["visualization_settings"].get("click_behavior")
                 if click:
                     self.assertEqual(parameters, set(click["parameterMapping"]))
+            flow = next(dc for dc in support['dashcards'] if dc['card_id']==first['cards']['flow'])
+            company = next(dc for dc in support['dashcards'] if dc['card_id']==first['cards']['received_company'])
+            department = next(dc for dc in support['dashcards'] if dc['card_id']==first['cards']['received_department'])
+            self.assertEqual(20, flow['size_x'])
+            self.assertEqual(24, company['size_x'])
+            self.assertGreaterEqual(company['row'], department['row']+department['size_y'])
+            self.assertEqual(['Дата / период','Поступило','Закрыто','Отменено','Открытые'],
+                             [c['name'] for c in flow['visualization_settings']['table.columns'] if c['enabled']])
+            for column in ('Поступило','Закрыто','Отменено'):
+                setting = flow['visualization_settings']['column_settings'][json.dumps(['name',column],ensure_ascii=False)]
+                self.assertNotIn('show_mini_bar', setting)
+                click = setting['click_behavior']
+                self.assertEqual(parameters | {'row_start','row_end'}, set(click['parameterMapping']))
+            open_click = flow['visualization_settings']['column_settings'][json.dumps(['name','Открытые'],ensure_ascii=False)]['click_behavior']
+            self.assertEqual(parameters, set(open_click['parameterMapping']))
+            self.assertEqual({'type':'column','id':'Конец строки'}, open_click['parameterMapping']['end_date']['source'])
 
     def test_tags_are_stable_and_ticket_number_is_required(self):
         tags = module.tags("SELECT {{ticket_id}}, [[ {{start_date}} ]] {{ticket_id}}")

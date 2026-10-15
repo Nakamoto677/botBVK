@@ -36,6 +36,9 @@ var engineerCardsMigration string
 //go:embed company_sync.sql
 var companySyncMigration string
 
+//go:embed burst_delivery.sql
+var burstDeliveryMigration string
+
 type Store struct{ pool *pgxpool.Pool }
 type transaction struct{ tx pgx.Tx }
 
@@ -117,6 +120,16 @@ func (s *Store) Migrate(ctx context.Context) error {
 		if marker.RowsAffected() != 0 {
 			_, err = tx.Exec(ctx, companySyncMigration)
 		}
+		if err != nil {
+			return err
+		}
+		marker, err = tx.Exec(ctx, "INSERT INTO bvk_migrations(version) VALUES('008_burst_delivery') ON CONFLICT DO NOTHING")
+		if err != nil {
+			return err
+		}
+		if marker.RowsAffected() != 0 {
+			_, err = tx.Exec(ctx, burstDeliveryMigration)
+		}
 		return err
 	})
 }
@@ -127,7 +140,7 @@ func mapError(err error) error {
 	var pg *pgconn.PgError
 	if errors.As(err, &pg) {
 		switch pg.Code {
-		case "23505", "40001", "40P01":
+		case "23505":
 			return fmt.Errorf("%w: %s", domain.ErrConflict, pg.Message)
 		case "23503", "23514":
 			return fmt.Errorf("%w: %s", domain.ErrInvalid, pg.Message)
@@ -183,13 +196,13 @@ func listJSON[T any](ctx context.Context, q querier, sql string, args ...any) ([
 	return result, rows.Err()
 }
 func (t *transaction) GetUser(ctx context.Context, id int64) (domain.User, error) {
-	if _, err := t.tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", id); err != nil {
+	if _, err := t.tx.Exec(ctx, "SELECT pg_advisory_xact_lock(-$1::bigint)", id); err != nil {
 		return domain.User{}, err
 	}
 	return readJSON[domain.User](ctx, t.tx, "SELECT payload FROM bvk_users WHERE id=$1 FOR UPDATE", id)
 }
 func (t *transaction) SaveUser(ctx context.Context, u domain.User) error {
-	if _, err := t.tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", u.ID); err != nil {
+	if _, err := t.tx.Exec(ctx, "SELECT pg_advisory_xact_lock(-$1::bigint)", u.ID); err != nil {
 		return err
 	}
 	raw, err := json.Marshal(u)
@@ -211,7 +224,7 @@ func (t *transaction) SaveTicket(ctx context.Context, v *domain.Ticket) error {
 	}
 	copy := *v
 	if copy.ID == 0 {
-		if _, err := t.tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", copy.ClientID); err != nil {
+		if _, err := t.tx.Exec(ctx, "SELECT pg_advisory_xact_lock(-$1::bigint)", copy.ClientID); err != nil {
 			return err
 		}
 		if err := t.tx.QueryRow(ctx, "SELECT nextval(pg_get_serial_sequence('bvk_tickets','id'))").Scan(&copy.ID); err != nil {
@@ -324,6 +337,17 @@ func (t *transaction) AddEvent(ctx context.Context, v domain.Event) error {
 	return mapError(err)
 }
 func (t *transaction) Enqueue(ctx context.Context, v domain.Operation) error {
+	if v.Kind == "refresh_card" && v.TicketID != 0 {
+		// Lock and recheck the pending row against a concurrent lease. A refresh
+		// already being processed must never absorb a later state change.
+		tag, err := t.tx.Exec(ctx, "UPDATE bvk_outbox SET payload=payload WHERE ticket_id=$1 AND kind='refresh_card' AND state='pending'", v.TicketID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() > 0 {
+			return nil
+		}
+	}
 	// Scheduling and leasing must share the database clock. Even small host/DB
 	// clock skew can otherwise make an immediate operation appear in the future.
 	var available *time.Time
@@ -333,7 +357,7 @@ func (t *transaction) Enqueue(ctx context.Context, v domain.Operation) error {
 	if len(v.Payload) == 0 {
 		v.Payload = json.RawMessage(`{}`)
 	}
-	_, err := t.tx.Exec(ctx, "INSERT INTO bvk_outbox(kind,ticket_id,payload,available_at) VALUES($1,$2,$3,COALESCE($4::timestamptz,now())) ON CONFLICT DO NOTHING", v.Kind, v.TicketID, v.Payload, available)
+	_, err := t.tx.Exec(ctx, "INSERT INTO bvk_outbox(kind,ticket_id,payload,available_at,conversation_id) VALUES($1,$2,$3,COALESCE($4::timestamptz,now()),COALESCE((SELECT client_id FROM bvk_tickets WHERE id=$2),NULLIF(($3::jsonb->>'user_id')::bigint,0),CASE WHEN ($3::jsonb->>'chat_id')::bigint>0 THEN ($3::jsonb->>'chat_id')::bigint END,0)) ON CONFLICT DO NOTHING", v.Kind, v.TicketID, v.Payload, available)
 	return err
 }
 func (t *transaction) RequestAccess(ctx context.Context, userID, companyID int64) error {
@@ -403,6 +427,15 @@ func (s *Store) Messages(ctx context.Context, id int64) ([]domain.Message, error
 func (s *Store) Events(ctx context.Context, id int64) ([]domain.Event, error) {
 	return listJSON[domain.Event](ctx, s.pool, "SELECT payload FROM bvk_events WHERE ticket_id=$1 ORDER BY id", id)
 }
+
+// Cleanup must read through the transaction already holding the ticket lock;
+// borrowing a second connection can exhaust a small pool under concurrent jobs.
+func (t *transaction) Messages(ctx context.Context, id int64) ([]domain.Message, error) {
+	return listJSON[domain.Message](ctx, t.tx, "SELECT payload FROM bvk_messages WHERE ticket_id=$1 ORDER BY id", id)
+}
+func (t *transaction) Events(ctx context.Context, id int64) ([]domain.Event, error) {
+	return listJSON[domain.Event](ctx, t.tx, "SELECT payload FROM bvk_events WHERE ticket_id=$1 ORDER BY id", id)
+}
 func (s *Store) Companies(ctx context.Context) ([]domain.Company, error) {
 	rows, err := s.pool.Query(ctx, "SELECT id,name FROM bvk_companies WHERE registration_active ORDER BY registration_order,id")
 	if err != nil {
@@ -452,7 +485,7 @@ func (s *Store) PendingUpdates(ctx context.Context, limit int) ([]domain.StoredU
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := s.pool.Query(ctx, "SELECT candidate.id,candidate.payload,candidate.attempts FROM bvk_updates candidate WHERE NOT candidate.finished AND NOT candidate.quarantined AND candidate.available_at<=now() AND NOT EXISTS (SELECT 1 FROM bvk_updates older WHERE older.id<candidate.id AND NOT older.finished AND bvk_update_keys(older.payload) && bvk_update_keys(candidate.payload)) ORDER BY candidate.id LIMIT $1", limit)
+	rows, err := s.pool.Query(ctx, "WITH pending AS MATERIALIZED (SELECT id,payload,attempts,quarantined,available_at,bvk_update_keys(payload) AS keys FROM bvk_updates WHERE NOT finished) SELECT candidate.id,candidate.payload,candidate.attempts FROM pending candidate WHERE NOT candidate.quarantined AND candidate.available_at<=now() AND NOT EXISTS (SELECT 1 FROM pending older WHERE older.id<candidate.id AND older.keys && candidate.keys) ORDER BY candidate.id LIMIT $1", limit)
 	if err != nil {
 		return nil, err
 	}
@@ -480,8 +513,17 @@ func (s *Store) LastUpdateID(ctx context.Context) (int64, error) {
 	return id, err
 }
 func (s *Store) NextOperation(ctx context.Context) (domain.Operation, error) {
+	return s.NextOperationExcluding(ctx, []int64{})
+}
+
+// A single-active bot may spend longer than its crash-recovery lease replaying
+// a large conversation. Never reclaim a job still running in this dispatcher.
+func (s *Store) NextOperationExcluding(ctx context.Context, active []int64) (domain.Operation, error) {
+	if active == nil {
+		active = []int64{}
+	}
 	var v domain.Operation
-	err := s.pool.QueryRow(ctx, `WITH picked AS (SELECT candidate.id FROM bvk_outbox candidate WHERE ((candidate.state='pending' AND candidate.available_at<=now()) OR (candidate.state='processing' AND candidate.lease_until<=now())) AND NOT EXISTS (SELECT 1 FROM bvk_outbox older WHERE ((candidate.ticket_id<>0 AND older.ticket_id=candidate.ticket_id) OR (candidate.kind='ui_screen' AND older.kind='ui_screen' AND candidate.payload->>'user_id'=older.payload->>'user_id')) AND older.id<candidate.id AND older.state IN ('pending','processing')) ORDER BY candidate.available_at,candidate.id FOR UPDATE OF candidate SKIP LOCKED LIMIT 1) UPDATE bvk_outbox o SET state='processing',attempts=o.attempts+1,lease_until=now()+interval '5 minutes' FROM picked WHERE o.id=picked.id RETURNING o.id,o.kind,o.ticket_id,o.payload,o.attempts,o.available_at,o.last_error,o.state`).Scan(&v.ID, &v.Kind, &v.TicketID, &v.Payload, &v.Attempts, &v.AvailableAt, &v.LastError, &v.State)
+	err := s.pool.QueryRow(ctx, `WITH picked AS (SELECT candidate.id FROM bvk_outbox candidate WHERE candidate.id <> ALL($1::bigint[]) AND ((candidate.state='pending' AND candidate.available_at<=now()) OR (candidate.state='processing' AND candidate.lease_until<=now())) AND NOT EXISTS (SELECT 1 FROM bvk_outbox older WHERE ((candidate.ticket_id<>0 AND older.ticket_id=candidate.ticket_id) OR (candidate.conversation_id<>0 AND older.conversation_id=candidate.conversation_id)) AND older.id<candidate.id AND older.state IN ('pending','processing')) ORDER BY candidate.available_at,candidate.id FOR UPDATE OF candidate SKIP LOCKED LIMIT 1) UPDATE bvk_outbox o SET state='processing',attempts=o.attempts+1,lease_until=now()+interval '5 minutes' FROM picked WHERE o.id=picked.id RETURNING o.id,o.kind,o.ticket_id,o.payload,o.attempts,o.available_at,o.last_error,o.state`, active).Scan(&v.ID, &v.Kind, &v.TicketID, &v.Payload, &v.Attempts, &v.AvailableAt, &v.LastError, &v.State)
 	return v, mapError(err)
 }
 func (s *Store) FinishOperation(ctx context.Context, id int64) error {

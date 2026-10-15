@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"bot-bvk/internal/domain"
@@ -22,75 +23,160 @@ type Worker struct {
 	client   *Client
 	store    domain.Store
 	cfg      Config
-	lastChat map[int64]time.Time
+	rates    *deliveryRates
 	interval time.Duration
 }
 
 func NewWorker(c *Client, s domain.Store, cfg Config) *Worker {
-	return &Worker{client: c, store: s, cfg: cfg, lastChat: make(map[int64]time.Time), interval: 3100 * time.Millisecond}
+	return &Worker{client: c, store: s, cfg: cfg, rates: &deliveryRates{lastChat: make(map[int64]time.Time)}, interval: 3100 * time.Millisecond}
 }
-func (w *Worker) Run(ctx context.Context) error {
-	for ctx.Err() == nil {
-		op, err := w.store.NextOperation(ctx)
-		if errors.Is(err, domain.ErrNotFound) {
-			if !pause(ctx, time.Second) {
-				break
-			}
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		if err = w.Handle(ctx, op); err != nil {
-			dead := false
-			delay := time.Duration(1<<min(op.Attempts, 8)) * time.Second
-			var api *APIError
-			if errors.As(err, &api) {
-				if api.RetryAfter > 0 {
-					delay = time.Duration(api.RetryAfter) * time.Second
-				}
-				dead = (api.Code >= 400 && api.Code < 500 && api.Code != 429) || (op.Kind == "create_topic" && api.Ambiguous)
-			}
-			if errors.Is(err, domain.ErrInvalid) || errors.Is(err, domain.ErrForbidden) {
-				dead = true
-			}
-			dead = dead || op.Attempts >= 12
-			if op.Kind == "delete_topic" && !errors.Is(err, domain.ErrInvalid) && !errors.Is(err, domain.ErrForbidden) {
-				dead = false
-				if op.Attempts == 0 || op.Attempts == 11 || op.Attempts > 0 && op.Attempts%100 == 0 {
-					if e := w.notifyAdmins(ctx, fmt.Sprintf("Удаление прежнего топика заявки #%d отложено: %s. Бот продолжит автоматически после восстановления доступа.", op.TicketID, err)); e != nil {
-						return e
-					}
-				}
-			}
-			if op.Kind == "client_message" && (op.Attempts <= 1 || dead) {
-				if e := w.notifyAuthor(ctx, op, err, dead); e != nil {
-					return e
-				}
-			}
-			if e := w.store.RetryOperation(ctx, op.ID, err.Error(), delay, dead); e != nil {
-				return e
-			}
-			if dead && op.Kind != "access_notification" {
-				if e := w.notifyAdmins(ctx, fmt.Sprintf("Ошибка операции %d (%s), заявка #%d. Требуется проверка: %s", op.ID, op.Kind, op.TicketID, err)); e != nil {
-					return e
-				}
-			}
 
-		} else if err = w.store.FinishOperation(ctx, op.ID); err != nil {
-			return err
+// Each operation has isolated send-progress state. The database fences ticket
+// and conversation order; all jobs share the same per-chat rate limiter.
+func (w *Worker) Run(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type result struct {
+		id  int64
+		err error
+	}
+	results := make(chan result, 4)
+	active := make(map[int64]bool)
+	running := 0
+	defer func() {
+		cancel()
+		for running > 0 {
+			<-results
+			running--
+		}
+	}()
+	for ctx.Err() == nil {
+		if running < 4 {
+			var op domain.Operation
+			var err error
+			if queue, ok := w.store.(interface {
+				NextOperationExcluding(context.Context, []int64) (domain.Operation, error)
+			}); ok {
+				ids := make([]int64, 0, len(active))
+				for id := range active {
+					ids = append(ids, id)
+				}
+				op, err = queue.NextOperationExcluding(ctx, ids)
+			} else {
+				op, err = w.store.NextOperation(ctx)
+			}
+			if err == nil {
+				running++
+				active[op.ID] = true
+				job := *w
+				go func() { results <- result{op.ID, job.runOperation(ctx, op)} }()
+				continue
+			}
+			if !errors.Is(err, domain.ErrNotFound) {
+				return err
+			}
+		}
+		timer := time.NewTimer(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case result := <-results:
+			timer.Stop()
+			running--
+			delete(active, result.id)
+			if result.err != nil {
+				return result.err
+			}
+		case <-timer.C:
 		}
 	}
 	return ctx.Err()
 }
-func (w *Worker) rate(ctx context.Context, chat int64) error {
-	wait := time.Until(w.lastChat[chat].Add(w.interval))
-	if wait > 0 && !pause(ctx, wait) {
-		return ctx.Err()
+
+func (w *Worker) runOperation(ctx context.Context, op domain.Operation) error {
+	if err := w.Handle(ctx, op); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		dead := false
+		delay := time.Duration(1<<min(op.Attempts, 8)) * time.Second
+		var api *APIError
+		if errors.As(err, &api) {
+			if api.RetryAfter > 0 {
+				delay = time.Duration(api.RetryAfter) * time.Second
+			}
+			dead = (api.Code >= 400 && api.Code < 500 && api.Code != 429) || (op.Kind == "create_topic" && api.Ambiguous)
+		}
+		if errors.Is(err, domain.ErrInvalid) || errors.Is(err, domain.ErrForbidden) {
+			dead = true
+		}
+		dead = dead || op.Attempts >= 12
+		if op.Kind == "delete_topic" && !errors.Is(err, domain.ErrInvalid) && !errors.Is(err, domain.ErrForbidden) {
+			dead = false
+			if op.Attempts == 0 || op.Attempts == 11 || op.Attempts > 0 && op.Attempts%100 == 0 {
+				if e := w.notifyAdmins(ctx, fmt.Sprintf("Удаление прежнего топика заявки #%d отложено: %s. Бот продолжит автоматически после восстановления доступа.", op.TicketID, err)); e != nil {
+					return e
+				}
+			}
+		}
+		if op.Kind == "client_message" && (op.Attempts <= 1 || dead) {
+			if e := w.notifyAuthor(ctx, op, err, dead); e != nil {
+				return e
+			}
+		}
+		if e := w.store.RetryOperation(ctx, op.ID, err.Error(), delay, dead); e != nil {
+			return e
+		}
+		if dead && op.Kind != "access_notification" {
+			if e := w.notifyAdmins(ctx, fmt.Sprintf("Ошибка операции %d (%s), заявка #%d. Требуется проверка: %s", op.ID, op.Kind, op.TicketID, err)); e != nil {
+				return e
+			}
+		}
+
+	} else if err = w.store.FinishOperation(ctx, op.ID); err != nil {
+		return err
 	}
-	w.lastChat[chat] = time.Now()
 	return nil
 }
+
+type deliveryRates struct {
+	mu       sync.Mutex
+	lastChat map[int64]time.Time
+	global   time.Time
+}
+
+func (w *Worker) rate(ctx context.Context, chat int64) error {
+	// Reserve a slot while holding the lock, then wait without blocking other chats.
+	w.rates.mu.Lock()
+	interval := w.interval
+	if chat > 0 && interval > 1100*time.Millisecond {
+		interval = 1100 * time.Millisecond
+	}
+	at := time.Now()
+	if next := w.rates.lastChat[chat].Add(interval); next.After(at) {
+		at = next
+	}
+	w.rates.lastChat[chat] = at
+	w.rates.mu.Unlock()
+	if wait := time.Until(at); wait > 0 && !pause(ctx, wait) {
+		return ctx.Err()
+	}
+	if w.interval > 0 {
+		w.rates.mu.Lock()
+		at = time.Now()
+		if next := w.rates.global.Add(35 * time.Millisecond); next.After(at) {
+			at = next
+		}
+		w.rates.global = at
+		w.rates.mu.Unlock()
+		if wait := time.Until(at); wait > 0 && !pause(ctx, wait) {
+			return ctx.Err()
+		}
+	}
+	return ctx.Err()
+}
+
 func (w *Worker) send(ctx context.Context, chat, topic int64, text string, buttons [][]Button) (Message, error) {
 	if w.currentOperation > 0 {
 		hash := sha256.Sum256([]byte(fmt.Sprintf("%d:%d:%s", chat, topic, text)))
@@ -477,7 +563,12 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 				}
 				return e
 			}
-			if e = topicDeleteError(w.client.Call(ctx, "deleteForumTopic", map[string]any{"chat_id": payload.ChatID, "message_thread_id": payload.TopicID}, nil)); e != nil {
+			// This call holds the inbox/archive fence. Bound network waiting so
+			// Telegram trouble cannot stall acceptance for the client's 65s timeout.
+			deleteCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			e = topicDeleteError(w.client.Call(deleteCtx, "deleteForumTopic", map[string]any{"chat_id": payload.ChatID, "message_thread_id": payload.TopicID}, nil))
+			cancel()
+			if e != nil {
 				return e
 			}
 			if now.TopicChatID == payload.ChatID && now.TopicID == payload.TopicID && !now.Status.Active() {
@@ -860,19 +951,23 @@ func (w *Worker) replayDeferred(ctx context.Context, t domain.Ticket) error {
 		if e != nil {
 			return e
 		}
+		current, e := w.store.Ticket(ctx, t.ID)
+		if e != nil {
+			return e
+		}
+		if current.Department != t.Department || current.TopicID != t.TopicID || current.TopicChatID != t.TopicChatID || !provisioningStatus(current.Status) || current.RoutingGeneration != t.RoutingGeneration || current.AssigneeID != t.AssigneeID {
+			return domain.ErrConflict
+		}
+		// RoutingPending forbids transfer; a concurrent close is queued behind
+		// this operation. Send to the captured topic without holding a row lock
+		// during rate waits/network I/O, then record the actual destination even
+		// if the ticket was completed meanwhile. Cleanup waits for this operation.
+		sent, e := w.deliverNamed(ctx, t.TopicChatID, t.TopicID, m, name)
+		if e != nil {
+			return e
+		}
+		data, _ := json.Marshal(map[string]any{"source_message_id": m.ID, "telegram_chat_id": t.TopicChatID, "telegram_topic_id": t.TopicID, "telegram_message_id": sent.ID, "direction": "inbound"})
 		err = w.store.Transact(ctx, func(tx domain.Tx) error {
-			current, e := tx.GetTicket(ctx, t.ID)
-			if e != nil {
-				return e
-			}
-			if current.Department != t.Department || current.TopicID != t.TopicID || current.TopicChatID != t.TopicChatID || !provisioningStatus(current.Status) || current.RoutingGeneration != t.RoutingGeneration || current.AssigneeID != t.AssigneeID {
-				return domain.ErrConflict
-			}
-			sent, e := w.deliverNamed(ctx, t.TopicChatID, t.TopicID, m, name)
-			if e != nil {
-				return e
-			}
-			data, _ := json.Marshal(map[string]any{"source_message_id": m.ID, "telegram_chat_id": t.TopicChatID, "telegram_topic_id": t.TopicID, "telegram_message_id": sent.ID, "direction": "inbound"})
 			return tx.AddEvent(ctx, domain.Event{TicketID: t.ID, ActorID: m.AuthorID, Kind: "message_delivered", Data: data, CreatedAt: time.Now().UTC()})
 		})
 		if err != nil {

@@ -188,7 +188,7 @@ func TestSingletonAndRepeatableSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer held.Rollback(ctx)
-	if _, err = held.Exec(ctx, "SELECT pg_advisory_xact_lock(731903)"); err != nil {
+	if _, err = held.Exec(ctx, "SELECT pg_advisory_xact_lock(731904)"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = s.Refresh(ctx, options()); err != ErrBusy {
@@ -244,5 +244,23 @@ func TestMetabasePermissions(t *testing.T) {
 		if _, err = conn.Exec(ctx, q); err == nil {
 			t.Fatal("forbidden query allowed", q)
 		}
+	}
+}
+
+func TestAnalyticsDoesNotShareInboxArchiveFence(t *testing.T) {
+	s := integrationStore(t)
+	fixture(t, s)
+	ctx := t.Context()
+	held, err := s.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Rollback(ctx)
+	// Inbox acceptance takes this shared fence. It must not suppress analytics.
+	if _, err = held.Exec(ctx, "SELECT pg_advisory_xact_lock_shared(731903)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.Refresh(ctx, options()); err != nil {
+		t.Fatalf("analytics collided with inbox: %v", err)
 	}
 }

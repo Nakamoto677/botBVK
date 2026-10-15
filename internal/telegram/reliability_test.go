@@ -302,6 +302,26 @@ func TestPermanentUpdateDoesNotStopPollingOrOtherClients(t *testing.T) {
 				w.Write([]byte(`{"ok":true,"result":[{"update_id":1,"message":{"message_id":1,"from":{"id":99},"chat":{"id":99,"type":"private"},"text":"/report"}},{"update_id":2,"message":{"message_id":2,"from":{"id":99},"chat":{"id":99,"type":"private"},"text":"/report"}},{"update_id":3,"message":{"message_id":3,"from":{"id":1},"chat":{"id":1,"type":"private"},"text":"/new"}}]}`))
 				return
 			}
+			deadline := time.NewTimer(5 * time.Second)
+			defer deadline.Stop()
+			tick := time.NewTicker(10 * time.Millisecond)
+			defer tick.Stop()
+			for {
+				d, e := store.LoadDraft(context.Background(), 1)
+				pending, pendingErr := store.PendingUpdates(context.Background(), 100)
+				if e == nil && d.Step == "department" && pendingErr == nil && len(pending) == 0 {
+					break
+				}
+				select {
+				case <-deadline.C:
+					t.Error("independent update was not processed")
+					cancel()
+					return
+				case <-ctx.Done():
+					return
+				case <-tick.C:
+				}
+			}
 			cancel()
 			w.Write([]byte(`{"ok":true,"result":[]}`))
 			return
@@ -481,7 +501,7 @@ func TestDraftFileReplacementRestartSubmitAndStaleScreens(t *testing.T) {
 	callback("submit:" + d.Generation)
 	callback("submit:" + d.Generation)
 	active, err := store.ActiveTicket(ctx, 1)
-	if err != nil || active.Description != "Replacement description" {
+	if err != nil || active.Description != "File description\n\nReplacement description" {
 		t.Fatal(active, err)
 	}
 	messages, err := store.Messages(ctx, active.ID)

@@ -12,6 +12,18 @@ BOUNDS = """bounds AS (
  CASE WHEN r.snapshot_at IS NOT NULL THEN LEAST((end_day + 1)::timestamp AT TIME ZONE 'Asia/Irkutsk', r.snapshot_at) END AS hi FROM bounds CROSS JOIN analytics.refresh_state r WHERE r.id=1
 )"""
 
+# A single duration format is used by both the team and the overall summary.
+# NULL means that the underlying history is insufficient to measure a duration.
+def duration(seconds):
+    minutes = f"floor(({seconds}) / 60)::bigint"
+    hours = f"({minutes} / 60)"
+    rest = f"({minutes} % 60)"
+    return (f"CASE WHEN {seconds} IS NULL THEN NULL WHEN {seconds}<60 THEN '< 1 мин' "
+            f"WHEN {minutes}<60 THEN {minutes}||' мин' "
+            f"ELSE {hours}||' '||CASE WHEN {hours}%10=1 AND {hours}%100<>11 THEN 'час' "
+            f"WHEN {hours}%10 BETWEEN 2 AND 4 AND {hours}%100 NOT BETWEEN 12 AND 14 THEN 'часа' ELSE 'часов' END "
+            f"||CASE WHEN {rest}=0 THEN '' ELSE ' '||{rest}||' мин' END END")
+
 def filters(dept='q.department', actor='q.actor_id', company='t.company_id'):
     return f"[[ AND {dept} = {{{{department}}}} ]]\n[[ AND {actor} = {{{{employee}}}} ]]\n[[ AND {company} = {{{{company}}}} ]]"
 
@@ -36,7 +48,7 @@ current = {
  'response_overdue': (f"t.status IN {ACTIVE} AND t.response_overdue", 'Нет ответа дольше порога'),
  'idle_overdue': ("t.status='in_progress' AND t.idle_overdue", 'Без активности инженера дольше порога'),
  'waiting_overdue': ("t.status='waiting_client' AND t.waiting_overdue", 'Ожидание клиента дольше порога'),
- 'attention': (f"t.status IN {ACTIVE} AND (t.no_assignee OR t.response_overdue OR t.idle_overdue OR t.waiting_overdue)", 'Сейчас: требуют внимания'),
+ 'attention': (f"t.status IN {ACTIVE} AND (t.no_assignee OR t.response_overdue OR t.idle_overdue)", 'Сейчас: требуют внимания'),
  'oldest': (f"t.status IN {ACTIVE}", 'Самые старые активные заявки'),
 }
 for key,(pred,_) in current.items():
@@ -48,6 +60,7 @@ DESCRIPTIONS={
  'cancelled':'Уникальные заявки с отменой за период; сотрудник — автор последней отмены внутри периода.',
  'reopened':'Уникальные заявки с повторным открытием за период; сотрудник — автор последнего открытия внутри периода.',
  'backlog':'Состояние непосредственно перед исключённой правой границей периода. Сотрудник — назначенный тогда. Дата создания не ограничивается.',
+ 'oldest':'Текущие незавершённые заявки от старых к новым. «Ожидает» — календарное время от последней активности до снимка данных; для заявки без действий отсчёт идёт от создания. Даты периода не ограничивают список.',
 }
 cards=[]
 def add(key,name,sql,display='table',description='',dashboard=None,tab=None,width=12,height=6,target=None):
@@ -57,7 +70,10 @@ def add(key,name,sql,display='table',description='',dashboard=None,tab=None,widt
 for key,query in cohorts.items():
     prefix='WITH '+BOUNDS+', '+CLOSED+', q AS ('+query+')\n'
     cohort=prefix+'SELECT DISTINCT q.* FROM q JOIN analytics.tickets t ON t.id=q.ticket_id WHERE true\n'+filters()
-    add(key+'_count',NAMES[key],"WITH selected AS ("+cohort+") SELECT count(*) AS \"Заявок\" FROM selected",'scalar',DESCRIPTIONS.get(key,'Текущее состояние; сотрудник — текущий назначенный. Пороги рассчитаны календарём и конфигурацией бота. Даты периода не ограничивают этот блок.'),'support','overview',6,4,key+'_list')
+    if key in ('received','closed','cancelled'):
+        cohort += "\n[[ AND q.at >= {{row_start}}::date::timestamp AT TIME ZONE 'Asia/Irkutsk' ]]\n[[ AND q.at < ({{row_end}}::date + 1)::timestamp AT TIME ZONE 'Asia/Irkutsk' ]]"
+    count_cohort=cohort if key not in ('received','closed','cancelled') else cohort.split("\n[[ AND q.at >=")[0]
+    add(key+'_count',NAMES[key],"WITH selected AS ("+count_cohort+") SELECT count(*) AS \"Заявок\" FROM selected",'scalar',DESCRIPTIONS.get(key,'Текущее состояние; сотрудник — текущий назначенный. Пороги рассчитаны календарём и конфигурацией бота. Даты периода не ограничивают этот блок.'),'support','overview',6,4,key+'_list')
     # List uses exactly the same cohort as its scalar, including historical dimensions.
     sql="WITH selected AS ("+cohort+")\n"+"""SELECT t.id AS "Номер", t.description AS "Описание", coalesce(c.name,'Компания неизвестна') AS "Компания",
  coalesce(d.name,'Отдел неизвестен') AS "Отдел отбора", coalesce(u.name,CASE WHEN s.actor_id=t.client_id THEN coalesce(nullif(t.client_name,''),'Клиент #'||s.actor_id) WHEN s.actor_id IS NOT NULL THEN 'Неизвестный участник #'||s.actor_id ELSE 'Не назначен / автор неизвестен' END) AS "Сотрудник отбора",
@@ -68,15 +84,21 @@ for key,query in cohorts.items():
  round(t.response_waiting_work_seconds::numeric/60,2) AS "Без ответа, раб. мин",
  round(t.idle_work_seconds::numeric/3600,2) AS "Без инженера, раб. ч",
  round(t.waiting_work_seconds::numeric/3600,2) AS "Ожидание клиента, раб. ч",
- concat_ws('; ',CASE WHEN t.no_assignee THEN 'Без исполнителя' END,CASE WHEN t.response_overdue THEN 'Нет ответа дольше порога' END,CASE WHEN t.idle_overdue THEN 'Без инженера дольше порога' END,CASE WHEN t.waiting_overdue THEN 'Ожидание клиента дольше порога' END) AS "Причины внимания",
+ concat_ws('; ',CASE WHEN t.no_assignee THEN 'Без исполнителя' END,CASE WHEN t.response_overdue THEN 'Нет ответа дольше порога' END,CASE WHEN t.idle_overdue THEN 'Без инженера дольше порога' END) AS "Причины внимания",
  CASE WHEN t.incomplete THEN t.quality ELSE 'Полные сведения' END AS "Качество истории"
 FROM selected s JOIN analytics.tickets t ON t.id=s.ticket_id LEFT JOIN analytics.companies c ON c.id=t.company_id
 LEFT JOIN analytics.departments d ON d.code=s.department LEFT JOIN analytics.employees u ON u.id=s.actor_id
 CROSS JOIN analytics.refresh_state r WHERE r.id=1 ORDER BY t.created_at,t.id"""
     if key=='closed':
         sql=sql.replace('t.first_response_work_seconds::numeric','cc.first_response_work_seconds::numeric')
-        sql=sql.replace('t.created_at AT TIME ZONE', 'cc.work_seconds/3600 AS "Решение, раб. ч",cc.calendar_seconds/3600 AS "Решение, кал. ч",cc.waiting_work_seconds/3600 AS "Ожидание цикла, раб. ч",cc.work_without_waiting_seconds/3600 AS "Без ожидания цикла, раб. ч", t.created_at AT TIME ZONE')
+        sql=sql.replace('t.created_at AT TIME ZONE', "coalesce("+duration('CASE WHEN NOT t.incomplete AND s.at>=t.created_at THEN EXTRACT(EPOCH FROM (s.at-t.created_at)) END')+",'—') AS \"Срок от создания\", t.created_at AT TIME ZONE")
         sql=sql.replace('FROM selected s JOIN analytics.tickets t ON t.id=s.ticket_id', 'FROM selected s JOIN analytics.tickets t ON t.id=s.ticket_id LEFT JOIN analytics.cycles cc ON cc.ticket_id=s.ticket_id AND cc.number=s.cycle_number')
+    if key=='oldest':
+        sql=sql.replace('t.description AS "Описание", ','')
+        sql=sql.replace(' t.created_at AT TIME ZONE', " coalesce("+duration('elapsed.seconds')+",'—') AS \"Ожидает\", t.created_at AT TIME ZONE")
+        sql=sql.replace('r.snapshot_at-t.created_at','elapsed.snapshot_at-t.created_at')
+        sql=sql.replace('FROM selected s JOIN analytics.tickets t ON t.id=s.ticket_id', "FROM selected s JOIN analytics.tickets t ON t.id=s.ticket_id CROSS JOIN LATERAL (SELECT r.snapshot_at,CASE WHEN r.snapshot_at>=coalesce(t.last_activity_at,t.created_at) THEN EXTRACT(EPOCH FROM (r.snapshot_at-coalesce(t.last_activity_at,t.created_at))) END AS seconds FROM analytics.refresh_state r WHERE r.id=1) elapsed")
+        sql=sql.replace('CROSS JOIN analytics.refresh_state r WHERE r.id=1 ORDER BY t.created_at,t.id','ORDER BY t.created_at,t.id')
     add(key+'_list',NAMES[key]+' — заявки',sql,description=DESCRIPTIONS.get(key,''),dashboard='attention' if key in ['unassigned','response_overdue','idle_overdue','waiting_overdue','oldest'] else None,tab='attention',width=24,height=8,target='ticket')
 
 add('freshness','Обновление и качество данных',"""SELECT snapshot_at AT TIME ZONE 'Asia/Irkutsk' AS "Снимок",completed_at AT TIME ZONE 'Asia/Irkutsk' AS "Обновлено",
@@ -87,18 +109,58 @@ add('freshness','Обновление и качество данных',"""SELEC
  last_attempt_at AT TIME ZONE 'Asia/Irkutsk' AS "Последняя попытка",last_error AS "Ошибка"
 FROM analytics.refresh_state WHERE id=1""",dashboard='support',tab='overview',width=24,height=4)
 
-add('flow','Поступления, закрытия и очередь по дням','WITH '+BOUNDS+""", days AS (SELECT generate_series(start_day::timestamp,LEAST(end_day,(SELECT (snapshot_at AT TIME ZONE 'Asia/Irkutsk')::date FROM analytics.refresh_state WHERE id=1))::timestamp,interval '1 day')::date AS day FROM bounds)
-SELECT day AS "Дата",
- (SELECT count(*) FROM analytics.tickets t LEFT JOIN LATERAL (SELECT department FROM analytics.events WHERE ticket_id=t.id AND kind='created' ORDER BY occurred_at,id LIMIT 1) e ON true
- WHERE t.created_at>=day::timestamp AT TIME ZONE 'Asia/Irkutsk' AND t.created_at<(day+1)::timestamp AT TIME ZONE 'Asia/Irkutsk'
- [[ AND e.department={{department}} ]] [[ AND t.first_assignee_id={{employee}} ]] [[ AND t.company_id={{company}} ]]) AS "Поступило",
- (SELECT count(*) FROM (SELECT DISTINCT ON(ticket_id) * FROM analytics.events WHERE kind='closed' AND occurred_at>=day::timestamp AT TIME ZONE 'Asia/Irkutsk' AND occurred_at<(day+1)::timestamp AT TIME ZONE 'Asia/Irkutsk' ORDER BY ticket_id,occurred_at DESC,id DESC) q
- JOIN analytics.tickets t ON t.id=q.ticket_id WHERE true
-"""+filters()+"""
- ) AS "Закрыто уникальных за день",
- (SELECT count(*) FROM analytics.state_intervals q JOIN analytics.tickets t ON t.id=q.ticket_id WHERE q.started_at<LEAST((day+1)::timestamp AT TIME ZONE 'Asia/Irkutsk',(SELECT snapshot_at FROM analytics.refresh_state WHERE id=1)) AND (q.ended_at IS NULL OR q.ended_at>=LEAST((day+1)::timestamp AT TIME ZONE 'Asia/Irkutsk',(SELECT snapshot_at FROM analytics.refresh_state WHERE id=1))) AND q.status IN ('new','in_progress','waiting_client')
-"""+filters(actor='q.assignee_id')+"""
- ) AS "Очередь на конец дня" FROM days ORDER BY day""",display='line',description='Сумма дневных уникальных закрытий может отличаться от уникальных закрытий за весь период: повторные циклы одной заявки.',dashboard='support',tab='overview',width=24,height=8)
+flow_parts=[]
+for kind in ('received','closed','cancelled'):
+    flow_parts.append("SELECT '"+kind+"' AS kind,q.at FROM (WITH p AS (SELECT outer_p.lo,outer_p.hi), "+CLOSED+", q AS ("+cohorts[kind]+") SELECT q.at FROM q JOIN analytics.tickets t ON t.id=q.ticket_id WHERE true\n"+filters()+") q")
+add('flow','Результаты по периодам','WITH '+BOUNDS+""", span AS (
+ SELECT (lo AT TIME ZONE 'Asia/Irkutsk')::date AS first_day,
+ CASE WHEN hi IS NOT NULL THEN ((hi-interval '1 microsecond') AT TIME ZONE 'Asia/Irkutsk')::date END AS final_day,
+ CASE WHEN hi IS NOT NULL THEN ((hi-interval '1 microsecond') AT TIME ZONE 'Asia/Irkutsk')::date-(lo AT TIME ZONE 'Asia/Irkutsk')::date+1 END AS days,
+ hi < (b.end_day+1)::timestamp AT TIME ZONE 'Asia/Irkutsk' AS partial,
+ hi IS NULL AS unavailable
+ FROM p CROSS JOIN bounds b
+), events AS (
+ SELECT kind,at FROM p outer_p CROSS JOIN LATERAL ("""+' UNION ALL '.join(flow_parts)+""") source
+), grouped AS (
+ SELECT kind,CASE WHEN s.days<=31 THEN (at AT TIME ZONE 'Asia/Irkutsk')::date
+ WHEN s.days<=90 THEN date_trunc('week',at AT TIME ZONE 'Asia/Irkutsk')::date
+ ELSE date_trunc('month',at AT TIME ZONE 'Asia/Irkutsk')::date END AS bucket
+ FROM events CROSS JOIN span s
+), totals AS (
+ SELECT bucket,count(*) FILTER(WHERE kind='received') AS received,count(*) FILTER(WHERE kind='closed') AS closed,count(*) FILTER(WHERE kind='cancelled') AS cancelled
+ FROM grouped GROUP BY bucket
+), bucket_ranges AS (
+ SELECT bucket::date AS bucket,
+ greatest(bucket::date,s.first_day) AS row_start,
+ least((bucket+CASE WHEN s.days<=31 THEN interval '0 days' WHEN s.days<=90 THEN interval '6 days' ELSE interval '1 month - 1 day' END)::date,s.final_day) AS row_end
+ FROM span s CROSS JOIN LATERAL generate_series(
+  CASE WHEN s.days<=31 THEN s.first_day::timestamp WHEN s.days<=90 THEN date_trunc('week',s.first_day::timestamp) ELSE date_trunc('month',s.first_day::timestamp) END,
+  s.final_day::timestamp,
+  CASE WHEN s.days<=31 THEN interval '1 day' WHEN s.days<=90 THEN interval '1 week' ELSE interval '1 month' END
+ ) bucket
+), periods AS (
+ SELECT b.*,least((b.row_end+1)::timestamp AT TIME ZONE 'Asia/Irkutsk',p.hi) AS end_at
+ FROM bucket_ranges b CROSS JOIN p
+), period_values AS (
+ SELECT b.bucket,b.row_start,b.row_end,
+  coalesce(tot.received,0) AS received,coalesce(tot.closed,0) AS closed,coalesce(tot.cancelled,0) AS cancelled,
+  (SELECT count(*) FROM analytics.state_intervals q JOIN analytics.tickets t ON t.id=q.ticket_id
+   WHERE q.started_at<b.end_at
+    AND (q.ended_at IS NULL OR q.ended_at>=b.end_at)
+    AND q.status IN ('new','in_progress','waiting_client')
+    [[ AND q.department={{department}} ]] [[ AND q.assignee_id={{employee}} ]] [[ AND t.company_id={{company}} ]]) AS open_count
+ FROM periods b LEFT JOIN totals tot ON tot.bucket=b.bucket
+), visible AS (
+ SELECT * FROM period_values WHERE received>0 OR closed>0 OR cancelled>0 OR open_count>0
+)
+SELECT CASE WHEN s.unavailable THEN 'Данные ещё не загружены'
+ WHEN x.bucket IS NULL THEN 'За выбранный период нет заявок'
+ WHEN s.days<=31 AND x.bucket=s.final_day AND s.partial AND s.final_day=(now() AT TIME ZONE 'Asia/Irkutsk')::date THEN 'Сегодня, на момент обновления'
+ WHEN s.days<=31 THEN to_char(x.bucket,'DD.MM.YYYY')
+ ELSE to_char(x.row_start,'DD.MM.YYYY')||'–'||to_char(x.row_end,'DD.MM.YYYY') END AS "Дата / период",
+ x.received AS "Поступило",x.closed AS "Закрыто",x.cancelled AS "Отменено",x.open_count AS "Открытые",
+ x.row_start AS "Начало строки",x.row_end AS "Конец строки"
+FROM span s LEFT JOIN visible x ON true ORDER BY x.bucket DESC""",description='Поступило, закрыто и отменено — уникальные заявки с событием в строке; их суммы равны показателям за период. Открытые — незавершённые заявки на конец строки, включая новые без исполнителя и ожидающие клиента. Остатки разных строк не суммируются.',dashboard='support',tab='overview',width=20,height=8)
 
 for dimension,label in [('department','Отдел'),('company','Компания')]:
     cohort='WITH '+BOUNDS+', '+CLOSED+', q AS ('+cohorts['received']+')\n'
@@ -152,38 +214,41 @@ add('queue_balance','Проверка баланса очереди','WITH '+BOU
 SELECT day AS "Дата",opening AS "Очередь на начало",closing AS "Очередь на конец",operations AS "Поступления + открытия − закрытия − отмены",incoming AS "Передачи входящие",outgoing AS "Передачи исходящие",closing-opening-operations-incoming+outgoing AS "Расхождение (должно быть 0)",gaps AS "Заявок с пробелами истории"
 FROM counts ORDER BY day""",description='Проверка операций и состояний по компании/отделу. Фильтр сотрудника не применяется: автор закрытия отличается от назначенного. Входящие/исходящие передачи компенсируются при всех отделах. Неполная история может давать расхождение.',dashboard='support',tab='overview',width=24,height=7)
 
-add('employees','Работа сотрудников','WITH '+BOUNDS+', '+CLOSED+""", closures AS (
- SELECT q.actor_id,count(*) AS n, avg(c.work_seconds)/3600 AS avg_h,
- percentile_cont(0.5) WITHIN GROUP(ORDER BY c.work_seconds)/3600 AS median_h,min(c.work_seconds)/3600 AS min_h,max(c.work_seconds)/3600 AS max_h,count(c.work_seconds) AS known
- FROM last_closed q JOIN analytics.tickets t ON t.id=q.ticket_id LEFT JOIN analytics.cycles c ON c.ticket_id=q.ticket_id AND c.number=q.cycle_number
- WHERE true [[ AND q.department={{department}} ]] [[ AND t.company_id={{company}} ]] GROUP BY q.actor_id
+add('employees','Результаты и нагрузка команды','WITH '+BOUNDS+', '+CLOSED+""", measured AS (
+ SELECT q.actor_id,CASE WHEN assignment.kind IN ('claimed','reassigned')
+  AND assignment.assignee_id=q.actor_id AND NOT assignment.incomplete AND NOT t.incomplete
+  THEN EXTRACT(EPOCH FROM (q.occurred_at-assignment.occurred_at)) END AS seconds
+ FROM last_closed q JOIN analytics.tickets t ON t.id=q.ticket_id
+ LEFT JOIN LATERAL (
+  SELECT e.kind,e.assignee_id,e.occurred_at,e.incomplete FROM analytics.events e
+  WHERE e.ticket_id=q.ticket_id AND (e.occurred_at,e.id)<(q.occurred_at,q.id)
+   AND e.kind IN ('claimed','reassigned','transferred','reopened','closed','cancelled')
+  ORDER BY e.occurred_at DESC,e.id DESC LIMIT 1
+ ) assignment ON true
+ WHERE true [[ AND q.department={{department}} ]] [[ AND t.company_id={{company}} ]]
+), closures AS (
+ SELECT actor_id,count(*) AS n,avg(seconds) AS avg_seconds,percentile_cont(0.5) WITHIN GROUP(ORDER BY seconds) AS median_seconds,max(seconds) AS max_seconds,count(seconds) AS known
+ FROM measured GROUP BY actor_id
 ), load AS (
- SELECT t.assignee_id,count(*) AS n,count(*) FILTER(WHERE t.status='waiting_client') AS waiting
- FROM analytics.tickets t WHERE t.status IN ('new','in_progress','waiting_client') [[ AND t.department={{department}} ]] [[ AND t.company_id={{company}} ]] GROUP BY t.assignee_id
-), replies AS (
- SELECT c.first_response_by,avg(c.first_response_work_seconds)/60 AS avg_m,
- percentile_cont(0.5) WITHIN GROUP(ORDER BY c.first_response_work_seconds)/60 AS median_m,count(c.first_response_work_seconds) AS known
- FROM analytics.cycles c JOIN analytics.tickets t ON t.id=c.ticket_id,p
- WHERE c.first_response_at>=p.lo AND c.first_response_at<p.hi [[ AND c.first_response_department={{department}} ]] [[ AND t.company_id={{company}} ]] GROUP BY c.first_response_by
-), transfers AS (
- SELECT q.actor_id,count(*) AS n FROM analytics.events q JOIN analytics.tickets t ON t.id=q.ticket_id,p
- WHERE q.kind='transferred' AND q.occurred_at>=p.lo AND q.occurred_at<p.hi [[ AND q.from_department={{department}} ]] [[ AND t.company_id={{company}} ]] GROUP BY q.actor_id
-), returns AS (
- SELECT prev.actor_id,count(*) AS n FROM analytics.events q JOIN analytics.tickets t ON t.id=q.ticket_id
- JOIN LATERAL (SELECT actor_id,department FROM analytics.events e WHERE e.ticket_id=q.ticket_id AND e.kind='closed' AND (e.occurred_at,e.id)<(q.occurred_at,q.id) ORDER BY e.occurred_at DESC,e.id DESC LIMIT 1) prev ON true,p
- WHERE q.kind='reopened' AND q.occurred_at>=p.lo AND q.occurred_at<p.hi [[ AND prev.department={{department}} ]] [[ AND t.company_id={{company}} ]] GROUP BY prev.actor_id
+ SELECT t.assignee_id,count(*) AS n FROM analytics.tickets t
+ WHERE t.status IN ('new','in_progress','waiting_client') AND t.assignee_id IS NOT NULL
+ [[ AND t.department={{department}} ]] [[ AND t.company_id={{company}} ]] GROUP BY t.assignee_id
 ), people AS (
- SELECT id,name,departments FROM analytics.employees WHERE role IN ('engineer','admin','dispatcher')
- UNION SELECT NULL::bigint,'Не назначен / автор неизвестен',ARRAY[]::text[]
- UNION SELECT actor_id,'Неизвестный сотрудник #'||actor_id,ARRAY[]::text[] FROM (SELECT actor_id FROM closures UNION SELECT assignee_id FROM load UNION SELECT first_response_by FROM replies UNION SELECT actor_id FROM transfers UNION SELECT actor_id FROM returns) x WHERE actor_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM analytics.employees e WHERE e.id=x.actor_id)
+ SELECT id,name FROM analytics.employees WHERE role IN ('engineer','admin','dispatcher')
+ UNION SELECT NULL::bigint,'Автор неизвестен' WHERE EXISTS(SELECT 1 FROM closures WHERE actor_id IS NULL)
+ UNION SELECT actor_id,'Неизвестный сотрудник #'||actor_id FROM
+  (SELECT actor_id FROM closures UNION SELECT assignee_id FROM load) x
+  WHERE actor_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM analytics.employees e WHERE e.id=x.actor_id)
 )
-SELECT u.id AS "ID сотрудника",u.name AS "Сотрудник",array_to_string(u.departments,', ') AS "Текущие отделы",
- coalesce(c.n,0) AS "Закрыл за период",coalesce(l.n,0) AS "Назначено сейчас",coalesce(l.waiting,0) AS "Ожидают клиента",
- c.avg_h AS "Решение: среднее, раб. ч",c.median_h AS "Решение: медиана, раб. ч",c.min_h AS "Решение: мин, раб. ч",c.max_h AS "Решение: макс, раб. ч",coalesce(c.known,0) AS "Решение: выборка",
- r.avg_m AS "Первый ответ: среднее, раб. мин",r.median_m AS "Первый ответ: медиана, раб. мин",coalesce(r.known,0) AS "Ответ: выборка",coalesce(ret.n,0) AS "Возвраты после его закрытий",coalesce(tr.n,0) AS "Передачи"
-FROM people u LEFT JOIN closures c ON c.actor_id IS NOT DISTINCT FROM u.id LEFT JOIN load l ON l.assignee_id IS NOT DISTINCT FROM u.id
-LEFT JOIN replies r ON r.first_response_by IS NOT DISTINCT FROM u.id LEFT JOIN transfers tr ON tr.actor_id IS NOT DISTINCT FROM u.id LEFT JOIN returns ret ON ret.actor_id IS NOT DISTINCT FROM u.id
-WHERE true [[ AND u.id={{employee}} ]] ORDER BY coalesce(c.n,0) DESC,u.name""",description='Закрытия: автор последнего закрытия внутри периода. Нагрузка: назначенный сейчас. Ответ: фактический автор доставки. Возвраты: предыдущий закрывший. Длительность цикла не равна трудозатратам. Исторический отдел событий и циклов; текущие отделы показаны только для справки.',dashboard='support',tab='employees',width=24,height=12)
+SELECT u.id AS "ID сотрудника",u.name AS "Сотрудник",coalesce(c.n,0) AS "Закрыто за период",
+ coalesce(l.n,0) AS "В работе сейчас",
+"""+"coalesce("+duration('c.avg_seconds')+",'—')"+""" AS "Среднее время выполнения",
+"""+"coalesce("+duration('c.median_seconds')+",'—')"+""" AS "Медианное время выполнения",
+"""+"coalesce("+duration('c.max_seconds')+",'—')"+""" AS "Максимальное время выполнения",
+ coalesce(c.known,0) AS "Измеренных сроков",c.avg_seconds AS "Среднее, секунды",c.median_seconds AS "Медиана, секунды",c.max_seconds AS "Максимум, секунды"
+FROM people u LEFT JOIN closures c ON c.actor_id IS NOT DISTINCT FROM u.id
+LEFT JOIN load l ON l.assignee_id=u.id
+WHERE true [[ AND u.id={{employee}} ]] ORDER BY coalesce(c.n,0) DESC,u.name""",description='Закрытия — автор последнего закрытия заявки за период. Срок — от его последнего назначения до закрытия; без достоверного назначения срок не измеряется. В работе — все открытые назначенные заявки, включая ожидание клиента.',dashboard='support',tab='employees',width=24,height=9)
 
 add('ticket','Карточка заявки',"""SELECT t.id AS "Номер",t.description AS "Описание",t.client_name AS "Клиент",c.name AS "Компания",CASE t.status WHEN 'new' THEN 'Новая' WHEN 'in_progress' THEN 'В работе' WHEN 'waiting_client' THEN 'Ожидает клиента' WHEN 'closed' THEN 'Закрыта' WHEN 'cancelled' THEN 'Отменена' ELSE 'Нет данных' END AS "Статус",d.name AS "Текущий отдел",u.name AS "Исполнитель",
  t.created_at AT TIME ZONE 'Asia/Irkutsk' AS "Создана",t.updated_at AT TIME ZONE 'Asia/Irkutsk' AS "Изменена",
@@ -202,7 +267,7 @@ add('filter_employees','Сотрудники для фильтра',"SELECT id A
 add('filter_companies','Компании для фильтра',"SELECT id AS value,name AS label FROM analytics.companies ORDER BY name,id")
 
 from presentation import configure
-layout=configure(cards,add,BOUNDS,CLOSED,cohorts,filters)
+layout=configure(cards,add,BOUNDS,CLOSED,cohorts,filters,duration)
 manifest={'format':2,'compatibility_version':'v0.64.1','collection':'BVK — аналитика поддержки','dashboards':{'support':{'name':'Поддержка BVK','tabs':{'overview':'Обзор','attention':'Требуют внимания','employees':'Сотрудники','reports':'Подробно','guide':'Как читать'},'layout':layout},'ticket':{'name':'Карточка заявки','tabs':{}}},'cards':cards}
 for c in cards:
     if c['key']=='resolution': c['target']='closed_list'
