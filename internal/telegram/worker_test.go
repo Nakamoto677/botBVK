@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"bot-bvk/internal/domain"
 )
@@ -38,6 +39,13 @@ func (s *workerStore) SaveSendPart(_ context.Context, key string, part int, id i
 		s.parts = map[string]int64{}
 	}
 	s.parts[fmt.Sprintf("%s:%d", key, part)] = id
+	return nil
+}
+
+// FinishOperation and RetryOperation let a test call runOperation, which is the real
+// wrapper around Handle that records per-kind stage timings.
+func (s *workerStore) FinishOperation(context.Context, int64) error { return nil }
+func (s *workerStore) RetryOperation(context.Context, int64, string, time.Duration, bool) error {
 	return nil
 }
 

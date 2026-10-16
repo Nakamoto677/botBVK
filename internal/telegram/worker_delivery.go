@@ -87,6 +87,11 @@ func (w *Worker) relayMessage(ctx context.Context, op domain.Operation, t domain
 	if e != nil {
 		return e
 	}
+	// How long a message took from being written to reaching the other side. This is
+	// the user-visible number behind "the bot is slow to pass messages on".
+	if !msg.CreatedAt.IsZero() && w.client != nil && w.client.Metrics != nil {
+		w.client.Metrics.ObserveMilliseconds("bvk_ticket_relay", op.Kind, time.Since(msg.CreatedAt))
+	}
 	data, _ := json.Marshal(map[string]any{"source_message_id": msg.ID, "telegram_chat_id": chat, "telegram_message_id": sent.ID, "telegram_topic_id": topic, "direction": msg.Direction, "edited_at": msg.EditedAt})
 	return w.store.Transact(ctx, func(tx domain.Tx) error {
 		if op.Kind == "client_message" {

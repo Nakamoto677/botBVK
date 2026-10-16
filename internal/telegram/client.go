@@ -11,16 +11,22 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"bot-bvk/internal/metrics"
 )
 
 type Client struct {
 	Token   string
 	BaseURL string
 	HTTP    *http.Client
+	// Metrics collects per-method call latency. It is shared with the workers so a
+	// single reading covers the whole process. Nil is allowed and simply skips
+	// measurement, which keeps tests free of wiring.
+	Metrics *metrics.Metrics
 }
 
 func NewClient(token string) *Client {
-	return &Client{Token: token, BaseURL: "https://api.telegram.org", HTTP: &http.Client{Timeout: 65 * time.Second}}
+	return &Client{Token: token, BaseURL: "https://api.telegram.org", HTTP: &http.Client{Timeout: 65 * time.Second}, Metrics: metrics.New()}
 }
 
 type APIError struct {
@@ -37,6 +43,14 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("telegram %d: %s", e.Code, e.Description)
 }
 func (c *Client) Call(ctx context.Context, method string, payload any, result any) error {
+	// Measure the real round trip per method. This is what tells apart a slow
+	// Telegram from time spent waiting in our own rate limiter.
+	started := time.Now()
+	defer func() {
+		if c.Metrics != nil {
+			c.Metrics.ObserveCall(method, time.Since(started))
+		}
+	}()
 	b, err := json.Marshal(payload)
 	if err != nil {
 		return err

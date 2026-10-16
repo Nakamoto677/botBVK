@@ -95,6 +95,14 @@ func (w *Worker) Run(ctx context.Context) error {
 }
 
 func (w *Worker) runOperation(ctx context.Context, op domain.Operation) error {
+	// Per-kind operation duration shows which step really costs the seconds, for
+	// example create_topic against notify_client.
+	started := time.Now()
+	defer func() {
+		if w.client != nil && w.client.Metrics != nil {
+			w.client.Metrics.ObserveOperation(op.Kind, time.Since(started))
+		}
+	}()
 	if err := w.Handle(ctx, op); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -148,6 +156,9 @@ type deliveryRates struct {
 
 func (w *Worker) rate(ctx context.Context, chat int64) error {
 	// Reserve a slot while holding the lock, then wait without blocking other chats.
+	// The wait is measured on its own: it is the difference between "Telegram is
+	// slow" and "we are making ourselves slow".
+	waitStart := time.Now()
 	w.rates.mu.Lock()
 	interval := w.interval
 	if chat > 0 && interval > 1100*time.Millisecond {
@@ -173,6 +184,9 @@ func (w *Worker) rate(ctx context.Context, chat int64) error {
 		if wait := time.Until(at); wait > 0 && !pause(ctx, wait) {
 			return ctx.Err()
 		}
+	}
+	if w.client != nil && w.client.Metrics != nil {
+		w.client.Metrics.ObserveMilliseconds("bvk_ratelimit_wait", "chat", time.Since(waitStart))
 	}
 	return ctx.Err()
 }

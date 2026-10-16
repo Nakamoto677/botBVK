@@ -17,6 +17,7 @@ import (
 	"bot-bvk/internal/archive"
 	"bot-bvk/internal/config"
 	"bot-bvk/internal/domain"
+	"bot-bvk/internal/metrics"
 	"bot-bvk/internal/monitor"
 	"bot-bvk/internal/postgres"
 	"bot-bvk/internal/report"
@@ -140,7 +141,7 @@ func run() error {
 			}
 		}
 	})
-	server := &http.Server{Addr: cfg.HealthAddress, Handler: healthHandler(store, adapter.LastPoll), ReadHeaderTimeout: 5 * time.Second}
+	server := &http.Server{Addr: cfg.HealthAddress, Handler: healthHandler(store, adapter.LastPoll, client.Metrics), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		e := server.ListenAndServe()
 		if !errors.Is(e, http.ErrServerClosed) {
@@ -182,7 +183,7 @@ func bootstrapStaff(ctx context.Context, store domain.Store, staff []config.Staf
 		return nil
 	})
 }
-func healthHandler(store *postgres.Store, lastPoll func() time.Time) http.Handler {
+func healthHandler(store *postgres.Store, lastPoll func() time.Time, timing *metrics.Metrics) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/live", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK); fmt.Fprintln(w, "alive") })
 	mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
@@ -235,6 +236,11 @@ func healthHandler(store *postgres.Store, lastPoll func() time.Time) http.Handle
 		}
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		fmt.Fprintf(w, "bvk_outbox_pending %d\nbvk_outbox_failed %d\nbvk_outbox_oldest_seconds %.0f\nbvk_updates_quarantined %d\n", pending, failed, age, quarantined)
+		// Stage timings collected in-process: rate-limiter waiting, per-method
+		// Telegram latency, whole operation duration and message relay time.
+		if timing != nil {
+			fmt.Fprint(w, timing.Render())
+		}
 	})
 	return mux
 }
