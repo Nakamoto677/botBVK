@@ -105,11 +105,19 @@ func (a *Adapter) menu(ctx context.Context, m *Message, u domain.User) error {
 	}
 	return a.clientMenu(ctx, m, u)
 }
+// Help answers are retained. They are not a transient step of a flow: a person taps
+// Помощь to read something, and a screen registered under the disposable home
+// scenario was wiped by the next cleanup, which is why the button looked dead.
+const clientHelpText = "Чтобы обратиться в поддержку, нажмите «Создать заявку», выберите отдел и опишите проблему. Специалист ответит прямо здесь.\n\nКарточка по номеру: /ticket ID. Список: /tickets. Переписка: /history ID. Продолжить форму: /form. Повторное открытие: /reopen ID."
+const staffHelpText = "В группе отдела: возьмите заявку кнопкой. Обычные сообщения и вложения инженеров текущего отдела в актуальном топике автоматически уходят клиенту. Служебный ввод для закрытия и передачи не пересылается. В очереди нажмите Закрыть задачу, в топике — Закрыть тикет; Передать предложит выбрать отдел и причину. /ticket ID — карточка, /history ID — переписка, /tickets — список, /report — отчёт для администратора. Для отмены ввода нажмите Отменить."
+
 func (a *Adapter) help(ctx context.Context, m *Message, u domain.User) error {
 	if u.Role != "client" {
-		return a.say(ctx, m, "В группе отдела: возьмите заявку кнопкой. Обычные сообщения и вложения инженеров текущего отдела в актуальном топике автоматически уходят клиенту. Служебный ввод для закрытия и передачи не пересылается. В очереди нажмите Закрыть задачу, в топике — Закрыть тикет; Передать предложит выбрать отдел и причину. /ticket ID — карточка, /history ID — переписка, /tickets — список, /report — отчёт для администратора. Для отмены ввода нажмите Отменить.", nil)
+		return a.say(ctx, m, staffHelpText, nil)
 	}
-	return a.sayAux(ctx, m, u.ID, "client_home", "Чтобы обратиться в поддержку, нажмите «Создать заявку», выберите отдел и опишите проблему. Специалист ответит прямо здесь.\n\nКарточка по номеру: /ticket ID. Список: /tickets. Переписка: /history ID. Продолжить форму: /form. Повторное открытие: /reopen ID.", nil)
+	// The answer keeps the client menu: its own text tells the person to press
+	// «Создать заявку», and without the keyboard they would have no way on.
+	return a.clientScreen(ctx, m, "client_home", clientHelpText, clientKeyboard)
 }
 func (a *Adapter) showTicket(ctx context.Context, m *Message, u domain.User, t domain.Ticket) error {
 	if !historyAuthorized(u, t) || !a.historyDestination(m, u, t) {
