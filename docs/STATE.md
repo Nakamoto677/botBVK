@@ -11,6 +11,13 @@ ENGINEER_UI, AUDIT, ANALYTICS_*, METABASE, LOCAL_ANALYTICS, AGENT_RELIABILITY_UX
 
 ## 0. Что сделать при следующем запуске
 
+**Автозапуска нет: после перезагрузки бот и аналитика не поднимутся сами.** Проверено
+16 октября — в `~/Library/LaunchAgents` и `launchctl` записей для них нет, процессы
+запускались вручную из терминала. Сами поднимаются только `bot-bvk-postgres-1` и
+`bvk-metabase-local` (у них политика Docker `unless-stopped`). То есть после включения
+машины нужно запустить бота и `bvk-analytics` руками, иначе Telegram не опрашивается,
+а аналитика не обновляется.
+
 **Запущенный бот может работать на устаревшем коде.** Правки, сделанные 16 октября
 (пустая клавиатура, классификация ошибок, автоуборка мёртвых операций, флаг
 `-skip-telegram-check`), вступают в силу **только после перезапуска**: работающий
@@ -26,6 +33,9 @@ kill <PID старого процесса>          # или Ctrl+C в его т
 export TELEGRAM_BOT_TOKEN='…'
 nohup ./bin/bvk -config config.json > /tmp/bvk-run.log 2>&1 &
 sleep 3 && curl -s localhost:8080/ready
+
+# аналитика обновляет снимок для Metabase, отдельный процесс
+nohup ./bin/bvk-analytics -config config.json > /tmp/bvk-analytics.log 2>&1 &
 ```
 
 Точка отката, если новый запуск не устроит: `cp /tmp/bvk-previous bin/bvk` (может не
