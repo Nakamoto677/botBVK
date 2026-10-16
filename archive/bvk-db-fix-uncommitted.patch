@@ -1,0 +1,71 @@
+diff --git a/internal/postgres/migration_test.go b/internal/postgres/migration_test.go
+index 8c596da..9ed1f22 100644
+--- a/internal/postgres/migration_test.go
++++ b/internal/postgres/migration_test.go
+@@ -203,6 +203,66 @@ func TestLegacyAssignedRoutingPreserved(t *testing.T) {
+ 	}
+ }
+ 
++func TestLegacyUnboundTicketDoesNotBlockClaim(t *testing.T) {
++	s := testStore(t)
++	ctx := context.Background()
++	ticket := seed(t, s)
++	if _, err := s.pool.Exec(ctx, `DELETE FROM bvk_migrations WHERE version='002_queue_on_claim'`); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := s.pool.Exec(ctx, `UPDATE bvk_tickets SET payload=jsonb_set(payload,'{routing_pending}','true'::jsonb) WHERE id=$1`, ticket.ID); err != nil {
++		t.Fatal(err)
++	}
++	msg := domain.Message{TicketID: ticket.ID, Direction: "inbound", AuthorID: 1, Text: "before engineer claimed"}
++	if err := s.Transact(ctx, func(tx domain.Tx) error {
++		if err := tx.AddMessage(ctx, &msg); err != nil {
++			return err
++		}
++		for _, kind := range []string{"create_topic", "team_message"} {
++			if err := tx.Enqueue(ctx, domain.Operation{TicketID: ticket.ID, Kind: kind}); err != nil {
++				return err
++			}
++		}
++		return nil
++	}); err != nil {
++		t.Fatal(err)
++	}
++	// A lease that will not expire soon used to block the new claim operation.
++	if _, err := s.pool.Exec(ctx, `UPDATE bvk_outbox SET state='processing',lease_until=now()+interval '1 hour' WHERE kind='team_message'`); err != nil {
++		t.Fatal(err)
++	}
++	if err := s.Migrate(ctx); err != nil {
++		t.Fatal(err)
++	}
++	var pauses int
++	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM bvk_outbox WHERE kind='close_topic'`).Scan(&pauses); err != nil || pauses != 0 {
++		t.Fatalf("unbound ticket queued pause: %d %v", pauses, err)
++	}
++	var deferred bool
++	if err := s.pool.QueryRow(ctx, `SELECT (payload->>'deferred_delivery')::boolean FROM bvk_messages WHERE id=$1`, msg.ID).Scan(&deferred); err != nil || !deferred {
++		t.Fatalf("unbound message replay marker: %v %v", deferred, err)
++	}
++	if err := s.Transact(ctx, func(tx domain.Tx) error {
++		current, err := tx.GetTicket(ctx, ticket.ID)
++		if err != nil {
++			return err
++		}
++		current.Status = domain.InProgress
++		current.AssigneeID = 99
++		current.RoutingPending = true
++		if err := tx.SaveTicket(ctx, &current); err != nil {
++			return err
++		}
++		return tx.Enqueue(ctx, domain.Operation{TicketID: ticket.ID, Kind: "create_topic"})
++	}); err != nil {
++		t.Fatal(err)
++	}
++	op, err := s.NextOperation(ctx)
++	if err != nil || op.Kind != "create_topic" || op.TicketID != ticket.ID || op.Attempts != 1 {
++		t.Fatalf("new claim blocked by legacy operations: %#v %v", op, err)
++	}
++}
++
+ func TestLegacyCardsRefreshedOnceIncludingClosed(t *testing.T) {
+ 	s := testStore(t)
+ 	ctx := context.Background()
