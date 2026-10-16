@@ -410,107 +410,17 @@ func (a *Adapter) callback(ctx context.Context, c *Callback) error {
 	var err error
 	switch action {
 	case "company":
-		if c.Message == nil || c.Message.Chat.Type != "private" {
-			return domain.ErrForbidden
-		}
-		_ = a.client.Answer(ctx, c.ID, "")
-		companies, e := a.store.Companies(ctx)
-		if e != nil {
-			return e
-		}
-		valid := false
-		for _, co := range companies {
-			valid = valid || co.ID == id
-		}
-		if !valid {
-			return a.registrationCompanies(ctx, c.Message, c.From.ID, true)
-		}
-		err = a.service.Register(ctx, c.From.ID, strings.TrimSpace(c.From.FirstName+" "+c.From.LastName), id)
-		if errors.Is(err, domain.ErrInvalid) {
-			return a.registrationCompanies(ctx, c.Message, c.From.ID, true)
-		}
-		if err == nil {
-			registered, e := a.store.User(ctx, c.From.ID)
-			if e != nil {
-				return e
-			}
-			err = a.updateName(ctx, registered, c.From)
-		}
-		if err == nil {
-			requests, e := a.store.AccessRequests(ctx)
-			if e != nil {
-				return e
-			}
-			for _, request := range requests {
-				if request.UserID == c.From.ID && request.Status == "pending" {
-					data, _ := json.Marshal(map[string]any{"request_id": request.ID, "user_id": request.UserID, "company_id": request.CompanyID})
-					err = a.store.Transact(ctx, func(tx domain.Tx) error {
-						return tx.Enqueue(ctx, domain.Operation{Kind: "access_request_notification", Payload: data, AvailableAt: time.Now().UTC(), State: "pending"})
-					})
-					break
-				}
-			}
-		}
-		if err == nil {
-			a.cleanupBestEffort(ctx, scope(c.From.ID, c.Message), "registration")
-		}
+		err = a.callbackCompany(ctx, c, id)
 	case "approve", "reject":
 		err = a.service.ApproveAccess(ctx, c.From.ID, id, action == "approve")
 	case "new":
-		d, valid, e := a.boundDraft(ctx, c, parts, "department")
-		if e != nil || !valid {
-			return e
-		}
-		if len(parts) != 3 || !domain.Department(parts[1]).Valid() {
-			return domain.ErrInvalid
-		}
-		u, e := a.store.User(ctx, c.From.ID)
-		if e != nil {
-			return e
-		}
-		if !u.Approved || u.Role != "client" {
-			return domain.ErrForbidden
-		}
-		if _, e = a.store.ActiveTicket(ctx, c.From.ID); e == nil {
-			return domain.ErrConflict
-		} else if !errors.Is(e, domain.ErrNotFound) {
-			return e
-		}
-		d.Department = domain.Department(parts[1])
-		d.Step = "description"
-		if err = a.saveDraft(ctx, c.From.ID, d); err != nil {
-			return err
-		}
-		a.cleanupBestEffort(ctx, scope(c.From.ID, c.Message), "draft")
-		err = a.clientScreen(ctx, c.Message, "draft", draftDescriptionText, clientDraftKeyboard)
+		return a.callbackNewDraft(ctx, c, parts)
 	case "submit":
-		d, valid, e := a.boundDraft(ctx, c, parts, "confirm")
-		if e != nil || !valid {
-			return e
-		}
-		err = a.submitDraft(ctx, c, d)
-		if err == nil {
-			a.cleanupBestEffort(ctx, scope(c.From.ID, c.Message), "draft")
-		}
+		return a.callbackSubmitDraft(ctx, c, parts)
 	case "cancel":
-		if id == 0 {
-			_, valid, e := a.boundDraft(ctx, c, parts, "")
-			if e != nil || !valid {
-				return e
-			}
-			err = a.cancelClientDraft(ctx, c.Message)
-		} else {
-			err = a.beginCancel(ctx, c.From.ID, c.Message, id)
-		}
+		return a.callbackCancel(ctx, c, id, parts)
 	case "claim":
-		user, e := a.store.User(ctx, c.From.ID)
-		if e != nil {
-			return e
-		}
-		if e = a.updateName(ctx, user, c.From); e != nil {
-			return e
-		}
-		err = a.service.Claim(ctx, c.From.ID, id)
+		return a.callbackClaim(ctx, c, id)
 	case "waiting":
 		err = a.service.SetWaiting(ctx, c.From.ID, id, true)
 	case "resume":
@@ -522,72 +432,11 @@ func (a *Adapter) callback(ctx context.Context, c *Callback) error {
 	case "transferdept", "cancelconfirm", "promptcancel":
 		err = a.promptCallback(ctx, c, action, id, parts)
 	case "tickets":
-		if c.Message == nil || len(parts) != 3 {
-			return domain.ErrInvalid
-		}
-		page, e := strconv.ParseInt(parts[1], 10, 32)
-		if e != nil || page < 0 {
-			return domain.ErrInvalid
-		}
-		anchor, e := strconv.ParseInt(parts[2], 10, 64)
-		if e != nil || anchor < 0 {
-			return domain.ErrInvalid
-		}
-		u, e := a.store.User(ctx, c.From.ID)
-		if e != nil {
-			return e
-		}
-		err = a.ticketListPage(ctx, c.Message, u, int(page), anchor)
+		return a.callbackTickets(ctx, c, parts)
 	case "historyfile":
-		if c.Message == nil || len(parts) != 3 {
-			return domain.ErrInvalid
-		}
-		messageID, e := strconv.ParseInt(parts[2], 10, 64)
-		if e != nil || messageID <= 0 {
-			return domain.ErrInvalid
-		}
-		t, e := a.store.Ticket(ctx, id)
-		if e != nil {
-			return e
-		}
-		u, e := a.store.User(ctx, c.From.ID)
-		if e != nil {
-			return e
-		}
-		err = a.historyFile(ctx, c.Message, u, t, messageID)
+		return a.callbackHistoryFile(ctx, c, id, parts)
 	case "ticket", "history":
-		if c.Message == nil {
-			return domain.ErrInvalid
-		}
-		t, e := a.store.Ticket(ctx, id)
-		if e != nil {
-			return e
-		}
-		user, e := a.store.User(ctx, c.From.ID)
-		if e != nil {
-			return e
-		}
-		if action == "ticket" {
-			err = a.showTicket(ctx, c.Message, user, t)
-		} else {
-			page := int64(0)
-			anchor := int64(0)
-			if len(parts) == 4 {
-				var e error
-				page, e = strconv.ParseInt(parts[2], 10, 32)
-				if e != nil {
-					return domain.ErrInvalid
-				}
-				anchor, e = strconv.ParseInt(parts[3], 10, 64)
-				if e != nil || anchor < 0 {
-					return domain.ErrInvalid
-				}
-			} else if len(parts) != 2 {
-				return domain.ErrInvalid
-			}
-			err = a.historyPage(ctx, c.Message, user, t, int(page), anchor)
-		}
-
+		return a.callbackTicketOrHistory(ctx, c, action, id, parts)
 	default:
 		return domain.ErrInvalid
 	}

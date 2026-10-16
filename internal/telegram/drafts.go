@@ -93,6 +93,10 @@ func (a *Adapter) boundDraft(ctx context.Context, c *Callback, parts []string, s
 		token = parts[len(parts)-1]
 	}
 	if d.Step == "submitted" || !exists || d.Generation == "" || token != d.Generation || (step != "" && d.Step != step) {
+		// Return the stale-screen error instead of nil. Callers check "err != nil
+		// || !valid" and previously exited successfully with a hardcoded nil, which
+		// swallowed the reason the screen was rejected. The side effect on the
+		// caller's message is separate and still happens here.
 		return d, false, a.staleDraft(ctx, c)
 	}
 	return d, true, nil
