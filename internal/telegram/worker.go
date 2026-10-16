@@ -492,10 +492,11 @@ func (w *Worker) ensureTopicCard(ctx context.Context, t domain.Ticket) (domain.T
 		return nil
 	})
 	if err == nil {
+		// The engineer keyboard is deliberately not installed here. Every caller runs
+		// replayDeferred and finishProvision right after this, and refresh at the end
+		// installs it. Doing it here as well sent the keyboard notice ahead of the
+		// messages that were waiting for the topic, and paid a second events query.
 		err = w.ensureTransferContext(ctx, t)
-		if err == nil {
-			err = w.ensureEngineerKeyboard(ctx, t)
-		}
 	}
 	return t, err
 }

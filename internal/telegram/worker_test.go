@@ -165,12 +165,15 @@ func TestInitialTopicCardSupportsPublicReplyAndRetry(t *testing.T) {
 	client.BaseURL = server.URL
 	ticket := domain.Ticket{ID: 7, ClientID: 1, Department: domain.IT, TopicChatID: -100, TopicID: 10, Description: "Initial description", Status: domain.InProgress, AssigneeID: 2}
 	store := &workerStore{ticket: ticket, current: ticket}
-	worker := NewWorker(client, store, Config{})
+	worker := NewWorker(client, store, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100, QueueTopicID: 1}}})
+	worker.interval = 0
 	bound, err := worker.ensureTopicCard(context.Background(), ticket)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bound.TopicMessageID != 99 || len(store.events) != 2 {
+	// One card delivery is recorded here. The engineer keyboard notice is installed
+	// by refresh after provisioning finishes, so it is not part of this step.
+	if bound.TopicMessageID != 99 || len(store.events) != 1 || store.events[0].Kind != "message_delivered" {
 		t.Fatal("initial card not persisted", bound, store.events)
 	}
 	if _, err = worker.ensureTopicCard(context.Background(), bound); err != nil || calls != 2 {
