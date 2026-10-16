@@ -175,7 +175,7 @@ func TestClaimBaselineBreakdown(t *testing.T) {
 	var limiterMS, httpMS, httpMax string
 	for _, line := range strings.Split(rendered, "\n") {
 		switch {
-		case strings.HasPrefix(line, `bvk_ratelimit_wait_ms_sum{label="chat"}`):
+		case strings.HasPrefix(line, `bvk_ratelimit_wait_ms_sum{label="sendMessage"}`):
 			limiterMS = strings.Fields(line)[1]
 		case strings.HasPrefix(line, `bvk_telegram_call_ms_sum{label="sendMessage"}`):
 			httpMS = strings.Fields(line)[1]

@@ -154,28 +154,36 @@ type deliveryRates struct {
 	global   time.Time
 }
 
-func (w *Worker) rate(ctx context.Context, chat int64) error {
-	// Reserve a slot while holding the lock, then wait without blocking other chats.
-	// The wait is measured on its own: it is the difference between "Telegram is
-	// slow" and "we are making ourselves slow".
+// rate reserves a delivery slot for one call. Only a method that publishes a new
+// message into the chat consumes the per-chat message budget; edits, topic
+// lifecycle calls and deletions are not charged it, because they do not add to the
+// chat's message stream. That single distinction is what keeps topic preparation
+// from paying 3.1 s per edit.
+func (w *Worker) rate(ctx context.Context, chat int64, method string) error {
 	waitStart := time.Now()
+	charged := publishesNewMessage(method)
+	// Reserve a slot while holding the lock, then wait without blocking other chats.
 	w.rates.mu.Lock()
-	interval := w.interval
-	if chat > 0 && interval > 1100*time.Millisecond {
-		interval = 1100 * time.Millisecond
-	}
-	at := time.Now()
-	if next := w.rates.lastChat[chat].Add(interval); next.After(at) {
-		at = next
-	}
-	w.rates.lastChat[chat] = at
-	w.rates.mu.Unlock()
-	if wait := time.Until(at); wait > 0 && !pause(ctx, wait) {
-		return ctx.Err()
+	if charged {
+		interval := w.interval
+		if chat > 0 && interval > 1100*time.Millisecond {
+			interval = 1100 * time.Millisecond
+		}
+		at := time.Now()
+		if next := w.rates.lastChat[chat].Add(interval); next.After(at) {
+			at = next
+		}
+		w.rates.lastChat[chat] = at
+		w.rates.mu.Unlock()
+		if wait := time.Until(at); wait > 0 && !pause(ctx, wait) {
+			return ctx.Err()
+		}
+	} else {
+		w.rates.mu.Unlock()
 	}
 	if w.interval > 0 {
 		w.rates.mu.Lock()
-		at = time.Now()
+		at := time.Now()
 		if next := w.rates.global.Add(35 * time.Millisecond); next.After(at) {
 			at = next
 		}
@@ -186,7 +194,7 @@ func (w *Worker) rate(ctx context.Context, chat int64) error {
 		}
 	}
 	if w.client != nil && w.client.Metrics != nil {
-		w.client.Metrics.ObserveMilliseconds("bvk_ratelimit_wait", "chat", time.Since(waitStart))
+		w.client.Metrics.ObserveMilliseconds("bvk_ratelimit_wait", method, time.Since(waitStart))
 	}
 	return ctx.Err()
 }
@@ -204,7 +212,7 @@ func (w *Worker) send(ctx context.Context, chat, topic int64, text string, butto
 		}
 		return w.textParts(ctx, fmt.Sprintf("operation:%d:%x", w.currentOperation, hash), chat, topic, text, markup, parseMode...)
 	}
-	if err := w.rate(ctx, chat); err != nil {
+	if err := w.rate(ctx, chat, "sendMessage"); err != nil {
 		return Message{}, err
 	}
 	return w.client.Send(ctx, chat, topic, text, buttons, parseMode...)
@@ -286,7 +294,7 @@ func (w *Worker) refresh(ctx context.Context, t domain.Ticket) error {
 		if t.Status == domain.New {
 			buttons = [][]Button{}
 		}
-		if err = w.rate(ctx, t.TopicChatID); err != nil {
+		if err = w.rate(ctx, t.TopicChatID, "editMessageText"); err != nil {
 			return err
 		}
 		if err = messageEditError(w.client.Call(ctx, "editMessageText", map[string]any{"chat_id": t.TopicChatID, "message_id": t.TopicMessageID, "text": text, "parse_mode": "HTML", "reply_markup": Markup{Buttons: buttons}}, nil)); err != nil {
@@ -299,7 +307,7 @@ func (w *Worker) refresh(ctx context.Context, t domain.Ticket) error {
 		}
 	}
 	if t.QueueMessageID != 0 {
-		if err = w.rate(ctx, team.ChatID); err != nil {
+		if err = w.rate(ctx, team.ChatID, "editMessageText"); err != nil {
 			return err
 		}
 		err := w.client.Call(ctx, "editMessageText", map[string]any{"chat_id": team.ChatID, "message_id": t.QueueMessageID, "text": text, "parse_mode": "HTML", "reply_markup": Markup{cardButtons(t)}}, nil)
@@ -367,7 +375,7 @@ func (w *Worker) deliverNamed(ctx context.Context, chat, topic int64, msg domain
 		remainder = text
 	}
 	sent, err := w.confirmedPart(ctx, key+":media", 0, func() (Message, error) {
-		if err := w.rate(ctx, chat); err != nil {
+		if err := w.rate(ctx, chat, method); err != nil {
 			return Message{}, err
 		}
 		p := map[string]any{"chat_id": chat, msg.MediaType: msg.FileID, "caption": caption}

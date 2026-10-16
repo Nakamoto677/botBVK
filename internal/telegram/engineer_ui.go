@@ -138,7 +138,7 @@ func (w *Worker) ensureEngineerKeyboard(ctx context.Context, t domain.Ticket) er
 		if current.TopicChatID != t.TopicChatID || current.TopicID != t.TopicID || current.RoutingGeneration != t.RoutingGeneration || !provisioningStatus(current.Status) {
 			return domain.ErrConflict
 		}
-		if e = w.rate(ctx, t.TopicChatID); e != nil {
+		if e = w.rate(ctx, t.TopicChatID, "sendMessage"); e != nil {
 			return e
 		}
 		keyboard := map[string]any{"keyboard": [][]map[string]string{{{"text": engineerCloseLabel}, {"text": engineerTransferLabel}}}, "resize_keyboard": true, "is_persistent": true, "input_field_placeholder": "Сообщение клиенту"}

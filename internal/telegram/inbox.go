@@ -157,7 +157,7 @@ func (w *Worker) uiScreen(ctx context.Context, op domain.Operation) error {
 	parts := splitText(p.Text, messageLimit)
 	for i, text := range parts {
 		sent, err := w.confirmedPart(ctx, fmt.Sprintf("ui:%d", op.ID), i, func() (Message, error) {
-			if err := w.rate(ctx, p.ChatID); err != nil {
+			if err := w.rate(ctx, p.ChatID, "sendMessage"); err != nil {
 				return Message{}, err
 			}
 			if valid, err := current(); err != nil || !valid {

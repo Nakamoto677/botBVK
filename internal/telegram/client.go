@@ -42,6 +42,19 @@ func (e *APIError) Error() string {
 	}
 	return fmt.Sprintf("telegram %d: %s", e.Code, e.Description)
 }
+// publishesNewMessage reports whether a method adds a message to the chat's
+// stream. Telegram's per-chat limit ("about one message per second, no more than
+// twenty per minute to the same group") counts new messages only, so editing a
+// card, creating a forum topic, closing or deleting one must not be charged the
+// same spacing. documentMethod is the multipart upload path for files.
+func publishesNewMessage(method string) bool {
+	switch method {
+	case "sendMessage", "sendDocument", "sendPhoto", "sendVideo", "sendAudio", "sendVoice", "sendAnimation", "sendMediaGroup":
+		return true
+	}
+	return false
+}
+
 func (c *Client) Call(ctx context.Context, method string, payload any, result any) error {
 	// Measure the real round trip per method. This is what tells apart a slow
 	// Telegram from time spent waiting in our own rate limiter.

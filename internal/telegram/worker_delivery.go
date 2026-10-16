@@ -25,7 +25,7 @@ func (w *Worker) retireQueueCard(ctx context.Context, payload operationPayload, 
 	if err != nil {
 		return err
 	}
-	if err = w.rate(ctx, chat); err != nil {
+	if err = w.rate(ctx, chat, "editMessageText"); err != nil {
 		return err
 	}
 	return messageEditError(w.client.Call(ctx, "editMessageText", map[string]any{"chat_id": chat, "message_id": payload.MessageID, "text": text + "\nПередано в отдел: " + departmentName(payload.ToDepartment), "parse_mode": "HTML", "reply_markup": Markup{Buttons: [][]Button{}}}, nil))

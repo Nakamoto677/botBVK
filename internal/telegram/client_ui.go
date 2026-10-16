@@ -133,7 +133,7 @@ func (w *Worker) clientAccessNotification(ctx context.Context, id int64, text st
 	} else if !errors.Is(err, domain.ErrNotFound) {
 		return err
 	}
-	if err := w.rate(ctx, id); err != nil {
+	if err := w.rate(ctx, id, "sendMessage"); err != nil {
 		return err
 	}
 	var sent Message

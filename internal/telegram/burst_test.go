@@ -272,11 +272,11 @@ func TestClientNotificationDoesNotWaitBeforeFirstSend(t *testing.T) {
 func TestRateWaitInGroupDoesNotReserveOtherChats(t *testing.T) {
 	worker := NewWorker(nil, nil, Config{})
 	worker.interval = 250 * time.Millisecond
-	if err := worker.rate(t.Context(), -100); err != nil {
+	if err := worker.rate(t.Context(), -100, "sendMessage"); err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
-	go func() { done <- worker.rate(t.Context(), -100) }()
+	go func() { done <- worker.rate(t.Context(), -100, "sendMessage") }()
 	// Wait until the second group slot was reserved, without relying on a sleep.
 	deadline := time.Now().Add(time.Second)
 	for {
@@ -293,7 +293,7 @@ func TestRateWaitInGroupDoesNotReserveOtherChats(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 120*time.Millisecond)
 	defer cancel()
-	if err := worker.rate(ctx, 1); err != nil {
+	if err := worker.rate(ctx, 1, "sendMessage"); err != nil {
 		t.Fatal("group blocked private chat", err)
 	}
 	if err := <-done; err != nil {

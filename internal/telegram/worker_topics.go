@@ -76,7 +76,7 @@ func (w *Worker) createTopic(ctx context.Context, op domain.Operation, payload o
 	if !t.Status.Active() {
 		return nil
 	}
-	if err = w.rate(ctx, team.ChatID); err != nil {
+	if err = w.rate(ctx, team.ChatID, "createForumTopic"); err != nil {
 		return err
 	}
 	name, err := displayName(ctx, w.store, t.ClientID, "Клиент")

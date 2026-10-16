@@ -47,7 +47,7 @@ func (w *Worker) deleteAuxMessage(ctx context.Context, payload operationPayload)
 	if payload.ChatID == 0 || payload.MessageID <= 0 {
 		return domain.ErrInvalid
 	}
-	if err := w.rate(ctx, payload.ChatID); err != nil {
+	if err := w.rate(ctx, payload.ChatID, "deleteMessage"); err != nil {
 		return err
 	}
 	return auxiliaryDeleteError(w.client.Call(ctx, "deleteMessage", map[string]any{"chat_id": payload.ChatID, "message_id": payload.MessageID}, nil))

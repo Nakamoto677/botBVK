@@ -36,15 +36,15 @@ func TestSendPathRecordsRateLimitAndCallTimings(t *testing.T) {
 	out := client.Metrics.Render()
 	for _, want := range []string{
 		`bvk_telegram_call_ms_count{label="sendMessage"} 2`,
-		// The second send waited for the slot, so at least one wait is recorded.
-		`bvk_ratelimit_wait_ms_count{label="chat"} 2`,
-		`bvk_ratelimit_wait_ms_max{label="chat"}`,
+		// The limiter wait is labelled by API method, so it stays attributable.
+		`bvk_ratelimit_wait_ms_count{label="sendMessage"} 2`,
+		`bvk_ratelimit_wait_ms_max{label="sendMessage"}`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("send path did not record %q\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, `bvk_ratelimit_wait_ms_max{label="chat"} 0`) {
+	if strings.Contains(out, `bvk_ratelimit_wait_ms_max{label="sendMessage"} 0`) {
 		t.Fatalf("second send did not wait for the limiter:\n%s", out)
 	}
 }

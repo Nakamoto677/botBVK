@@ -37,7 +37,7 @@ func (w *Worker) textParts(ctx context.Context, key string, chat, topic int64, t
 	for i, part := range parts {
 		var err error
 		sent, err = w.confirmedPart(ctx, key, i, func() (Message, error) {
-			if err := w.rate(ctx, chat); err != nil {
+			if err := w.rate(ctx, chat, "sendMessage"); err != nil {
 				return Message{}, err
 			}
 			payload := map[string]any{"chat_id": chat, "text": part}
