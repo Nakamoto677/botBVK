@@ -170,7 +170,7 @@ func (w *Worker) uiScreen(ctx context.Context, op domain.Operation) error {
 			if p.TopicID != 0 {
 				payload["message_thread_id"] = p.TopicID
 			}
-			if i == len(parts)-1 && len(p.Markup) > 0 && string(p.Markup) != "null" {
+			if i == len(parts)-1 && hasUsableKeyboard(p.Markup) {
 				payload["reply_markup"] = p.Markup
 			}
 			var result Message
@@ -193,3 +193,44 @@ func (w *Worker) uiScreen(ctx context.Context, op domain.Operation) error {
 }
 
 var errObsoleteScreen = errors.New("obsolete queued screen")
+
+// hasUsableKeyboard reports whether a stored keyboard is worth sending. Checking only
+// for the literal "null" was not enough: a screen whose keyboard was built from an
+// empty button list stored `{"inline_keyboard":null}`, which passes that check and
+// makes Telegram answer `field "inline_keyboard" must be of type Array`. The screen
+// was then lost for good, because a 400 is a permanent failure.
+//
+// A keyboard is sent only when it is a JSON object that actually carries rows in one
+// of the two keyboard forms. Anything else, including malformed JSON, is omitted so
+// the message itself still arrives.
+func hasUsableKeyboard(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var decoded any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return false
+	}
+	object, ok := decoded.(map[string]any)
+	if !ok {
+		return false
+	}
+	for _, field := range []string{"inline_keyboard", "keyboard"} {
+		rows, present := object[field]
+		if !present {
+			continue
+		}
+		list, ok := rows.([]any)
+		if !ok {
+			// The field exists but is null or not an array: Telegram rejects the whole
+			// request, so this keyboard cannot be used.
+			return false
+		}
+		if len(list) > 0 {
+			return true
+		}
+		// An empty row list draws nothing, so the field is pointless either way.
+		return false
+	}
+	return false
+}
