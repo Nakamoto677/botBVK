@@ -135,27 +135,68 @@ func TestClaimBaselineBreakdown(t *testing.T) {
 	if err = svc.Claim(ctx, 2, ticket.ID); err != nil {
 		t.Fatal(err)
 	}
-	// Walk the queue operation by operation so the exact moment the client is told
-	// can be measured, not only the total. All three operations share one ticket, so
-	// the SQL picker hands them over strictly in order.
-	var topicReadyAt, clientToldAt time.Duration
-	time.Sleep(50 * time.Millisecond)
-	for range 30 {
-		op, e := store.NextOperation(ctx)
-		if e != nil {
+	var topicReadyAt, clientToldAt, topicPickedAt, clientPickedAt time.Duration
+	// Drive the queue the way the real worker does: up to four operations in
+	// flight, picked through NextOperationExcluding. Draining one operation at a
+	// time would hide the very effect under measurement, because a single-runner
+	// drain serialises everything by construction.
+	const slots = 4
+	type finished struct {
+		id   int64
+		kind string
+		at   time.Duration
+	}
+	results := make(chan finished, 16)
+	inFlight := map[int64]bool{}
+	running := 0
+	deadline := time.After(60 * time.Second)
+	for {
+		if running < slots {
+			active := make([]int64, 0, len(inFlight))
+			for id := range inFlight {
+				active = append(active, id)
+			}
+			op, e := store.NextOperationExcluding(ctx, active)
+			if e == nil {
+				running++
+				inFlight[op.ID] = true
+				switch op.Kind {
+				case "create_topic":
+					topicPickedAt = time.Since(started)
+				case "notify_client":
+					clientPickedAt = time.Since(started)
+				}
+				go func(op domain.Operation) {
+					handleErr := worker.Handle(ctx, op)
+					if handleErr == nil {
+						handleErr = store.FinishOperation(ctx, op.ID)
+					}
+					if handleErr != nil {
+						results <- finished{id: op.ID, kind: "error", at: time.Since(started)}
+						t.Errorf("operation %s failed: %v", op.Kind, handleErr)
+						return
+					}
+					results <- finished{id: op.ID, kind: op.Kind, at: time.Since(started)}
+				}(op)
+				continue
+			}
+		}
+		if running == 0 {
 			break
 		}
-		if e = worker.Handle(ctx, op); e != nil {
-			t.Fatalf("operation %s failed: %v", op.Kind, e)
-		}
-		if e = store.FinishOperation(ctx, op.ID); e != nil {
-			t.Fatal(e)
-		}
-		switch op.Kind {
-		case "create_topic":
-			topicReadyAt = time.Since(started)
-		case "notify_client":
-			clientToldAt = time.Since(started)
+		select {
+		case f := <-results:
+			running--
+			delete(inFlight, f.id)
+			switch f.kind {
+			case "create_topic":
+				topicReadyAt = f.at
+			case "notify_client":
+				clientToldAt = f.at
+			}
+		case <-deadline:
+			t.Fatal("queue did not settle")
+		case <-time.After(20 * time.Millisecond):
 		}
 	}
 	total := time.Since(started)
@@ -191,6 +232,7 @@ func TestClaimBaselineBreakdown(t *testing.T) {
 	t.Logf("claim total wall clock: %v", total.Round(10*time.Millisecond))
 	t.Logf("topic ready for the engineers at: %v", topicReadyAt.Round(10*time.Millisecond))
 	t.Logf("client told the ticket was taken at: %v", clientToldAt.Round(10*time.Millisecond))
+	t.Logf("create_topic picked at %v, notify_client picked at %v", topicPickedAt.Round(10*time.Millisecond), clientPickedAt.Round(10*time.Millisecond))
 	t.Logf("telegram calls during claim: %d", callCount)
 	t.Logf("call sequence: %s", sequence)
 	t.Logf("rate-limiter wait total: %s ms (this is the delay the bot imposes on itself)", limiterMS)

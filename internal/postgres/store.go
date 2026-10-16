@@ -160,6 +160,19 @@ func (s *Store) Transact(ctx context.Context, fn func(domain.Tx) error) error {
 	return mapError(tx.Commit(ctx))
 }
 
+// conversationKinds lists the operation kinds that add a message to a chat and so
+// belong to that chat's delivery lane. Everything else is ticket bookkeeping and
+// must not occupy a chat stream, or topic preparation would delay the client's own
+// notifications. Must stay a []string so pgx binds it to the text[] parameter.
+var conversationKinds = []string{
+	"client_message",
+	"team_message",
+	"notify_client",
+	"ui_screen",
+	"access_notification",
+	"access_request_notification",
+}
+
 type querier interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 	Query(context.Context, string, ...any) (pgx.Rows, error)
@@ -357,8 +370,26 @@ func (t *transaction) Enqueue(ctx context.Context, v domain.Operation) error {
 	if len(v.Payload) == 0 {
 		v.Payload = json.RawMessage(`{}`)
 	}
-	_, err := t.tx.Exec(ctx, "INSERT INTO bvk_outbox(kind,ticket_id,payload,available_at,conversation_id) VALUES($1,$2,$3,COALESCE($4::timestamptz,now()),COALESCE((SELECT client_id FROM bvk_tickets WHERE id=$2),NULLIF(($3::jsonb->>'user_id')::bigint,0),CASE WHEN ($3::jsonb->>'chat_id')::bigint>0 THEN ($3::jsonb->>'chat_id')::bigint END,0)) ON CONFLICT DO NOTHING", v.Kind, v.TicketID, v.Payload, available)
-	return err
+	// conversation_id marks the chat stream an operation publishes into, which keeps
+	// the messages of one chat in sequence: a client message, a notification and a
+	// form screen must reach their chat in the order they were written.
+	//
+	// Only the fallback is restricted to the kinds that actually add a message to a
+	// chat. Ticket bookkeeping such as create_topic, reopen_topic and the card
+	// refreshes carries no user_id and no chat_id, so with this restriction it finds
+	// no lane at all instead of inheriting the ticket's client_id. That inheritance
+	// used to place topic preparation in the client's own lane and held the
+	// "engineer took your ticket" notice behind the whole topic setup.
+	if _, err := t.tx.Exec(ctx, `INSERT INTO bvk_outbox(kind,ticket_id,payload,available_at,conversation_id)
+		VALUES($1,$2,$3,COALESCE($4::timestamptz,now()),COALESCE(
+			NULLIF(($3::jsonb->>'user_id')::bigint,0),
+			CASE WHEN ($3::jsonb->>'chat_id')::bigint>0 THEN ($3::jsonb->>'chat_id')::bigint END,
+			CASE WHEN $1 = ANY($5::text[]) THEN (SELECT client_id FROM bvk_tickets WHERE id=$2) END,
+			0
+		)) ON CONFLICT DO NOTHING`, v.Kind, v.TicketID, v.Payload, available, conversationKinds); err != nil {
+		return err
+	}
+	return nil
 }
 func (t *transaction) RequestAccess(ctx context.Context, userID, companyID int64) error {
 	// Serialize registration with startup synchronization, then recheck inside
@@ -528,7 +559,15 @@ func (s *Store) NextOperationExcluding(ctx context.Context, active []int64) (dom
 		active = []int64{}
 	}
 	var v domain.Operation
-	err := s.pool.QueryRow(ctx, `WITH picked AS (SELECT candidate.id FROM bvk_outbox candidate WHERE candidate.id <> ALL($1::bigint[]) AND ((candidate.state='pending' AND candidate.available_at<=now()) OR (candidate.state='processing' AND candidate.lease_until<=now())) AND NOT EXISTS (SELECT 1 FROM bvk_outbox older WHERE ((candidate.ticket_id<>0 AND older.ticket_id=candidate.ticket_id) OR (candidate.conversation_id<>0 AND older.conversation_id=candidate.conversation_id)) AND older.id<candidate.id AND older.state IN ('pending','processing')) ORDER BY candidate.available_at,candidate.id FOR UPDATE OF candidate SKIP LOCKED LIMIT 1) UPDATE bvk_outbox o SET state='processing',attempts=o.attempts+1,lease_until=now()+interval '5 minutes' FROM picked WHERE o.id=picked.id RETURNING o.id,o.kind,o.ticket_id,o.payload,o.attempts,o.available_at,o.last_error,o.state`, active).Scan(&v.ID, &v.Kind, &v.TicketID, &v.Payload, &v.Attempts, &v.AvailableAt, &v.LastError, &v.State)
+	// Two ordering lanes. Ticket order holds for the operations that mutate ticket
+	// state; a client notification carries text fixed at commit time and touches no
+	// ticket state, so it must not wait behind topic preparation. Conversation order
+	// keeps the messages of one chat stream in sequence.
+	//
+	// The conversation comparison needs an explicit non-zero guard: operations that
+	// belong to no chat store conversation_id = 0, and "0 = 0" would otherwise make
+	// every such operation block every other one, which is not a conversation at all.
+	err := s.pool.QueryRow(ctx, `WITH picked AS (SELECT candidate.id FROM bvk_outbox candidate WHERE candidate.id <> ALL($1::bigint[]) AND ((candidate.state='pending' AND candidate.available_at<=now()) OR (candidate.state='processing' AND candidate.lease_until<=now())) AND NOT EXISTS (SELECT 1 FROM bvk_outbox older WHERE ((candidate.kind<>'notify_client' AND candidate.ticket_id<>0 AND older.ticket_id=candidate.ticket_id AND older.kind<>'notify_client') OR (candidate.conversation_id<>0 AND older.conversation_id=candidate.conversation_id)) AND older.id<candidate.id AND older.state IN ('pending','processing')) ORDER BY candidate.available_at,candidate.id FOR UPDATE OF candidate SKIP LOCKED LIMIT 1) UPDATE bvk_outbox o SET state='processing',attempts=o.attempts+1,lease_until=now()+interval '5 minutes' FROM picked WHERE o.id=picked.id RETURNING o.id,o.kind,o.ticket_id,o.payload,o.attempts,o.available_at,o.last_error,o.state`, active).Scan(&v.ID, &v.Kind, &v.TicketID, &v.Payload, &v.Attempts, &v.AvailableAt, &v.LastError, &v.State)
 	return v, mapError(err)
 }
 func (s *Store) FinishOperation(ctx context.Context, id int64) error {
