@@ -201,23 +201,7 @@ func card(t domain.Ticket) string {
 func cardButtons(t domain.Ticket) [][]Button { return engineerQueueButtons(t) }
 func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 	w.currentOperation = op.ID
-	var payload struct {
-		Text              string            `json:"text"`
-		UserID            int64             `json:"user_id"`
-		TicketID          int64             `json:"ticket_id"`
-		ChatID            int64             `json:"chat_id"`
-		TopicID           int64             `json:"topic_id"`
-		OldChatID         int64             `json:"old_chat_id"`
-		OldTopicID        int64             `json:"old_topic_id"`
-		Reason            string            `json:"reason"`
-		Pause             bool              `json:"pause"`
-		Retire            bool              `json:"retire"`
-		MessageID         int64             `json:"message_id"`
-		FromDepartment    domain.Department `json:"from_department"`
-		ToDepartment      domain.Department `json:"to_department"`
-		RoutingGeneration int64             `json:"routing_generation"`
-		CompletionKey     string            `json:"completion_key"`
-	}
+	var payload operationPayload
 	if len(op.Payload) > 0 {
 		if err := json.Unmarshal(op.Payload, &payload); err != nil {
 			return fmt.Errorf("%w: operation payload", domain.ErrInvalid)
@@ -227,41 +211,13 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 		return w.uiScreen(ctx, op)
 	}
 	if op.Kind == "access_request_notification" {
-		var request struct {
-			RequestID int64 `json:"request_id"`
-			UserID    int64 `json:"user_id"`
-			CompanyID int64 `json:"company_id"`
-		}
-		if err := json.Unmarshal(op.Payload, &request); err != nil {
-			return domain.ErrInvalid
-		}
-		for _, id := range w.cfg.AdminIDs {
-			if _, err := w.send(ctx, id, 0, fmt.Sprintf("Заявка на доступ #%d. Аккаунт %d, компания %d", request.RequestID, request.UserID, request.CompanyID), [][]Button{{{Text: "Одобрить", Data: fmt.Sprintf("approve:%d", request.RequestID)}, {Text: "Отклонить", Data: fmt.Sprintf("reject:%d", request.RequestID)}}}); err != nil {
-				return err
-			}
-		}
-		return nil
+		return w.accessRequestNotification(ctx, op)
 	}
 	if op.Kind == "access_notification" {
-		user, err := w.store.User(ctx, payload.UserID)
-		if err != nil && !errors.Is(err, domain.ErrNotFound) {
-			return err
-		}
-		if user.Approved && user.Role == "client" {
-			return w.clientAccessNotification(ctx, payload.UserID, payload.Text+"\nВыберите действие в меню.")
-		}
-		_, err = w.send(ctx, payload.UserID, 0, payload.Text, nil)
-		return err
+		return w.accessNotification(ctx, payload)
 	}
-
 	if op.Kind == "delete_aux_message" {
-		if payload.ChatID == 0 || payload.MessageID <= 0 {
-			return domain.ErrInvalid
-		}
-		if err := w.rate(ctx, payload.ChatID); err != nil {
-			return err
-		}
-		return auxiliaryDeleteError(w.client.Call(ctx, "deleteMessage", map[string]any{"chat_id": payload.ChatID, "message_id": payload.MessageID}, nil))
+		return w.deleteAuxMessage(ctx, payload)
 	}
 
 	t, err := w.store.Ticket(ctx, op.TicketID)
@@ -274,317 +230,25 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 	}
 	switch op.Kind {
 	case "create_topic":
-		if payload.RoutingGeneration != 0 && payload.RoutingGeneration != t.RoutingGeneration {
-			return nil
-		}
-		// Old queued operations must not create a topic before an engineer claims the ticket.
-		if t.Status == domain.New {
-			return w.refresh(ctx, t)
-		}
-		if !provisioningStatus(t.Status) {
-			return nil
-		}
-		// A binding matching this department makes a retried operation safe after a crash.
-		if t.TopicID != 0 && t.TopicChatID == team.ChatID {
-			t, err = w.ensureTopicCard(ctx, t)
-			if err != nil {
-				return err
-			}
-			if payload.OldChatID != 0 && payload.OldTopicID != 0 {
-				if err = w.client.CloseTopic(ctx, payload.OldChatID, payload.OldTopicID); err != nil {
-					return err
-				}
-				if err = w.retire(ctx, t.ID, payload.OldChatID, payload.OldTopicID); err != nil {
-					return err
-				}
-			}
-			if err = w.replayDeferred(ctx, t); err != nil {
-				return err
-			}
-			t, err = w.finishProvision(ctx, t)
-			if err != nil {
-				return err
-			}
-			return w.refresh(ctx, t)
-		}
-		if !t.Status.Active() {
-			return nil
-		}
-		if err = w.rate(ctx, team.ChatID); err != nil {
-			return err
-		}
-		name, err := displayName(ctx, w.store, t.ClientID, "Клиент")
-		if err != nil {
-			return err
-		}
-		company, err := companyName(ctx, w.store, t.CompanyID)
-		if err != nil {
-			return err
-		}
-		title := []rune(fmt.Sprintf("#%d · %s · %s", t.ID, name, company))
-		if len(title) > 120 {
-			title = title[:120]
-		}
-		topic, err := w.client.Topic(ctx, team.ChatID, string(title))
-		if err != nil {
-			return err
-		}
-		bound := false
-		err = w.store.Transact(ctx, func(tx domain.Tx) error {
-			current, e := tx.GetTicket(ctx, t.ID)
-			if e != nil {
-				return e
-			}
-			if current.Department != t.Department || !provisioningStatus(current.Status) || !current.RoutingPending || current.AssigneeID != t.AssigneeID || current.RoutingGeneration != t.RoutingGeneration || current.TopicID != t.TopicID || current.TopicChatID != t.TopicChatID {
-				return domain.ErrConflict
-			}
-			current.TopicChatID = team.ChatID
-			current.TopicID = topic
-			current.TopicMessageID = 0
-			if e = tx.SaveTicket(ctx, &current); e != nil {
-				return e
-			}
-			t = current
-			bound = true
-			return nil
-		})
-		if err != nil {
-			_ = w.client.CloseTopic(ctx, team.ChatID, topic)
-			return err
-		}
-		if !bound {
-			return domain.ErrConflict
-		}
-		t, err = w.ensureTopicCard(ctx, t)
-		if err != nil {
-			return err
-		}
-		if payload.Reason != "" {
-			if _, err = w.send(ctx, t.TopicChatID, t.TopicID, "Причина передачи: "+payload.Reason, nil); err != nil {
-				return err
-			}
-		}
-		if payload.OldChatID != 0 && payload.OldTopicID != 0 {
-			if err = w.client.CloseTopic(ctx, payload.OldChatID, payload.OldTopicID); err != nil {
-				return err
-			}
-			if err = w.retire(ctx, t.ID, payload.OldChatID, payload.OldTopicID); err != nil {
-				return err
-			}
-		}
-		if err = w.replayDeferred(ctx, t); err != nil {
-			return err
-		}
-		t, err = w.finishProvision(ctx, t)
-		if err != nil {
-			return err
-		}
-		return w.refresh(ctx, t)
+		return w.createTopic(ctx, op, payload, t, team)
 	case "refresh_card":
 		return w.refresh(ctx, t)
 	case "retire_queue_card":
-		chat := payload.ChatID
-		if chat == 0 {
-			chat = w.cfg.Departments[payload.FromDepartment].ChatID
-		}
-		if chat == 0 || payload.MessageID == 0 {
-			return nil
-		}
-		text, e := w.card(ctx, t)
-		if e != nil {
-			return e
-		}
-		if err = w.rate(ctx, chat); err != nil {
-			return err
-		}
-		return messageEditError(w.client.Call(ctx, "editMessageText", map[string]any{"chat_id": chat, "message_id": payload.MessageID, "text": text + "\nПередано в отдел: " + departmentName(payload.ToDepartment), "parse_mode": "HTML", "reply_markup": Markup{Buttons: [][]Button{}}}, nil))
+		return w.retireQueueCard(ctx, payload, t)
 	case "team_notification":
-		_, err = w.send(ctx, team.ChatID, team.QueueTopicID, payload.Text, nil)
-		return err
+		return w.teamNotification(ctx, payload, team)
 	case "notify_client":
 		return w.clientNotification(ctx, t, payload.Text)
 	case "archive_message":
-		var msg domain.Message
-		if err = json.Unmarshal(op.Payload, &msg); err != nil {
-			return domain.ErrInvalid
-		}
-		return w.archive(ctx, t, msg)
+		return w.archiveMessage(ctx, op, t)
 	case "client_message", "team_message":
-		var msg domain.Message
-		if err = json.Unmarshal(op.Payload, &msg); err != nil {
-			return domain.ErrInvalid
-		}
-		if op.Kind == "client_message" {
-			events, e := w.store.Events(ctx, t.ID)
-			if e != nil {
-				return e
-			}
-			for _, event := range events {
-				if event.Kind != "message_delivered" {
-					continue
-				}
-				var d struct {
-					SourceID int64      `json:"source_message_id"`
-					EditedAt *time.Time `json:"edited_at"`
-				}
-				if json.Unmarshal(event.Data, &d) == nil && d.SourceID == msg.ID && d.EditedAt != nil && (msg.EditedAt == nil || d.EditedAt.After(*msg.EditedAt)) {
-					return nil
-				}
-			}
-		}
-		if msg.FileID != "" {
-			if err = w.archive(ctx, t, msg); err != nil {
-				return err
-			}
-		}
-		chat, topic := t.ClientID, int64(0)
-		if op.Kind == "team_message" {
-			chat, topic, err = w.messageRoute(ctx, t, msg)
-			if err != nil {
-				return err
-			}
-
-			if topic == 0 {
-				return fmt.Errorf("topic pending")
-			}
-		}
-		sent, e := w.deliver(ctx, chat, topic, msg, op.Kind == "team_message")
-		if e != nil {
-			return e
-		}
-		data, _ := json.Marshal(map[string]any{"source_message_id": msg.ID, "telegram_chat_id": chat, "telegram_message_id": sent.ID, "telegram_topic_id": topic, "direction": msg.Direction, "edited_at": msg.EditedAt})
-		return w.store.Transact(ctx, func(tx domain.Tx) error {
-			if op.Kind == "client_message" {
-				current, e := tx.GetTicket(ctx, t.ID)
-				if e != nil {
-					return e
-				}
-				if current.FirstResponseAt == nil {
-					now := time.Now().UTC()
-					current.FirstResponseAt = &now
-					if e = tx.SaveTicket(ctx, &current); e != nil {
-						return e
-					}
-					if e = tx.AddEvent(ctx, domain.Event{TicketID: t.ID, ActorID: msg.AuthorID, Kind: "first_response", CreatedAt: now, Data: json.RawMessage(`{}`)}); e != nil {
-						return e
-					}
-				}
-			}
-			return tx.AddEvent(ctx, domain.Event{TicketID: t.ID, ActorID: msg.AuthorID, Kind: "message_delivered", Data: data, CreatedAt: time.Now().UTC()})
-		})
+		return w.relayMessage(ctx, op, t)
 	case "close_topic":
-		if payload.ChatID == 0 {
-			payload.ChatID = t.TopicChatID
-		}
-		if payload.TopicID == 0 {
-			payload.TopicID = t.TopicID
-		}
-		if payload.TopicID == 0 {
-			return nil
-		}
-		if payload.ChatID == t.TopicChatID && payload.TopicID == t.TopicID && t.Status.Active() && t.Status != domain.New {
-			return nil
-		}
-		notice := payload.Text
-		if payload.Retire && payload.ToDepartment.Valid() {
-			notice = "Передано в отдел " + departmentName(payload.ToDepartment)
-		}
-		if notice != "" {
-			if err = w.topicClosingNotice(ctx, op, payload.ChatID, payload.TopicID, notice); err != nil {
-				return err
-			}
-		}
-		if err = w.client.CloseTopic(ctx, payload.ChatID, payload.TopicID); err != nil {
-			return err
-		}
-		if payload.Retire {
-			return w.retire(ctx, t.ID, payload.ChatID, payload.TopicID)
-		}
-		return nil
+		return w.closeTopic(ctx, op, payload, t)
 	case "reopen_topic":
-		if payload.RoutingGeneration != 0 && payload.RoutingGeneration != t.RoutingGeneration {
-			return nil
-		}
-		if t.TopicID == 0 || !provisioningStatus(t.Status) {
-			return nil
-		}
-		if err = w.client.ReopenTopic(ctx, t.TopicChatID, t.TopicID); err != nil {
-			return err
-		}
-		t, err = w.ensureTopicCard(ctx, t)
-		if err != nil {
-			return err
-		}
-		if err = w.replayDeferred(ctx, t); err != nil {
-			return err
-		}
-		t, err = w.finishProvision(ctx, t)
-		if err != nil {
-			return err
-		}
-		return w.refresh(ctx, t)
+		return w.reopenTopic(ctx, payload, t)
 	case "delete_topic":
-		if payload.ChatID == 0 || payload.TopicID == 0 || payload.CompletionKey == "" {
-			return domain.ErrInvalid
-		}
-		events, e := w.store.Events(ctx, t.ID)
-		if e != nil {
-			return e
-		}
-		intent := false
-		for _, event := range events {
-			if event.Kind != "completion_cleanup_requested" {
-				continue
-			}
-			var saved struct {
-				ChatID     int64  `json:"chat_id"`
-				TopicID    int64  `json:"topic_id"`
-				Generation int64  `json:"routing_generation"`
-				Key        string `json:"completion_key"`
-			}
-			if json.Unmarshal(event.Data, &saved) == nil && saved.ChatID == payload.ChatID && saved.TopicID == payload.TopicID && saved.Generation == payload.RoutingGeneration && saved.Key == payload.CompletionKey {
-				intent = true
-			}
-		}
-		if !intent {
-			return domain.ErrForbidden
-		}
-		data, _ := json.Marshal(map[string]any{"chat_id": payload.ChatID, "topic_id": payload.TopicID, "routing_generation": payload.RoutingGeneration, "key": payload.CompletionKey, "completion_key": payload.CompletionKey})
-		return w.store.Transact(ctx, func(tx domain.Tx) error {
-			now, e := tx.GetTicket(ctx, t.ID)
-			if e != nil {
-				return e
-			}
-			if now.TopicChatID == payload.ChatID && now.TopicID == payload.TopicID && now.Status.Active() {
-				return tx.AddEvent(ctx, domain.Event{TicketID: t.ID, Kind: "cleanup_deferred", Data: data, CreatedAt: time.Now().UTC()})
-			}
-			if w.cfg.BeforeDelete == nil {
-				return domain.ErrForbidden
-			}
-			if e = w.cfg.BeforeDelete(ctx, tx, now, payload.ChatID, payload.TopicID); e != nil {
-				if errors.Is(e, domain.ErrConflict) {
-					return tx.AddEvent(ctx, domain.Event{TicketID: t.ID, Kind: "cleanup_deferred", Data: data, CreatedAt: time.Now().UTC()})
-				}
-				return e
-			}
-			// This call holds the inbox/archive fence. Bound network waiting so
-			// Telegram trouble cannot stall acceptance for the client's 65s timeout.
-			deleteCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			e = topicDeleteError(w.client.Call(deleteCtx, "deleteForumTopic", map[string]any{"chat_id": payload.ChatID, "message_thread_id": payload.TopicID}, nil))
-			cancel()
-			if e != nil {
-				return e
-			}
-			if now.TopicChatID == payload.ChatID && now.TopicID == payload.TopicID && !now.Status.Active() {
-				now.TopicChatID = 0
-				now.TopicID = 0
-				now.TopicMessageID = 0
-				if e = tx.SaveTicket(ctx, &now); e != nil {
-					return e
-				}
-			}
-			return tx.AddEvent(ctx, domain.Event{TicketID: t.ID, Kind: "topic_deleted", Data: data, CreatedAt: time.Now().UTC()})
-		})
+		return w.deleteTopic(ctx, payload, t)
 
 	default:
 		return domain.ErrInvalid
