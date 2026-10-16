@@ -46,6 +46,10 @@ type Adapter struct {
 	activeUpdate   int64
 	activeActor    int64
 	screenSequence int
+	// answeredCallback records that this update already answered its callback
+	// query, so an error path must not answer again and replace the text the user
+	// just received. Only the single inbox goroutine writes it.
+	answeredCallback bool
 
 	client    *Client
 	store     domain.Store
@@ -174,11 +178,20 @@ func (a *Adapter) respondError(ctx context.Context, u Update, err error) {
 		}
 	}
 	if u.Callback != nil {
-		_ = a.client.Answer(ctx, u.Callback.ID, text)
+		// A screen that already explained itself to the user must not be replaced
+		// by a generic "action unavailable" answer.
+		if !a.answeredCallback {
+			_ = a.client.Answer(ctx, u.Callback.ID, text)
+			a.markCallbackAnswered()
+		}
 	} else if u.Message != nil && (u.Message.Chat.Type == "private" || a.trustedGroup(u.Message.Chat.ID)) {
 		_, _ = a.client.Send(ctx, u.Message.Chat.ID, u.Message.ThreadID, text, nil)
 	}
 }
+
+// markCallbackAnswered records that the current update answered its callback
+// query. Every acknowledgement must go through it so respondError stays quiet.
+func (a *Adapter) markCallbackAnswered() { a.answeredCallback = true }
 func (a *Adapter) say(ctx context.Context, m *Message, text string, buttons [][]Button) error {
 	if a.activeUpdate != 0 {
 		var markup any
@@ -448,6 +461,7 @@ func (a *Adapter) callback(ctx context.Context, c *Callback) error {
 	}
 	if action != "company" {
 		_ = a.client.Answer(ctx, c.ID, "")
+		a.markCallbackAnswered()
 	}
 	return nil
 }

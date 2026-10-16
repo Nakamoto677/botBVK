@@ -146,11 +146,22 @@ func TestStaleDraftCancelAndDepartmentCannotAffectActiveTicket(t *testing.T) {
 		t.Fatal("stale draft cancellation changed ticket")
 	}
 	botMsg := &Message{From: Person{ID: 999}, Chat: m.Chat}
-	if err := a.callback(context.Background(), &Callback{From: m.From, Message: botMsg, Data: "new:1c"}); err != nil {
+	// A stale department screen is a rejected action, not a silent success: the
+	// typed error stops the caller and lets the user be told the screen is
+	// outdated instead of leaving the callback unanswered.
+	before := len(*requests)
+	if err := a.callback(context.Background(), &Callback{From: m.From, Message: botMsg, Data: "new:1c"}); !errors.Is(err, domain.ErrConflict) {
 		t.Fatalf("stale department accepted: %v", err)
 	}
-	if len(*requests) != 3 {
-		t.Fatal("stale department sent new prompt")
+	// Only the outdated-screen notice and the button cleanup may follow. A delivered
+	// screen carries text and a chat_id, while the notice is a callback answer, so
+	// that pair identifies a new prompt unambiguously.
+	for _, req := range (*requests)[before:] {
+		_, hasText := req["text"]
+		_, hasChat := req["chat_id"]
+		if hasText && hasChat {
+			t.Fatalf("stale department sent new prompt: %v", req)
+		}
 	}
 }
 

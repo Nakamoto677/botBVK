@@ -24,6 +24,7 @@ func (a *Adapter) processUpdate(ctx context.Context, entry domain.StoredUpdate) 
 	if !malformed {
 		a.activeUpdate = entry.ID
 		a.activeActor = 0
+		a.answeredCallback = false
 		if u.Callback != nil {
 			a.activeActor = u.Callback.From.ID
 		} else if u.Message != nil {

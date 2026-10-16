@@ -20,6 +20,7 @@ func (a *Adapter) callbackCompany(ctx context.Context, c *Callback, id int64) er
 		return domain.ErrForbidden
 	}
 	_ = a.client.Answer(ctx, c.ID, "")
+	a.markCallbackAnswered()
 	companies, err := a.store.Companies(ctx)
 	if err != nil {
 		return err

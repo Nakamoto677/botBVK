@@ -108,8 +108,11 @@ func TestRetainedButtonsCannotMutateAnotherForm(t *testing.T) {
 	}
 	second := a.drafts[1]
 	for _, payload := range []string{"new:it:" + first, "submit:" + first, "cancel:" + first, "new:it", "submit", "cancel"} {
-		if err := a.callback(ctx, &Callback{From: m.From, Message: &Message{Chat: m.Chat, ID: 55}, Data: payload}); err != nil {
-			t.Fatal(err)
+		// Every payload here belongs to the previous form generation, so each one is
+		// a rejected screen. The error is expected; what matters is that none of
+		// them may touch the form that replaced it.
+		if err := a.callback(ctx, &Callback{From: m.From, Message: &Message{Chat: m.Chat, ID: 55}, Data: payload}); !errors.Is(err, domain.ErrConflict) {
+			t.Fatalf("old callback not rejected: %v (%s)", err, payload)
 		}
 		got := a.drafts[1]
 		if got.Generation != second.Generation || got.Step != second.Step || got.Text != second.Text {
@@ -495,11 +498,25 @@ func TestDraftFileReplacementRestartSubmitAndStaleScreens(t *testing.T) {
 	if err = a.resumeDraft(ctx, m); err != nil {
 		t.Fatal(err)
 	}
-	callback("submit:" + oldConfirm)
-	callback("new:1c:" + departmentToken)
-	callback("cancel:" + oldConfirm)
-	callback("submit:" + d.Generation)
-	callback("submit:" + d.Generation)
+	// A stale screen is rejected now, so the payloads carrying the previous
+	// generation must surface ErrConflict while the current game continues.
+	stale := func(data string) {
+		t.Helper()
+		if err := a.callback(ctx, &Callback{ID: "callback", From: m.From, Message: &Message{ID: 100, Chat: m.Chat}, Data: data}); !errors.Is(err, domain.ErrConflict) {
+			t.Fatalf("stale screen not rejected: %v (%s)", err, data)
+		}
+	}
+	current := func(data string) {
+		t.Helper()
+		if err := a.callback(ctx, &Callback{ID: "callback", From: m.From, Message: &Message{ID: 100, Chat: m.Chat}, Data: data}); err != nil {
+			t.Fatalf("current screen rejected: %v (%s)", err, data)
+		}
+	}
+	stale("submit:" + oldConfirm)
+	stale("new:1c:" + departmentToken)
+	stale("cancel:" + oldConfirm)
+	current("submit:" + d.Generation)
+	stale("submit:" + d.Generation)
 	active, err := store.ActiveTicket(ctx, 1)
 	if err != nil || active.Description != "File description\n\nReplacement description" {
 		t.Fatal(active, err)
@@ -521,7 +538,7 @@ func TestDraftFileReplacementRestartSubmitAndStaleScreens(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, payload := range []string{"submit:" + d.Generation, "cancel:" + d.Generation, "new:it:" + departmentToken, "submit", "cancel"} {
-		callback(payload)
+		stale(payload)
 	}
 	final, err := store.LoadDraft(ctx, 1)
 	if err != nil || final.Generation != newDraft.Generation || final.Step != "department" {

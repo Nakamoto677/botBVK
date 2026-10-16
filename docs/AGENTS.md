@@ -22,8 +22,8 @@ keyboards, menus, navigation, confirmations, and error states. Read
 making interface changes. Preserve the requirements in `docs/STATE.md` and existing
 business logic; explicit user instructions take precedence over skill guidelines.
 
-Two traps when editing the Telegram layer: an extracted dispatcher branch is not
-always behaviour-preserving, because several branches rely on early returns that skip
-callback acknowledgement and keyboard cleanup; and `boundDraft` reports a rejected
-draft with a nil error, so callers treat it as a silent success. Both are recorded as
-open work in `docs/STATE.md`.
+Traps when editing the Telegram layer: an extracted dispatcher branch is not always
+behaviour-preserving, because several branches rely on early returns that skip
+callback acknowledgement and keyboard cleanup; and every callback acknowledgement
+must go through `Adapter.markCallbackAnswered`, otherwise `respondError` answers a
+second time and replaces the text the user just received.

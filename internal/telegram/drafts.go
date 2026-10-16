@@ -73,8 +73,13 @@ func draftDepartments(d draft) [][]Button {
 	}
 	return append(buttons, []Button{{Text: clientCancelDraftLabel, Data: "cancel:" + d.Generation}})
 }
+// staleDraft tells the user that the tapped screen is outdated, drops its buttons
+// and marks the callback answered. The marker is what keeps the shared error path
+// from answering the same callback a second time with a generic message and
+// replacing this explanation.
 func (a *Adapter) staleDraft(ctx context.Context, c *Callback) error {
 	_ = a.client.Answer(ctx, c.ID, "Этот экран больше не актуален. Откройте текущее состояние: /form или /current.")
+	a.markCallbackAnswered()
 	if c.Message != nil {
 		_ = a.client.HideMessageKeyboard(ctx, c.Message.Chat.ID, c.Message.ID)
 	}
@@ -93,11 +98,11 @@ func (a *Adapter) boundDraft(ctx context.Context, c *Callback, parts []string, s
 		token = parts[len(parts)-1]
 	}
 	if d.Step == "submitted" || !exists || d.Generation == "" || token != d.Generation || (step != "" && d.Step != step) {
-		// Return the stale-screen error instead of nil. Callers check "err != nil
-		// || !valid" and previously exited successfully with a hardcoded nil, which
-		// swallowed the reason the screen was rejected. The side effect on the
-		// caller's message is separate and still happens here.
-		return d, false, a.staleDraft(ctx, c)
+		// A rejected screen is a business conflict, not a silent success: return
+		// the typed error so the caller stops instead of finishing the update as
+		// if it had succeeded, which also left the client spinner hanging.
+		_ = a.staleDraft(ctx, c)
+		return d, false, domain.ErrConflict
 	}
 	return d, true, nil
 }

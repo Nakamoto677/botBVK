@@ -38,6 +38,10 @@ func (s *adapterStore) Transact(ctx context.Context, f func(domain.Tx) error) er
 	return f(&adapterTx{store: s})
 }
 
+// FinishUpdate lets a test drive the real processUpdate pipeline instead of calling
+// Handle directly, so callback acknowledgement and error reporting are covered.
+func (s *adapterStore) FinishUpdate(context.Context, int64) error { return nil }
+
 type adapterTx struct {
 	domain.Tx
 	store *adapterStore
