@@ -97,6 +97,19 @@ func (s *Scheduler) Tick(ctx context.Context) error {
 		}
 
 	}
+	if sweeper, ok := s.Store.(interface {
+		RetireFinishedFailures(context.Context) (int, error)
+	}); ok {
+		// A failed operation is terminal and the bot never retries it, while /ready
+		// reports not-ready for as long as one exists. Clearing what cannot be retried
+		// keeps readiness meaningful; failures on live tickets are kept by the store so
+		// that signal stays visible.
+		if retired, err := sweeper.RetireFinishedFailures(ctx); err != nil {
+			slog.Error("failed to retire finished failures", "error", err)
+		} else if retired > 0 {
+			slog.Info("retired failed operations that cannot be retried", "count", retired)
+		}
+	}
 	return nil
 }
 func hasKey(events []domain.Event, key string) bool {
