@@ -180,6 +180,29 @@ type Markup struct {
 	Buttons [][]Button `json:"inline_keyboard"`
 }
 
+// HasRows reports whether the keyboard has anything to draw. An "inline keyboard" with
+// no rows is not a keyboard, and Telegram rejects the request outright.
+func (m Markup) HasRows() bool {
+	for _, row := range m.Buttons {
+		if len(row) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// MarshalJSON keeps the field out when there is nothing to draw. Without this, an
+// empty button list serialised to {"inline_keyboard":null}, and Telegram answers
+// `field "inline_keyboard" must be of type Array`, failing the whole request. Callers
+// legitimately build an empty keyboard to strip the buttons off a finished card.
+func (m Markup) MarshalJSON() ([]byte, error) {
+	if !m.HasRows() {
+		return []byte(`{}`), nil
+	}
+	type plain Markup
+	return json.Marshal(plain(m))
+}
+
 func (c *Client) Updates(ctx context.Context, offset int64) ([]Update, error) {
 	return c.updatesTimeout(ctx, offset, 50)
 }
