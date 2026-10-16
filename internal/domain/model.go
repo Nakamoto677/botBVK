@@ -17,6 +17,21 @@ const (
 
 func (d Department) Valid() bool { return d == IT || d == OneC || d == Installation || d == Field }
 
+func (d Department) Name() string {
+	switch d {
+	case OneC:
+		return "1С"
+	case IT:
+		return "IT"
+	case Installation:
+		return "Монтаж"
+	case Field:
+		return "Выезд"
+	default:
+		return "Поддержка"
+	}
+}
+
 type Status string
 
 const (

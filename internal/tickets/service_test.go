@@ -124,6 +124,48 @@ func setup() (*Service, *fakeStore) {
 	s.now = func() time.Time { return time.Date(2026, 10, 12, 2, 0, 0, 0, time.UTC) }
 	return s, f
 }
+
+func notificationText(t *testing.T, op domain.Operation) string {
+	t.Helper()
+	if op.Kind != "notify_client" {
+		t.Fatalf("operation kind = %s, want notify_client", op.Kind)
+	}
+	var payload struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(op.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	return payload.Text
+}
+
+func TestClaimNotifiesClientWithEngineerTelegramName(t *testing.T) {
+	for _, tt := range []struct {
+		name, username, want string
+	}{
+		{"Анна Иванова", "anna", "Анна Иванова"},
+		{"", "anna", "@anna"},
+		{"", "", "поддержки"},
+	} {
+		t.Run(tt.want, func(t *testing.T) {
+			s, f := setup()
+			user := f.users[2]
+			user.Name, user.Username = tt.name, tt.username
+			f.users[2] = user
+			ticket, err := s.Create(t.Context(), 1, domain.IT, "help")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Claim(t.Context(), 2, ticket.ID); err != nil {
+				t.Fatal(err)
+			}
+			want := "Инженер " + tt.want + " взял вашу заявку в работу\nВаша переписка продолжится прямо в этом чате:"
+			if got := notificationText(t, f.ops[len(f.ops)-1]); got != want {
+				t.Fatalf("notice = %q, want %q", got, want)
+			}
+		})
+	}
+}
 func TestClaimConcurrentAndScope(t *testing.T) {
 	s, f := setup()
 	ctx := context.Background()
@@ -195,6 +237,9 @@ func TestMessagesAndFirstResponse(t *testing.T) {
 
 func TestTransferRetainsHistoryAndReopen(t *testing.T) {
 	s, f := setup()
+	engineer := f.users[3]
+	engineer.Name = "Мария Петрова"
+	f.users[3] = engineer
 	ticket, _ := s.Create(t.Context(), 1, domain.IT, "help")
 	_ = s.Claim(t.Context(), 2, ticket.ID)
 	v := f.tickets[ticket.ID]
@@ -221,6 +266,9 @@ func TestTransferRetainsHistoryAndReopen(t *testing.T) {
 			t.Fatal(f.ops[before+i])
 		}
 	}
+	if got, want := notificationText(t, f.ops[before+3]), "Ваше обращение передали в отдел 1С\nИнженеры увидели вашу заявку, скоро возьмут в работу!"; got != want {
+		t.Fatalf("transfer notice = %q, want %q", got, want)
+	}
 	var payload map[string]any
 	_ = json.Unmarshal(f.ops[before].Payload, &payload)
 	if payload["topic_id"] != float64(5) || payload["retire"] != true || payload["to_department"] != string(domain.OneC) {
@@ -228,6 +276,9 @@ func TestTransferRetainsHistoryAndReopen(t *testing.T) {
 	}
 	if err := s.Claim(t.Context(), 3, v.ID); err != nil {
 		t.Fatal(err)
+	}
+	if got, want := notificationText(t, f.ops[len(f.ops)-1]), "Инженер Мария Петрова взял вашу заявку в работу\nВаша переписка продолжится прямо в этом чате:"; got != want {
+		t.Fatalf("claim notice = %q, want %q", got, want)
 	}
 	if f.ops[len(f.ops)-3].Kind != "create_topic" {
 		t.Fatal("claim did not create target")

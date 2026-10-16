@@ -489,6 +489,13 @@ func (a *Adapter) callback(ctx context.Context, c *Callback) error {
 			err = a.beginCancel(ctx, c.From.ID, c.Message, id)
 		}
 	case "claim":
+		user, e := a.store.User(ctx, c.From.ID)
+		if e != nil {
+			return e
+		}
+		if e = a.updateName(ctx, user, c.From); e != nil {
+			return e
+		}
 		err = a.service.Claim(ctx, c.From.ID, id)
 	case "waiting":
 		err = a.service.SetWaiting(ctx, c.From.ID, id, true)

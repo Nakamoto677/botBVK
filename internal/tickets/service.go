@@ -53,6 +53,16 @@ func (s *Service) event(ctx context.Context, tx domain.Tx, t domain.Ticket, acto
 func (s *Service) notify(ctx context.Context, tx domain.Tx, t domain.Ticket, text string) error {
 	return s.enqueue(ctx, tx, t, "notify_client", map[string]string{"text": text})
 }
+
+func engineerName(u domain.User) string {
+	if name := strings.Join(strings.Fields(u.Name), " "); name != "" {
+		return name
+	}
+	if username := strings.TrimSpace(u.Username); username != "" {
+		return "@" + strings.TrimPrefix(username, "@")
+	}
+	return "поддержки"
+}
 func (s *Service) Register(ctx context.Context, id int64, name string, companyID int64) error {
 	if id <= 0 || companyID <= 0 || strings.TrimSpace(name) == "" {
 		return domain.ErrInvalid
@@ -243,7 +253,7 @@ func (s *Service) Claim(ctx context.Context, actorID, ticketID int64) error {
 		if err := s.enqueue(ctx, tx, *t, "refresh_card", nil); err != nil {
 			return err
 		}
-		return s.notify(ctx, tx, *t, "Инженер взял заявку в работу.")
+		return s.notify(ctx, tx, *t, fmt.Sprintf("Инженер %s взял вашу заявку в работу\nВаша переписка продолжится прямо в этом чате:", engineerName(u)))
 	})
 }
 func (s *Service) Transfer(ctx context.Context, actorID, ticketID int64, department domain.Department, reason string) error {
@@ -294,7 +304,7 @@ func (s *Service) transfer(ctx context.Context, actorID, ticketID int64, departm
 		if err := s.enqueue(ctx, tx, *t, "refresh_card", nil); err != nil {
 			return err
 		}
-		return s.notify(ctx, tx, *t, "Заявка передана в другой отдел.")
+		return s.notify(ctx, tx, *t, fmt.Sprintf("Ваше обращение передали в отдел %s\nИнженеры увидели вашу заявку, скоро возьмут в работу!", department.Name()))
 	})
 }
 func (s *Service) Close(ctx context.Context, actorID, ticketID int64, resolution string) error {

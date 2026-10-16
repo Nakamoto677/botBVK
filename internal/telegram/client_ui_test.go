@@ -170,7 +170,7 @@ func TestLateApprovalPreservesActiveMenuAndRegistersTemporaryMessage(t *testing.
 func TestClientMilestonesSurviveCompletionAndTemporaryQuestionsAreCleaned(t *testing.T) {
 	ctx := context.Background()
 	a, s, _, m, _ := clientUIFixture(t)
-	texts := []string{"Создание заявки.", "Выберите направление.", "Опишите проблему текстом. Вложения отправьте после создания заявки.", "Создать заявку?\nОписание", clientAcceptedText, "Инженер взял заявку в работу.", "Подача заявки отменена. Вы можете создать новую."}
+	texts := []string{"Создание заявки.", "Выберите направление.", "Опишите проблему текстом. Вложения отправьте после создания заявки.", "Создать заявку?\nОписание", clientAcceptedText, "Ваше обращение передали в отдел 1С\nИнженеры увидели вашу заявку, скоро возьмут в работу!", "Инженер Мария Петрова взял вашу заявку в работу\nВаша переписка продолжится прямо в этом чате:", "Подача заявки отменена. Вы можете создать новую."}
 	for _, text := range texts {
 		if err := a.sayAux(ctx, m, 1, "draft", text, nil); err != nil {
 			t.Fatal(err)

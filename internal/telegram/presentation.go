@@ -53,17 +53,7 @@ func companyName(ctx context.Context, store domain.Store, id int64) (string, err
 	return "Компания", nil
 }
 func departmentName(d domain.Department) string {
-	switch d {
-	case domain.OneC:
-		return "1С"
-	case domain.IT:
-		return "IT"
-	case domain.Installation:
-		return "Монтаж"
-	case domain.Field:
-		return "Выезд"
-	}
-	return "Поддержка"
+	return d.Name()
 }
 func statusName(s domain.Status) string {
 	switch s {

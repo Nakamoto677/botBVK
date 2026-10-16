@@ -164,6 +164,10 @@ func clientAuxScenario(m *Message, scenario, text string) string {
 	case "Создание заявки.", "Создание заявки...", "Выберите направление.", "Опишите проблему текстом. Вложения отправьте после создания заявки.", draftDescriptionText, clientAcceptedText, "Инженер взял заявку в работу.", "Подача заявки отменена. Вы можете создать новую.", "Подача заявки отменена. Вы можете создать новую!":
 		return "client_kept"
 	}
+	if (strings.HasPrefix(text, "Ваше обращение передали в отдел ") && strings.HasSuffix(text, "\nИнженеры увидели вашу заявку, скоро возьмут в работу!")) ||
+		(strings.HasPrefix(text, "Инженер ") && strings.HasSuffix(text, "\nВаша переписка продолжится прямо в этом чате:")) {
+		return "client_kept"
+	}
 	if strings.HasPrefix(text, "Создать заявку?\n") || text == "Создать заявку?" {
 		return "client_kept"
 	}

@@ -62,6 +62,31 @@ type adapterService struct {
 	public   []bool
 }
 
+type claimNameService struct {
+	Service
+	store *adapterStore
+	name  string
+}
+
+func (s *claimNameService) Claim(_ context.Context, _, _ int64) error {
+	s.name = s.store.user.Name
+	return nil
+}
+
+func TestClaimCallbackUsesCurrentTelegramName(t *testing.T) {
+	client, _ := capturedClient()
+	store := &adapterStore{user: domain.User{ID: 2, Name: "Сотрудник 2", Role: "engineer", Approved: true, Departments: []domain.Department{domain.IT}}, ticket: domain.Ticket{ID: 7, Department: domain.IT, Status: domain.New, QueueMessageID: 77}}
+	service := &claimNameService{store: store}
+	a := NewAdapter(client, store, service, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100, QueueTopicID: 1}}})
+	callback := &Callback{ID: "claim", From: Person{ID: 2, FirstName: "Анна", LastName: "Иванова", Username: "anna"}, Message: &Message{ID: 77, Chat: Chat{ID: -100, Type: "supergroup"}, ThreadID: 1}, Data: "claim:7"}
+	if err := a.callback(t.Context(), callback); err != nil {
+		t.Fatal(err)
+	}
+	if service.name != "Анна Иванова" || store.user.Username != "anna" {
+		t.Fatalf("claim saw stale Telegram profile: %+v", store.user)
+	}
+}
+
 func (s *adapterService) Close(_ context.Context, _ int64, id int64, text string) error {
 	s.closedID = id
 	s.closeText = text
