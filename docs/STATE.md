@@ -9,6 +9,39 @@ ENGINEER_UI, AUDIT, ANALYTICS_*, METABASE, LOCAL_ANALYTICS, AGENT_RELIABILITY_UX
 
 ---
 
+## 0. Что сделать при следующем запуске
+
+**Запущенный бот может работать на устаревшем коде.** Правки, сделанные 16 октября
+(пустая клавиатура, классификация ошибок, автоуборка мёртвых операций, флаг
+`-skip-telegram-check`), вступают в силу **только после перезапуска**: работающий
+процесс держит в памяти свою сборку.
+
+Проверить и обновить:
+
+```sh
+cd /path/to/bot-BVK
+curl -s -o /dev/null -w '%{http_code}\n' https://api.telegram.org   # должен быть не 000
+go build -trimpath -o bin/bvk ./cmd/bvk
+kill <PID старого процесса>          # или Ctrl+C в его терминале
+export TELEGRAM_BOT_TOKEN='…'
+nohup ./bin/bvk -config config.json > /tmp/bvk-run.log 2>&1 &
+sleep 3 && curl -s localhost:8080/ready
+```
+
+Точка отката, если новый запуск не устроит: `cp /tmp/bvk-previous bin/bvk` (может не
+пережить перезагрузку — тогда пересобрать из коммита `7726520`).
+
+Проверить, что запущена свежая сборка, можно по флагу — он добавлен последним:
+
+```sh
+./bin/bvk -h 2>&1 | grep -q skip-telegram-check && echo "свежая сборка" || echo "СТАРАЯ сборка"
+```
+
+Замеры в `/metrics` (`bvk_ratelimit_wait_ms_*`, `bvk_operation_s_*`) для этой проверки
+**не годятся**: они добавлены раньше и присутствуют в сборке от 13:21.
+
+---
+
 ## 1. Что это
 
 Один Telegram-бот технической поддержки. Клиент общается в личном чате.
