@@ -37,6 +37,7 @@ func run() error {
 	migrate := flag.Bool("migrate", false, "apply migrations and bootstrap only")
 	check := flag.Bool("check", false, "check database and Telegram rights, then exit")
 	backup := flag.Bool("backup", false, "create backup and verify by restoring a temporary database")
+	skipTelegramCheck := flag.Bool("skip-telegram-check", false, "start without the remote Telegram permission check (use when the network blocks Telegram)")
 	flag.Parse()
 	cfg, err := config.Load(*path)
 	if err != nil {
@@ -77,7 +78,13 @@ func run() error {
 		tc.Departments[dept] = telegram.Team{ChatID: t.ChatID, QueueTopicID: t.QueueTopicID}
 	}
 	client := telegram.NewClient(cfg.Token)
-	if err = client.Check(ctx, tc); err != nil {
+	if *skipTelegramCheck {
+		// The remote check is getMe plus getChat and getChatMember for every department,
+		// so a network that blocks Telegram aborts the whole start even though the bot is
+		// configured correctly. Skipping it keeps a valid bot runnable on such a network;
+		// the local shape of the configuration was validated above.
+		slog.Warn("starting without the remote Telegram permission check", "reason", "skip-telegram-check")
+	} else if err = client.Check(ctx, tc); err != nil {
 		return fmt.Errorf("Telegram setup: %w", err)
 	}
 	if *check {
