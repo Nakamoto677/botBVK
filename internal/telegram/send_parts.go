@@ -27,7 +27,11 @@ func (w *Worker) confirmedPart(ctx context.Context, key string, part int, send f
 	}
 	return sent, err
 }
-func (w *Worker) textParts(ctx context.Context, key string, chat, topic int64, text string, markup any) (Message, error) {
+// textParts sends a message in Telegram-sized chunks and records every confirmed
+// part, so a retry after a crash resumes instead of duplicating. An optional
+// parse mode is applied to every chunk; engineer cards need HTML, plain text must
+// stay unparsed because user content may contain unescaped markup characters.
+func (w *Worker) textParts(ctx context.Context, key string, chat, topic int64, text string, markup any, parseMode ...string) (Message, error) {
 	parts := splitText(text, messageLimit)
 	var sent Message
 	for i, part := range parts {
@@ -42,6 +46,9 @@ func (w *Worker) textParts(ctx context.Context, key string, chat, topic int64, t
 			}
 			if i == len(parts)-1 && markup != nil {
 				payload["reply_markup"] = markup
+			}
+			if len(parseMode) > 0 && parseMode[0] != "" {
+				payload["parse_mode"] = parseMode[0]
 			}
 			var result Message
 			err := w.client.Call(ctx, "sendMessage", payload, &result)

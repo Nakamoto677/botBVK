@@ -177,19 +177,23 @@ func (w *Worker) rate(ctx context.Context, chat int64) error {
 	return ctx.Err()
 }
 
-func (w *Worker) send(ctx context.Context, chat, topic int64, text string, buttons [][]Button) (Message, error) {
+// send delivers one message on the shared path. Every operation-scoped send goes
+// through the recorded parts fence so a retry after a crash resumes rather than
+// duplicating. parseMode is optional and only engineer cards need HTML; client
+// text stays unparsed because it can contain unescaped markup characters.
+func (w *Worker) send(ctx context.Context, chat, topic int64, text string, buttons [][]Button, parseMode ...string) (Message, error) {
 	if w.currentOperation > 0 {
 		hash := sha256.Sum256([]byte(fmt.Sprintf("%d:%d:%s", chat, topic, text)))
 		var markup any
 		if buttons != nil {
 			markup = Markup{buttons}
 		}
-		return w.textParts(ctx, fmt.Sprintf("operation:%d:%x", w.currentOperation, hash), chat, topic, text, markup)
+		return w.textParts(ctx, fmt.Sprintf("operation:%d:%x", w.currentOperation, hash), chat, topic, text, markup, parseMode...)
 	}
 	if err := w.rate(ctx, chat); err != nil {
 		return Message{}, err
 	}
-	return w.client.Send(ctx, chat, topic, text, buttons)
+	return w.client.Send(ctx, chat, topic, text, buttons, parseMode...)
 }
 func card(t domain.Ticket) string {
 	return engineerCardText(t, "Клиент", "Компания", "Специалист")

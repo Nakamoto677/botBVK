@@ -74,14 +74,12 @@ func engineerQueueButtons(t domain.Ticket) [][]Button {
 	}
 	return append(buttons, []Button{{Text: "Закрыть задачу", Data: "close:" + id}, {Text: engineerTransferLabel, Data: "transfer:" + id}})
 }
+// Engineer cards are HTML, so they are sent through the shared recorded-parts
+// path with an explicit parse mode rather than a private send helper. That keeps
+// the retry fence in force: a crash between the send and the ticket update used
+// to duplicate the card, because this call bypassed bvk_send_parts.
 func (w *Worker) sendEngineerCard(ctx context.Context, chat, topic int64, text string, buttons [][]Button) (Message, error) {
-	if err := w.rate(ctx, chat); err != nil {
-		return Message{}, err
-	}
-	payload := map[string]any{"chat_id": chat, "message_thread_id": topic, "text": text, "parse_mode": "HTML", "reply_markup": Markup{Buttons: buttons}}
-	var result Message
-	err := w.client.Call(ctx, "sendMessage", payload, &result)
-	return result, err
+	return w.send(ctx, chat, topic, text, buttons, "HTML")
 }
 
 // Reply keyboards send ordinary text. The handler resolves that text only in

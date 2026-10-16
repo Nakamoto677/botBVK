@@ -161,13 +161,19 @@ func (c *Client) updatesTimeout(ctx context.Context, offset int64, timeout int) 
 	err := c.Call(ctx, "getUpdates", map[string]any{"offset": offset, "timeout": timeout, "allowed_updates": []string{"message", "edited_message", "callback_query"}}, &result)
 	return result, err
 }
-func (c *Client) Send(ctx context.Context, chat, topic int64, text string, buttons [][]Button) (Message, error) {
+// Send delivers text in Telegram-sized chunks. parseMode is optional: engineer
+// cards are HTML, client text must stay unparsed because it can contain
+// unescaped markup characters.
+func (c *Client) Send(ctx context.Context, chat, topic int64, text string, buttons [][]Button, parseMode ...string) (Message, error) {
 	var result Message
 	parts := splitText(text, messageLimit)
 	for i, part := range parts {
 		p := map[string]any{"chat_id": chat, "text": part}
 		if topic != 0 {
 			p["message_thread_id"] = topic
+		}
+		if len(parseMode) > 0 && parseMode[0] != "" {
+			p["parse_mode"] = parseMode[0]
 		}
 		if buttons != nil && i == len(parts)-1 {
 			p["reply_markup"] = Markup{buttons}
@@ -178,16 +184,34 @@ func (c *Client) Send(ctx context.Context, chat, topic int64, text string, butto
 	}
 	return result, nil
 }
-func (c *Client) SendKeyboard(ctx context.Context, chat int64, text string, keyboard [][]string) error {
-	buttons := [][]map[string]string{}
+// replyKeyboard renders a label matrix as a persistent Telegram reply keyboard.
+// The client menu and the staff menu share this shape, so it is built once here
+// instead of being assembled by hand at each call site.
+func replyKeyboard(keyboard [][]string) map[string]any {
+	rows := [][]map[string]string{}
 	for _, row := range keyboard {
 		items := []map[string]string{}
 		for _, label := range row {
 			items = append(items, map[string]string{"text": label})
 		}
-		buttons = append(buttons, items)
+		rows = append(rows, items)
 	}
-	return c.Call(ctx, "sendMessage", map[string]any{"chat_id": chat, "text": text, "reply_markup": map[string]any{"keyboard": buttons, "resize_keyboard": true, "is_persistent": true}}, nil)
+	return map[string]any{"keyboard": rows, "resize_keyboard": true, "is_persistent": true}
+}
+
+// ClearReplyKeyboard removes the persistent reply keyboard by sending an empty
+// one. Telegram has no dedicated method for this, so the shape must match.
+func (c *Client) ClearReplyKeyboard(ctx context.Context, chat int64, text string) error {
+	return c.Call(ctx, "sendMessage", map[string]any{"chat_id": chat, "text": text, "reply_markup": replyKeyboard(nil)}, nil)
+}
+
+// HideMessageKeyboard drops the inline buttons of an already delivered message.
+func (c *Client) HideMessageKeyboard(ctx context.Context, chat, messageID int64) error {
+	return c.Call(ctx, "editMessageReplyMarkup", map[string]any{"chat_id": chat, "message_id": messageID, "reply_markup": Markup{Buttons: [][]Button{}}}, nil)
+}
+
+func (c *Client) SendKeyboard(ctx context.Context, chat int64, text string, keyboard [][]string) error {
+	return c.Call(ctx, "sendMessage", map[string]any{"chat_id": chat, "text": text, "reply_markup": replyKeyboard(keyboard)}, nil)
 }
 func (c *Client) Answer(ctx context.Context, id, text string) error {
 	return c.Call(ctx, "answerCallbackQuery", map[string]any{"callback_query_id": id, "text": text}, nil)

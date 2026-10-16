@@ -76,7 +76,7 @@ func draftDepartments(d draft) [][]Button {
 func (a *Adapter) staleDraft(ctx context.Context, c *Callback) error {
 	_ = a.client.Answer(ctx, c.ID, "Этот экран больше не актуален. Откройте текущее состояние: /form или /current.")
 	if c.Message != nil {
-		_ = a.client.Call(ctx, "editMessageReplyMarkup", map[string]any{"chat_id": c.Message.Chat.ID, "message_id": c.Message.ID, "reply_markup": Markup{Buttons: [][]Button{}}}, nil)
+		_ = a.client.HideMessageKeyboard(ctx, c.Message.Chat.ID, c.Message.ID)
 	}
 	return nil
 }

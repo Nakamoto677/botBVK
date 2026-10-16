@@ -3,8 +3,10 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"bot-bvk/internal/domain"
@@ -16,6 +18,27 @@ type workerStore struct {
 	current  domain.Ticket
 	events   []domain.Event
 	messages []domain.Message
+	parts    map[string]int64
+}
+
+// Confirmed send parts make the retry fence active in tests. Without them the
+// worker falls back to a plain send and a replay is silently duplicated.
+func (s *workerStore) SendPart(_ context.Context, key string, part int) (int64, error) {
+	if s.parts == nil {
+		return 0, domain.ErrNotFound
+	}
+	id, ok := s.parts[fmt.Sprintf("%s:%d", key, part)]
+	if !ok {
+		return 0, domain.ErrNotFound
+	}
+	return id, nil
+}
+func (s *workerStore) SaveSendPart(_ context.Context, key string, part int, id int64) error {
+	if s.parts == nil {
+		s.parts = map[string]int64{}
+	}
+	s.parts[fmt.Sprintf("%s:%d", key, part)] = id
+	return nil
 }
 
 func (s *workerStore) User(_ context.Context, id int64) (domain.User, error) {
@@ -153,6 +176,78 @@ func TestInitialTopicCardSupportsPublicReplyAndRetry(t *testing.T) {
 	}
 	if len(service.public) != 1 || !service.public[0] {
 		t.Fatal("cannot reply to initial card")
+	}
+}
+
+// The engineer card is HTML and used to be sent outside the recorded-parts fence,
+// so a crash between the send and the ticket update duplicated it. It now travels
+// the shared send path: HTML must survive and a retry must not send again.
+func TestEngineerCardIsHtmlAndRetryDoesNotResend(t *testing.T) {
+	sends := []map[string]any{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var p map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&p)
+		sends = append(sends, p)
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":99}}`))
+	}))
+	defer server.Close()
+	client := NewClient("test")
+	client.BaseURL = server.URL
+	ticket := domain.Ticket{ID: 7, ClientID: 1, Department: domain.IT, TopicChatID: -100, TopicID: 10, Description: "Initial description", Status: domain.InProgress, AssigneeID: 2}
+	store := &workerStore{ticket: ticket, current: ticket}
+	worker := NewWorker(client, store, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100, QueueTopicID: 1}}})
+	op := domain.Operation{ID: 5, Kind: "create_topic", TicketID: ticket.ID, Payload: json.RawMessage(`{"chat_id":-100,"topic_id":10,"routing_generation":0}`)}
+	if err := worker.Handle(context.Background(), op); err != nil {
+		t.Fatal(err)
+	}
+	if len(sends) == 0 {
+		t.Fatal("card was not sent")
+	}
+	cardSends := 0
+	for _, p := range sends {
+		text, _ := p["text"].(string)
+		if !strings.Contains(text, "<b>Заявка #7") {
+			continue
+		}
+		cardSends++
+		if p["parse_mode"] != "HTML" {
+			t.Fatalf("card lost its HTML parse mode: %v", p["parse_mode"])
+		}
+		if p["chat_id"] != float64(-100) {
+			t.Fatalf("card targeted the wrong chat: %v", p)
+		}
+		// The queue card goes to the department queue topic, the bound card to the
+		// ticket topic. Any other thread would deliver the card to the wrong place.
+		if thread, ok := p["message_thread_id"]; ok {
+			if thread != float64(10) && thread != float64(1) {
+				t.Fatalf("card targeted an unrelated topic: %v", thread)
+			}
+		}
+	}
+	if cardSends == 0 {
+		t.Fatal("no HTML card was sent")
+	}
+	// Replaying the same operation must resume from the recorded part instead of
+	// sending the ticket card again. Only ticket-topic sends are compared: the
+	// queue card and the keyboard notice are distinct messages with their own
+	// recorded keys, so they may legitimately still be delivered once.
+	topicSends := 0
+	for _, p := range sends {
+		if p["message_thread_id"] == float64(10) {
+			topicSends++
+		}
+	}
+	if err := worker.Handle(context.Background(), op); err != nil {
+		t.Fatal(err)
+	}
+	after := 0
+	for _, p := range sends {
+		if p["message_thread_id"] == float64(10) {
+			after++
+		}
+	}
+	if after != topicSends {
+		t.Fatalf("retry resent the bound ticket card: %d -> %d", topicSends, after)
 	}
 }
 

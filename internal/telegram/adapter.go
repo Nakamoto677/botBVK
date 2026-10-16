@@ -370,8 +370,22 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 	}
 	return a.receive(ctx, m, t, false)
 }
+// departmentButtons builds the shared department picker, two per row, from the
+// canonical department order so labels and data never diverge from the domain.
 func departmentButtons(prefix string) [][]Button {
-	return [][]Button{{{Text: "1С", Data: prefix + ":1c"}, {Text: "IT", Data: prefix + ":it"}}, {{Text: "Монтаж", Data: prefix + ":installation"}, {Text: "Выезд", Data: prefix + ":field"}}}
+	rows := [][]Button{}
+	row := []Button{}
+	for _, d := range domain.Departments() {
+		row = append(row, Button{Text: d.Name(), Data: prefix + ":" + string(d)})
+		if len(row) == 2 {
+			rows = append(rows, row)
+			row = []Button{}
+		}
+	}
+	if len(row) > 0 {
+		rows = append(rows, row)
+	}
+	return rows
 }
 func (a *Adapter) callback(ctx context.Context, c *Callback) error {
 	if c.Message != nil && c.Message.Chat.Type != "private" && !a.trustedGroup(c.Message.Chat.ID) {
@@ -581,7 +595,7 @@ func (a *Adapter) callback(ctx context.Context, c *Callback) error {
 		return err
 	}
 	if c.Message != nil && (action == "new" || action == "submit" || action == "cancel" && id == 0) {
-		_ = a.client.Call(ctx, "editMessageReplyMarkup", map[string]any{"chat_id": c.Message.Chat.ID, "message_id": c.Message.ID, "reply_markup": Markup{Buttons: [][]Button{}}}, nil)
+		_ = a.client.HideMessageKeyboard(ctx, c.Message.Chat.ID, c.Message.ID)
 	}
 	if action != "company" {
 		_ = a.client.Answer(ctx, c.ID, "")

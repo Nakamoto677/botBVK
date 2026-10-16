@@ -17,6 +17,11 @@ const (
 
 func (d Department) Valid() bool { return d == IT || d == OneC || d == Installation || d == Field }
 
+// Departments lists every department in client-facing display order. Button rows
+// and validation both derive from this slice so the order cannot drift between
+// the form, the transfer prompt and the registration catalog.
+func Departments() []Department { return []Department{OneC, IT, Installation, Field} }
+
 func (d Department) Name() string {
 	switch d {
 	case OneC:

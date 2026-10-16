@@ -17,17 +17,8 @@ var clientDraftKeyboard = [][]string{{clientCancelDraftLabel}}
 var clientActiveKeyboard = [][]string{{"Отменить заявку"}}
 
 // Client menus are contextual; the staff keyboard builders are independent.
-func clientReplyMarkup(keyboard [][]string) map[string]any {
-	rows := [][]map[string]string{}
-	for _, row := range keyboard {
-		items := []map[string]string{}
-		for _, label := range row {
-			items = append(items, map[string]string{"text": label})
-		}
-		rows = append(rows, items)
-	}
-	return map[string]any{"keyboard": rows, "resize_keyboard": true, "is_persistent": true}
-}
+// The markup shape itself is shared with SendKeyboard through replyKeyboard.
+func clientReplyMarkup(keyboard [][]string) map[string]any { return replyKeyboard(keyboard) }
 func clientTicketScenario(id int64) string { return fmt.Sprintf("client_ticket:%d", id) }
 func (a *Adapter) clientScreen(ctx context.Context, m *Message, scenario, text string, keyboard [][]string) error {
 	if a.activeUpdate != 0 {

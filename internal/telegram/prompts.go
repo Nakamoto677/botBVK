@@ -62,7 +62,7 @@ func (a *Adapter) beginStaffPrompt(ctx context.Context, c *Callback, id int64, a
 		return err
 	}
 	buttons := [][]Button{}
-	for _, d := range []domain.Department{domain.OneC, domain.IT, domain.Installation, domain.Field} {
+	for _, d := range domain.Departments() {
 		if d != t.Department {
 			buttons = append(buttons, []Button{{Text: departmentName(d), Data: fmt.Sprintf("transferdept:%d:%s", id, d)}})
 		}
