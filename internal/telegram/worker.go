@@ -551,10 +551,24 @@ func (w *Worker) card(ctx context.Context, t domain.Ticket) (string, error) {
 	}
 	return text, nil
 }
+// messageEditError classifies an edit that has nothing left to change as success, the
+// same way topic deletion treats an already absent topic.
+//
+// "message is not modified" means the card already shows this text. "message to edit
+// not found" and "message thread not found" mean the card or its whole topic is gone,
+// which is a normal outcome of the cleanup that deletes finished topics. Without this
+// they were 400s, so the worker marked the refresh permanently failed and the failures
+// piled up until readiness reported not-ready. Production logs show exactly these two.
 func messageEditError(err error) error {
 	var api *APIError
-	if errors.As(err, &api) && strings.Contains(strings.ToLower(api.Description), "message is not modified") {
-		return nil
+	if !errors.As(err, &api) || api.Code != 400 {
+		return err
+	}
+	description := strings.ToLower(api.Description)
+	for _, marker := range []string{"message is not modified", "message to edit not found", "message thread not found", "message_thread_id_invalid", "topic_id_invalid"} {
+		if strings.Contains(description, marker) {
+			return nil
+		}
 	}
 	return err
 }
