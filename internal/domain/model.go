@@ -175,6 +175,26 @@ type StoredUpdate struct {
 	Attempts int
 }
 
+// QuarantinedUpdate is accepted work that exhausted its attempts and can never
+// complete on its own. It stays unfinished so that destructive topic deletion
+// remains fenced, and it must never order anyone else: nothing selects it again
+// and only an explicit release clears the flag.
+type QuarantinedUpdate struct {
+	ID        int64
+	ActorID   int64
+	ChatID    int64
+	Attempts  int
+	LastError string
+}
+
+// QuarantineStore inspects and releases quarantined updates. It is separate from
+// Store because the capability is optional for lightweight test doubles.
+type QuarantineStore interface {
+	QuarantinedUpdates(context.Context) ([]QuarantinedUpdate, error)
+	QuarantineCount(context.Context) (int, error)
+	ReleaseQuarantine(context.Context, int64) error
+}
+
 // Draft generations and steps bind retained form buttons to a particular screen.
 type Draft struct {
 	Generation  string

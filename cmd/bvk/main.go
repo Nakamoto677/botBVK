@@ -202,6 +202,18 @@ func healthHandler(store *postgres.Store, lastPoll func() time.Time) http.Handle
 			http.Error(w, "delivery queue requires attention", http.StatusServiceUnavailable)
 			return
 		}
+		// A quarantined update is accepted work that can never complete on its own
+		// and is never selected again. Unreported, it silently freezes the account
+		// it belongs to, so readiness must surface it with the way out.
+		quarantined, err := store.QuarantineCount(ctx)
+		if err != nil {
+			http.Error(w, "inbox state unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if quarantined > 0 {
+			http.Error(w, fmt.Sprintf("inbox requires attention: %d quarantined update(s); inspect with /quarantine and release with /quarantine clear <id>", quarantined), http.StatusServiceUnavailable)
+			return
+		}
 		fmt.Fprintln(w, "ready")
 	})
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
@@ -216,8 +228,13 @@ func healthHandler(store *postgres.Store, lastPoll func() time.Time) http.Handle
 		if !oldest.IsZero() {
 			age = time.Since(oldest).Seconds()
 		}
+		quarantined, err := store.QuarantineCount(ctx)
+		if err != nil {
+			http.Error(w, "metrics unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-		fmt.Fprintf(w, "bvk_outbox_pending %d\nbvk_outbox_failed %d\nbvk_outbox_oldest_seconds %.0f\n", pending, failed, age)
+		fmt.Fprintf(w, "bvk_outbox_pending %d\nbvk_outbox_failed %d\nbvk_outbox_oldest_seconds %.0f\nbvk_updates_quarantined %d\n", pending, failed, age, quarantined)
 	})
 	return mux
 }

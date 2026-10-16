@@ -485,7 +485,12 @@ func (s *Store) PendingUpdates(ctx context.Context, limit int) ([]domain.StoredU
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := s.pool.Query(ctx, "WITH pending AS MATERIALIZED (SELECT id,payload,attempts,quarantined,available_at,bvk_update_keys(payload) AS keys FROM bvk_updates WHERE NOT finished) SELECT candidate.id,candidate.payload,candidate.attempts FROM pending candidate WHERE NOT candidate.quarantined AND candidate.available_at<=now() AND NOT EXISTS (SELECT 1 FROM pending older WHERE older.id<candidate.id AND older.keys && candidate.keys) ORDER BY candidate.id LIMIT $1", limit)
+	// Quarantined updates stay unfinished so that CleanupSettled and CleanupFence
+	// keep protecting the archive, but they must not order anyone else. An update
+	// that can never succeed would otherwise block its actor's lane forever, with
+	// no way out: it is never selected and nothing clears the flag. Only work that
+	// can still run takes part in the dependency check.
+	rows, err := s.pool.Query(ctx, "WITH pending AS MATERIALIZED (SELECT id,payload,attempts,quarantined,available_at,bvk_update_keys(payload) AS keys FROM bvk_updates WHERE NOT finished), blocking AS MATERIALIZED (SELECT id,keys FROM pending WHERE NOT quarantined) SELECT candidate.id,candidate.payload,candidate.attempts FROM pending candidate WHERE NOT candidate.quarantined AND candidate.available_at<=now() AND NOT EXISTS (SELECT 1 FROM blocking older WHERE older.id<candidate.id AND older.keys && candidate.keys) ORDER BY candidate.id LIMIT $1", limit)
 	if err != nil {
 		return nil, err
 	}

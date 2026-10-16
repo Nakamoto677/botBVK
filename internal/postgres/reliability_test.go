@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-func TestQuarantineSurvivesRestartAndOrdersDependencies(t *testing.T) {
+func TestQuarantineSurvivesRestartAndKeepsArchiveFence(t *testing.T) {
 	s := testStore(t)
 	v := seed(t, s)
 	ctx := context.Background()
@@ -30,12 +30,20 @@ func TestQuarantineSurvivesRestartAndOrdersDependencies(t *testing.T) {
 	if err = s.RetryUpdate(ctx, 1, "permanent screen failure", time.Hour, true); err != nil {
 		t.Fatal(err)
 	}
-	// Fresh store handle reads the same durable state; no in-memory retry counters.
+	// A quarantined update must not order anyone. It can never be selected and
+	// nothing clears the flag, so blocking its actor's lane would be permanent
+	// and invisible. The dependent update 2 has to become selectable again.
 	restarted := &Store{s.pool}
 	pending, err = restarted.PendingUpdates(ctx, 100)
-	if err != nil || len(pending) != 1 || pending[0].ID != 3 {
-		t.Fatalf("quarantine blocked unrelated actor or released dependent: %v %v", pending, err)
+	if err != nil || len(pending) != 2 || pending[0].ID != 2 || pending[1].ID != 3 {
+		t.Fatalf("quarantine still blocked its own lane: %v %v", pending, err)
 	}
+	// Unrelated actor keeps its own ordering.
+	if pending[0].ID >= pending[1].ID {
+		t.Fatalf("lane order broken across actors: %v", pending)
+	}
+	// The archive fence is the reason the row stays unfinished. Weakening the
+	// dependency check must not let a destructive deletion through.
 	settled, err := s.CleanupSettled(ctx, v.ID)
 	if err != nil || settled {
 		t.Fatal("quarantine bypassed archive fence", err)
@@ -46,7 +54,61 @@ func TestQuarantineSurvivesRestartAndOrdersDependencies(t *testing.T) {
 	if err = s.pool.QueryRow(ctx, "SELECT attempts,last_error,finished FROM bvk_updates WHERE id=1").Scan(&attempts, &reason, &finished); err != nil || attempts != 1 || reason == "" || finished {
 		t.Fatal("failure not durably retained", err)
 	}
+	if err = s.ReleaseQuarantine(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.FinishUpdate(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.FinishUpdate(ctx, 2); err != nil {
+		t.Fatal(err)
+	}
 	if err = s.FinishUpdate(ctx, 3); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestQuarantinedUpdateIsVisibleAndReleasable(t *testing.T) {
+	s := testStore(t)
+	seed(t, s)
+	ctx := context.Background()
+	if _, err := s.SaveUpdate(ctx, 11, json.RawMessage(`{"message":{"from":{"id":77},"chat":{"id":77,"type":"private"},"text":"poison"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RetryUpdate(ctx, 11, "permanent failure", time.Hour, true); err != nil {
+		t.Fatal(err)
+	}
+	count, err := s.QuarantineCount(ctx)
+	if err != nil || count != 1 {
+		t.Fatalf("quarantine not counted: %d %v", count, err)
+	}
+	rows, err := s.QuarantinedUpdates(ctx)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("quarantine not listed: %v %v", rows, err)
+	}
+	// The operator message must name the affected account, not just the row id.
+	if rows[0].ID != 11 || rows[0].ActorID != 77 || rows[0].ChatID != 77 || rows[0].LastError == "" {
+		t.Fatalf("quarantined row misread: %+v", rows[0])
+	}
+	if rows[0].Attempts != 1 {
+		t.Fatalf("attempts not reported: %+v", rows[0])
+	}
+	if err = s.ReleaseQuarantine(ctx, 11); err != nil {
+		t.Fatal(err)
+	}
+	if count, err = s.QuarantineCount(ctx); err != nil || count != 0 {
+		t.Fatalf("release left quarantine: %d %v", count, err)
+	}
+	// Released work is selectable again and keeps its attempt history.
+	pending, err := s.PendingUpdates(ctx, 100)
+	if err != nil || len(pending) != 1 || pending[0].ID != 11 || pending[0].Attempts != 1 {
+		t.Fatalf("released update not selectable: %v %v", pending, err)
+	}
+	// Releasing an unknown or already released row is not silently accepted.
+	if err = s.ReleaseQuarantine(ctx, 11); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("double release accepted: %v", err)
+	}
+	if err = s.FinishUpdate(ctx, 11); err != nil {
 		t.Fatal(err)
 	}
 }

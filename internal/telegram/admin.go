@@ -69,6 +69,47 @@ func (a *Adapter) admin(ctx context.Context, m *Message, u domain.User) error {
 			return a.say(ctx, m, "Операция возвращена в очередь. При неизвестном результате создания топика проверьте существующие топики перед повтором, чтобы избежать дублей.", nil)
 		}
 		return domain.ErrInvalid
+	case "/quarantine":
+		// Accepted updates that can never complete on their own. They stay
+		// unfinished to protect the archive, so an operator must see and release
+		// them; nothing else clears the flag.
+		quarantine, ok := a.store.(domain.QuarantineStore)
+		if !ok {
+			return domain.ErrInvalid
+		}
+		if len(fields) >= 3 && fields[1] == "clear" {
+			id, e := strconv.ParseInt(fields[2], 10, 64)
+			if e != nil || id <= 0 {
+				return domain.ErrInvalid
+			}
+			if e = quarantine.ReleaseQuarantine(ctx, id); e != nil {
+				if errors.Is(e, domain.ErrNotFound) {
+					return a.say(ctx, m, fmt.Sprintf("Обновление %d не находится в карантине.", id), nil)
+				}
+				return e
+			}
+			return a.say(ctx, m, fmt.Sprintf("Обновление %d возвращено в обработку. При неустранимой причине оно снова уйдёт в карантин и не заблокирует другие действия.", id), nil)
+		}
+		if len(fields) != 1 {
+			return domain.ErrInvalid
+		}
+		rows, e := quarantine.QuarantinedUpdates(ctx)
+		if e != nil {
+			return e
+		}
+		if len(rows) == 0 {
+			return a.say(ctx, m, "Карантин пуст: все принятые обновления обработаны.", nil)
+		}
+		for _, row := range rows {
+			cause := row.LastError
+			if runes := []rune(cause); len(runes) > 160 {
+				cause = string(runes[:160]) + "…"
+			}
+			if e = a.say(ctx, m, fmt.Sprintf("Обновление %d · аккаунт %d · чат %d · попыток %d\n%s\nСнять: /quarantine clear %d", row.ID, row.ActorID, row.ChatID, row.Attempts, cause, row.ID), nil); e != nil {
+				return e
+			}
+		}
+		return nil
 	case "/bind":
 		if len(fields) != 3 {
 			return domain.ErrInvalid

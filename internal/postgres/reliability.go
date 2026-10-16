@@ -11,6 +11,15 @@ func (s *Store) RetryUpdate(ctx context.Context, id int64, reason string, delay 
 	_, err := s.pool.Exec(ctx, `UPDATE bvk_updates SET attempts=attempts+1,last_error=$2,available_at=now()+($3::bigint * interval '1 microsecond'),quarantined=$4 WHERE id=$1 AND NOT finished`, id, reason, delay.Microseconds(), quarantine)
 	return err
 }
+
+// Actor, chat and topic are read from the stored update with the same COALESCE
+// chain as bvk_update_keys in reliability.sql. Keep the two in step: the SQL
+// function orders the lane, these expressions explain a quarantined row to an
+// operator, and a mismatch would point at the wrong conversation.
+const (
+	actorFromPayloadSQL = `COALESCE((payload->'callback_query'->'from'->>'id')::bigint,(payload->'message'->'from'->>'id')::bigint,(payload->'edited_message'->'from'->>'id')::bigint,0)`
+	chatFromPayloadSQL  = `COALESCE((payload->'callback_query'->'message'->'chat'->>'id')::bigint,(payload->'message'->'chat'->>'id')::bigint,(payload->'edited_message'->'chat'->>'id')::bigint,0)`
+)
 func (s *Store) LoadDraft(ctx context.Context, id int64) (domain.Draft, error) {
 	return loadDraft(ctx, s.pool, id, false)
 }

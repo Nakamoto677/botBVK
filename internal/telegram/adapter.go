@@ -288,7 +288,7 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 		}
 		return a.showTicket(ctx, m, user, t)
 	}
-	if text == "/requests" || strings.HasPrefix(text, "/bind ") || strings.HasPrefix(text, "/retry ") || strings.HasPrefix(text, "/revoke ") || strings.HasPrefix(text, "/staff ") {
+	if text == "/requests" || text == "/quarantine" || strings.HasPrefix(text, "/quarantine ") || strings.HasPrefix(text, "/bind ") || strings.HasPrefix(text, "/retry ") || strings.HasPrefix(text, "/revoke ") || strings.HasPrefix(text, "/staff ") {
 		return a.admin(ctx, m, user)
 	}
 	if strings.HasPrefix(text, "/cancel ") || strings.HasPrefix(text, "/assign ") {
