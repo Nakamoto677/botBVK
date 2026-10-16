@@ -205,6 +205,10 @@ func (w *Worker) reopenTopic(ctx context.Context, payload operationPayload, t do
 	return w.refresh(ctx, t)
 }
 
+// topicDeleteTimeout bounds how long the exclusive acceptance fence is held while
+// Telegram deletes a topic. Raise it only with the intake stall in mind.
+const topicDeleteTimeout = 5 * time.Second
+
 func (w *Worker) deleteTopic(ctx context.Context, payload operationPayload, t domain.Ticket) error {
 	if payload.ChatID == 0 || payload.TopicID == 0 || payload.CompletionKey == "" {
 		return domain.ErrInvalid
@@ -249,9 +253,13 @@ func (w *Worker) deleteTopic(ctx context.Context, payload operationPayload, t do
 			}
 			return e
 		}
-		// This call holds the inbox/archive fence. Bound network waiting so
-		// Telegram trouble cannot stall acceptance for the client's 65s timeout.
-		deleteCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		// This call holds the inbox/archive fence, the same exclusive lock every
+		// incoming update takes in shared mode. Bound the network waiting so a slow
+		// Telegram cannot stall acceptance for the client's 65 s timeout. The bound is
+		// deliberately short because every second here is a second of frozen intake,
+		// and a timed-out delete is safe to retry: an already absent topic counts as
+		// deleted success.
+		deleteCtx, cancel := context.WithTimeout(ctx, topicDeleteTimeout)
 		e = topicDeleteError(w.client.Call(deleteCtx, "deleteForumTopic", map[string]any{"chat_id": payload.ChatID, "message_thread_id": payload.TopicID}, nil))
 		cancel()
 		if e != nil {
