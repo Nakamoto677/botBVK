@@ -235,7 +235,7 @@ func TestMessagesAndFirstResponse(t *testing.T) {
 	}
 }
 
-func TestTransferRetainsHistoryAndReopen(t *testing.T) {
+func TestTransferRetainsHistoryAndClosedTicketAllowsNew(t *testing.T) {
 	s, f := setup()
 	engineer := f.users[3]
 	engineer.Name = "Мария Петрова"
@@ -286,32 +286,12 @@ func TestTransferRetainsHistoryAndReopen(t *testing.T) {
 	if err := s.Close(t.Context(), 3, v.ID, "fixed"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Reopen(t.Context(), 1, v.ID); err != nil {
-		t.Fatal(err)
-	}
-	if f.tickets[v.ID].Status != domain.New || f.ops[len(f.ops)-2].Kind != "refresh_card" {
-		t.Fatal("reopen not queued")
+	newTicket, err := s.Create(t.Context(), 1, domain.IT, "new problem")
+	if err != nil || newTicket.ID == v.ID || f.tickets[v.ID].Status != domain.Closed {
+		t.Fatal("closed ticket was reused", err, newTicket)
 	}
 }
 
-func TestReopenWindowAndForeignClient(t *testing.T) {
-	s, f := setup()
-	ctx := context.Background()
-	ticket, _ := s.Create(ctx, 1, domain.IT, "help")
-	_ = s.Claim(ctx, 2, ticket.ID)
-	_ = s.Close(ctx, 2, ticket.ID, "fixed")
-	f.users[5] = domain.User{ID: 5, Role: "client", Approved: true, CompanyID: 10}
-	if err := s.Reopen(ctx, 5, ticket.ID); !errors.Is(err, domain.ErrForbidden) {
-		t.Fatal(err)
-	}
-	s.now = func() time.Time { return time.Date(2026, 10, 20, 2, 0, 0, 0, time.UTC) }
-	if err := s.Reopen(ctx, 1, ticket.ID); !errors.Is(err, domain.ErrConflict) {
-		t.Fatal(err)
-	}
-	if err := s.Reopen(ctx, 4, ticket.ID); err != nil {
-		t.Fatal(err)
-	}
-}
 func TestEditArchivesAndOnlyClientCorrectionIsDelivered(t *testing.T) {
 	s, f := setup()
 	ctx := context.Background()
@@ -390,10 +370,10 @@ func TestClaimRoutingPendingBlocksTransfer(t *testing.T) {
 func TestCancellationAuthorizationAndAllowsNewTicket(t *testing.T) {
 	s, f := setup()
 	ticket, _ := s.Create(t.Context(), 1, domain.IT, "help")
-	if err := s.Cancel(t.Context(), 2, ticket.ID, "not my role"); !errors.Is(err, domain.ErrForbidden) {
+	if err := s.Cancel(t.Context(), 2, ticket.ID); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatal(err)
 	}
-	if err := s.Cancel(t.Context(), 1, ticket.ID, "withdrawn"); err != nil {
+	if err := s.Cancel(t.Context(), 1, ticket.ID); err != nil {
 		t.Fatal(err)
 	}
 	v := f.tickets[ticket.ID]
@@ -403,9 +383,7 @@ func TestCancellationAuthorizationAndAllowsNewTicket(t *testing.T) {
 	if _, err := s.Create(t.Context(), 1, domain.IT, "next"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Reopen(t.Context(), 1, ticket.ID); !errors.Is(err, domain.ErrConflict) {
-		t.Fatal(err)
-	}
+
 }
 func TestAssignScopeOwnerAndDispatcher(t *testing.T) {
 	s, f := setup()
@@ -542,38 +520,6 @@ func TestAssignQueuedTicketRejectedWithoutCreatingTopic(t *testing.T) {
 		}
 	}
 }
-func TestReopenDetachesCompletedTopicAndNextClaimCreatesNewGeneration(t *testing.T) {
-	s, f := setup()
-	ticket, _ := s.Create(t.Context(), 1, domain.IT, "help")
-	_ = s.Claim(t.Context(), 2, ticket.ID)
-	bind(f, ticket.ID, -100, 42)
-	first := f.tickets[ticket.ID].RoutingGeneration
-	if err := s.Close(t.Context(), 2, ticket.ID, "fixed"); err != nil {
-		t.Fatal(err)
-	}
-	before := len(f.ops)
-	if err := s.Reopen(t.Context(), 1, ticket.ID); err != nil {
-		t.Fatal(err)
-	}
-	v := f.tickets[ticket.ID]
-	if v.TopicID != 0 || v.TopicChatID != 0 || v.TopicMessageID != 0 || v.Status != domain.New || v.RoutingGeneration != first {
-		t.Fatal(v)
-	}
-	if len(f.ops)-before != 2 || f.ops[before].Kind != "refresh_card" {
-		t.Fatal("reopen touched old topic")
-	}
-	before = len(f.ops)
-	if err := s.Claim(t.Context(), 2, ticket.ID); err != nil {
-		t.Fatal(err)
-	}
-	current := f.tickets[ticket.ID]
-	var payload map[string]any
-	_ = json.Unmarshal(f.ops[before].Payload, &payload)
-	if current.RoutingGeneration != first+1 || f.ops[before].Kind != "create_topic" || payload["routing_generation"] != float64(current.RoutingGeneration) {
-		t.Fatal(current, payload)
-	}
-}
-
 func TestCloseAttachmentPreservesSourceAndArchivesAtomically(t *testing.T) {
 	s, f := setup()
 	ticket, _ := s.Create(t.Context(), 1, domain.IT, "help")
@@ -663,7 +609,7 @@ func TestCancellationWithoutReasonIsIdempotentAndScoped(t *testing.T) {
 	ticket, _ := s.Create(t.Context(), 1, domain.IT, "help")
 	_ = s.Claim(t.Context(), 2, ticket.ID)
 	bind(f, ticket.ID, -100, 42)
-	if err := s.Cancel(t.Context(), 1, ticket.ID, ""); err != nil {
+	if err := s.Cancel(t.Context(), 1, ticket.ID); err != nil {
 		t.Fatal(err)
 	}
 	v := f.tickets[ticket.ID]
@@ -671,87 +617,22 @@ func TestCancellationWithoutReasonIsIdempotentAndScoped(t *testing.T) {
 		t.Fatal(v)
 	}
 	events, ops, version := len(f.events), len(f.ops), v.Version
-	if err := s.Cancel(t.Context(), 1, ticket.ID, "ignored legacy argument"); err != nil {
+	if err := s.Cancel(t.Context(), 1, ticket.ID); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.events) != events || len(f.ops) != ops || f.tickets[ticket.ID].Version != version {
 		t.Fatal("repeated cancel duplicated action")
 	}
 	f.users[5] = domain.User{ID: 5, Role: "client", Approved: true, CompanyID: 10}
-	if err := s.Cancel(t.Context(), 5, ticket.ID, ""); !errors.Is(err, domain.ErrForbidden) {
+	if err := s.Cancel(t.Context(), 5, ticket.ID); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatal(err)
 	}
 	kinds := map[string]int{}
 	for _, e := range f.events {
 		kinds[e.Kind]++
 	}
-	if kinds["cancelled"] != 1 || kinds["closed"] != 0 || kinds["completion_cleanup_requested"] != 1 {
+	if kinds["cancelled"] != 1 || kinds["closed"] != 0 || kinds["completion_cleanup_requested"] != 0 {
 		t.Fatal(kinds)
-	}
-}
-func TestCompletionIntentCapturesOldBindingAndNoHistoricalBackfill(t *testing.T) {
-	s, f := setup()
-	ticket, _ := s.Create(t.Context(), 1, domain.IT, "help")
-	_ = s.Claim(t.Context(), 2, ticket.ID)
-	bind(f, ticket.ID, -100, 42)
-	if err := s.Close(t.Context(), 2, ticket.ID, "fixed"); err != nil {
-		t.Fatal(err)
-	}
-	count := 0
-	var payload struct {
-		ChatID     int64  `json:"chat_id"`
-		TopicID    int64  `json:"topic_id"`
-		Generation int64  `json:"routing_generation"`
-		Key        string `json:"completion_key"`
-	}
-	for _, e := range f.events {
-		if e.Kind == "completion_cleanup_requested" {
-			count++
-			if err := json.Unmarshal(e.Data, &payload); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-	if count != 1 || payload.ChatID != -100 || payload.TopicID != 42 || payload.Generation != 1 || payload.Key != "completion:1:1:-100:42" {
-		t.Fatal(payload, count)
-	}
-	if err := s.Reopen(t.Context(), 1, ticket.ID); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Claim(t.Context(), 2, ticket.ID); err != nil {
-		t.Fatal(err)
-	}
-	bind(f, ticket.ID, -100, 99)
-	if payload.TopicID != 42 {
-		t.Fatal("old proof mutable")
-	}
-	if err := s.Cancel(t.Context(), 1, ticket.ID, ""); err != nil {
-		t.Fatal(err)
-	}
-	keys := map[string]bool{}
-	for _, e := range f.events {
-		if e.Kind == "completion_cleanup_requested" {
-			_ = json.Unmarshal(e.Data, &payload)
-			keys[payload.Key] = true
-		}
-	}
-	if !keys["completion:1:2:-100:99"] || len(keys) != 2 {
-		t.Fatal(keys)
-	}
-	s2, f2 := setup()
-	t2, _ := s2.Create(t.Context(), 1, domain.IT, "unclaimed")
-	if err := s2.Cancel(t.Context(), 1, t2.ID, ""); err != nil {
-		t.Fatal(err)
-	}
-	for _, e := range f2.events {
-		if e.Kind == "completion_cleanup_requested" {
-			t.Fatal("no topic but cleanup intent")
-		}
-	}
-	for _, op := range f2.ops {
-		if op.Kind == "close_topic" {
-			t.Fatal("empty close could target a later cycle")
-		}
 	}
 }
 func TestPublicRelayRequiresCurrentSourceTopicForEveryEngineer(t *testing.T) {
@@ -780,14 +661,14 @@ func TestPublicRelayRequiresCurrentSourceTopicForEveryEngineer(t *testing.T) {
 		t.Fatal(err)
 	}
 }
-func TestFailedCompletionRollbackLeavesNoDeletionIntent(t *testing.T) {
+func TestFailedCompletionRollbackLeavesTicketActive(t *testing.T) {
 	s, f := setup()
 	ticket, _ := s.Create(t.Context(), 1, domain.IT, "help")
 	_ = s.Claim(t.Context(), 2, ticket.ID)
 	bind(f, ticket.ID, -100, 42)
 	events, ops := len(f.events), len(f.ops)
 	f.failEnqueue = true
-	if err := s.Cancel(t.Context(), 1, ticket.ID, ""); err == nil {
+	if err := s.Cancel(t.Context(), 1, ticket.ID); err == nil {
 		t.Fatal("expected failure")
 	}
 	if f.tickets[ticket.ID].Status != domain.InProgress || len(f.events) != events || len(f.ops) != ops {
@@ -837,7 +718,7 @@ func (tx *lockOrderTx) GetTicket(ctx context.Context, id int64) (domain.Ticket, 
 	tx.ticket = true
 	return tx.Tx.GetTicket(ctx, id)
 }
-func TestAssignAndReopenLockUsersBeforeTicket(t *testing.T) {
+func TestAssignLocksUsersBeforeTicket(t *testing.T) {
 	s, f := setup()
 	ctx := t.Context()
 	ticket, err := s.Create(ctx, 1, domain.IT, "problem")
@@ -857,7 +738,5 @@ func TestAssignAndReopenLockUsersBeforeTicket(t *testing.T) {
 	if err = s.Close(ctx, 4, ticket.ID, "fixed"); err != nil {
 		t.Fatal(err)
 	}
-	if err = s.Reopen(ctx, 4, ticket.ID); err != nil {
-		t.Fatal(err)
-	}
+
 }

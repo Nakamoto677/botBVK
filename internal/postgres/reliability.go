@@ -20,6 +20,7 @@ const (
 	actorFromPayloadSQL = `COALESCE((payload->'callback_query'->'from'->>'id')::bigint,(payload->'message'->'from'->>'id')::bigint,(payload->'edited_message'->'from'->>'id')::bigint,0)`
 	chatFromPayloadSQL  = `COALESCE((payload->'callback_query'->'message'->'chat'->>'id')::bigint,(payload->'message'->'chat'->>'id')::bigint,(payload->'edited_message'->'chat'->>'id')::bigint,0)`
 )
+
 func (s *Store) LoadDraft(ctx context.Context, id int64) (domain.Draft, error) {
 	return loadDraft(ctx, s.pool, id, false)
 }

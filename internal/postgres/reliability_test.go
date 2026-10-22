@@ -11,9 +11,9 @@ import (
 	"time"
 )
 
-func TestQuarantineSurvivesRestartAndKeepsArchiveFence(t *testing.T) {
+func TestQuarantineSurvivesRestartAndKeepsUpdatesVisible(t *testing.T) {
 	s := testStore(t)
-	v := seed(t, s)
+	seed(t, s)
 	ctx := context.Background()
 	for _, u := range []struct {
 		id  int64
@@ -41,12 +41,6 @@ func TestQuarantineSurvivesRestartAndKeepsArchiveFence(t *testing.T) {
 	// Unrelated actor keeps its own ordering.
 	if pending[0].ID >= pending[1].ID {
 		t.Fatalf("lane order broken across actors: %v", pending)
-	}
-	// The archive fence is the reason the row stays unfinished. Weakening the
-	// dependency check must not let a destructive deletion through.
-	settled, err := s.CleanupSettled(ctx, v.ID)
-	if err != nil || settled {
-		t.Fatal("quarantine bypassed archive fence", err)
 	}
 	var attempts int
 	var reason string
@@ -120,7 +114,7 @@ func TestDraftCreationAtomicallyMovesAttachmentAndIsIdempotent(t *testing.T) {
 	if err := s.Transact(ctx, func(tx domain.Tx) error { v.Status = domain.Cancelled; return tx.SaveTicket(ctx, &v) }); err != nil {
 		t.Fatal(err)
 	}
-	d := domain.Draft{Generation: "generation", Step: "confirm", Department: domain.IT, Text: "Description", Attachments: []domain.Message{{TelegramChatID: 1, TelegramMessageID: 14, FileID: "draft-file", FileName: "draft.txt", MediaType: "document", Text: "Caption"}}}
+	d := domain.Draft{Generation: "generation", Step: "confirm", Department: domain.IT, Urgency: domain.Urgent, Text: "Description", Attachments: []domain.Message{{TelegramChatID: 1, TelegramMessageID: 14, FileID: "draft-file", FileName: "draft.txt", MediaType: "document", Text: "Caption"}}}
 	if err := s.PutDraft(ctx, 1, d); err != nil {
 		t.Fatal(err)
 	}
@@ -128,6 +122,9 @@ func TestDraftCreationAtomicallyMovesAttachmentAndIsIdempotent(t *testing.T) {
 	created, err := svc.CreateDraft(ctx, 1, d.Generation)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if created.Urgency != domain.Urgent {
+		t.Fatalf("urgency lost: %+v", created)
 	}
 	second, err := svc.CreateDraft(ctx, 1, d.Generation)
 	if err != nil || created.ID != second.ID {
@@ -191,7 +188,7 @@ func TestDraftSubmissionRollbackLeavesNoPartialTicket(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	d := domain.Draft{Generation: "rollback", Step: "confirm", Department: domain.IT, Text: "Problem", Attachments: []domain.Message{{TelegramChatID: 1, TelegramMessageID: 14, FileID: "duplicate-source", MediaType: "document"}}}
+	d := domain.Draft{Generation: "rollback", Step: "confirm", Department: domain.IT, Urgency: domain.Routine, Text: "Problem", Attachments: []domain.Message{{TelegramChatID: 1, TelegramMessageID: 14, FileID: "duplicate-source", MediaType: "document"}}}
 	if err := s.PutDraft(ctx, 1, d); err != nil {
 		t.Fatal(err)
 	}

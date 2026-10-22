@@ -6,22 +6,18 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sync"
 	"time"
 
-	"bot-bvk/internal/archive"
 	"bot-bvk/internal/config"
 	"bot-bvk/internal/domain"
 	"bot-bvk/internal/tickets"
 )
 
 type Scheduler struct {
-	Store     domain.Store
-	Config    config.Config
-	Calendar  tickets.Calendar
-	Now       func() time.Time
-	Backup    func(context.Context) (string, error)
-	cleanupMu sync.Mutex
+	Store    domain.Store
+	Config   config.Config
+	Calendar tickets.Calendar
+	Now      func() time.Time
 }
 
 func (s *Scheduler) Run(ctx context.Context) error {
@@ -52,35 +48,41 @@ func (s *Scheduler) Tick(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		msgs, err := s.Store.Messages(ctx, t.ID)
-		if err != nil {
-			return err
-		}
-		if t.Status.Active() {
-			if t.FirstResponseAt == nil && s.Calendar.WorkDuration(t.CreatedAt, now) >= time.Duration(s.Config.FirstResponseMinutes)*time.Minute {
-				if err = s.remind(ctx, t, events, "first_response", t.CreatedAt, "team_notification", fmt.Sprintf("Заявка #%d: нет первого ответа поддержки за %d рабочих минут.", t.ID, s.Config.FirstResponseMinutes)); err != nil {
-					return err
-				}
-			}
-			if t.Status == domain.InProgress {
+		if t.Status.Active() && s.Calendar.IsWorking(now) {
+			if t.Urgency == domain.Urgent && t.Status == domain.New && t.AssigneeID == 0 && s.Calendar.IsWorking(now) {
 				baseline := t.CreatedAt
-				for _, m := range msgs {
-					if (m.Direction == "outbound" || m.Direction == "internal") && m.CreatedAt.After(baseline) {
-						baseline = m.CreatedAt
-					}
-				}
 				for _, ev := range events {
-					if (ev.Kind == "claimed" || ev.Kind == "reassigned" || ev.Kind == "reopened" || ev.Kind == "transferred" || ev.Kind == "status_changed") && ev.CreatedAt.After(baseline) {
+					if (ev.Kind == "transferred" || ev.Kind == "reopened") && ev.CreatedAt.After(baseline) {
 						baseline = ev.CreatedAt
 					}
 				}
-				if s.Calendar.WorkDuration(baseline, now) >= time.Duration(s.Config.IdleHours)*time.Hour {
-					if err = s.remind(ctx, t, events, "idle", baseline, "team_notification", fmt.Sprintf("Заявка #%d: нет активности инженера %d рабочих часа. Проверьте статус и следующий шаг.", t.ID, s.Config.IdleHours)); err != nil {
+				for _, minutes := range []int{10, 20} {
+					if s.Calendar.WorkDuration(baseline, now) < time.Duration(minutes)*time.Minute {
+						continue
+					}
+					message := fmt.Sprintf("🔴 Срочная заявка #%d ожидает назначения уже 10 рабочих минут. Возьмите заявку в работу.", t.ID)
+					if minutes == 20 {
+						message = fmt.Sprintf("🔴 Срочная заявка #%d всё ещё без исполнителя. С момента поступления прошло 20 рабочих минут.", t.ID)
+					}
+					if err = s.once(ctx, t, events, fmt.Sprintf("urgent_assignment_%d", minutes), baseline, "urgent_assignment_reminder", map[string]string{"text": message, "baseline": baseline.UTC().Format(time.RFC3339Nano)}); err != nil {
 						return err
 					}
 				}
 			}
-			if t.Status == domain.Waiting {
+			if t.FirstResponseAt == nil && s.Calendar.WorkDuration(t.CreatedAt, now) >= time.Duration(s.Config.FirstResponseMinutes)*time.Minute {
+				message := fmt.Sprintf("Заявка #%d: нет первого ответа поддержки за %d рабочих минут.", t.ID, s.Config.FirstResponseMinutes)
+				if t.Urgency == domain.Urgent {
+					message = fmt.Sprintf("🔴 Срочная заявка #%d: клиент не получил первого ответа за %d рабочих минут.", t.ID, s.Config.FirstResponseMinutes)
+				}
+				kind := "team_notification"
+				if t.Urgency == domain.Urgent {
+					kind = "first_response_reminder"
+				}
+				if err = s.remind(ctx, t, events, "first_response", t.CreatedAt, kind, message); err != nil {
+					return err
+				}
+			}
+			if t.Status == domain.Waiting && !t.IsGroup() {
 				baseline := t.CreatedAt
 				for _, ev := range events {
 					if ev.Kind == "status_changed" && ev.CreatedAt.After(baseline) {
@@ -147,53 +149,4 @@ func (s *Scheduler) once(ctx context.Context, t domain.Ticket, events []domain.E
 		data, _ := json.Marshal(map[string]string{"key": key})
 		return tx.AddEvent(ctx, domain.Event{TicketID: t.ID, Kind: "reminder", Data: data})
 	})
-}
-
-// BeforeDelete validates only a new explicit completion and its durable proof.
-// It is called while the worker holds the ticket lock to fence concurrent edits.
-func (s *Scheduler) BeforeDelete(ctx context.Context, tx domain.Tx, t domain.Ticket, chatID, topicID int64) error {
-	var reader interface {
-		Events(context.Context, int64) ([]domain.Event, error)
-		Messages(context.Context, int64) ([]domain.Message, error)
-	} = s.Store
-	if transactional, ok := tx.(interface {
-		Events(context.Context, int64) ([]domain.Event, error)
-		Messages(context.Context, int64) ([]domain.Message, error)
-	}); ok {
-		reader = transactional
-	}
-	events, err := reader.Events(ctx, t.ID)
-	if err != nil {
-		return err
-	}
-	msgs, err := reader.Messages(ctx, t.ID)
-	if err != nil {
-		return err
-	}
-	if t.Status.Active() && t.TopicChatID == chatID && t.TopicID == topicID {
-		return domain.ErrConflict
-	}
-	for _, event := range events {
-		var target completionTarget
-		if event.Kind != "completion_cleanup_requested" || json.Unmarshal(event.Data, &target) != nil || target.ChatID != chatID || target.TopicID != topicID || target.CompletionKey == "" {
-			continue
-		}
-		dir := proofDirectory(events, target.CompletionKey)
-		if dir == "" {
-			return domain.ErrConflict
-		}
-		manifest, err := archive.Load(dir)
-		if err != nil || !manifest.CoversCompletion(t, msgs, events, event) {
-			return domain.ErrConflict
-		}
-		// Hashing the backup only holds this ticket's row lock. Acquire the
-		// global acceptance fence last, then recheck newly accepted updates.
-		if fence, ok := s.Store.(interface {
-			CleanupFence(context.Context, domain.Tx, int64) error
-		}); ok {
-			return fence.CleanupFence(ctx, tx, t.ID)
-		}
-		return nil
-	}
-	return domain.ErrConflict
 }

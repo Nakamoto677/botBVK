@@ -34,19 +34,58 @@ func engineerTextBound(text string, limit int) string {
 func engineerField(text string, limit int) string {
 	return html.EscapeString(engineerTextBound(strings.Join(strings.Fields(text), " "), limit))
 }
+
+const engineerDescriptionLimit = 2400
+
 func engineerCardText(t domain.Ticket, client, company, assignee string) string {
-	if t.AssigneeID == 0 {
-		assignee = "Не назначен"
-	}
+	return engineerCardTextLimit(t, client, company, assignee, engineerDescriptionLimit)
+}
+
+// engineerCardTextLimit renders the whole card with a caller-chosen description
+// budget. A media message can only carry a 1024-unit caption, so the queue photo
+// card passes a smaller budget while the regular text card keeps 2400.
+func engineerCardTextLimit(t domain.Ticket, client, company, assignee string, descriptionLimit int) string {
 	description := strings.TrimSpace(t.Description)
 	if description == "" {
 		description = "Описание не указано"
 	}
-	text := fmt.Sprintf("<b>Заявка #%d · %s</b>\n\n<b>Компания:</b> %s\n<b>Клиент:</b> %s\n<b>Отдел:</b> %s\n<b>Исполнитель:</b> %s\n\n<b>Описание</b>\n%s", t.ID, statusName(t.Status), engineerField(company, 120), engineerField(client, 100), departmentName(t.Department), engineerField(assignee, 100), html.EscapeString(engineerTextBound(description, 2400)))
-	if t.RoutingPending {
-		text += "\n\n<i>Создаём топик. Кнопки появятся после подготовки.</i>"
+	return engineerCardPrefix(t, client, company, assignee) + html.EscapeString(engineerTextBound(description, descriptionLimit)) + engineerCardSuffix(t)
+}
+
+// engineerCardPrefix ends right after the "Описание" heading, and
+// engineerCardSuffix carries the transient provisioning note. Keeping the pieces
+// separate lets a caption budget leave room for the queue-only extras without
+// cutting HTML tags or rebuilding the card in two places.
+func engineerCardPrefix(t domain.Ticket, client, company, assignee string) string {
+	if t.AssigneeID == 0 {
+		assignee = "Не назначен"
 	}
-	return text
+	heading := fmt.Sprintf("Заявка #%d · %s", t.ID, statusName(t.Status))
+	if t.Urgency == domain.Urgent {
+		heading = fmt.Sprintf("🔴 СРОЧНАЯ ЗАЯВКА #%d · %s", t.ID, statusName(t.Status))
+	}
+	urgency := urgencyLabel(t.Urgency)
+	if t.Urgency == domain.Urgent {
+		urgency = "срочно, указана клиентом"
+	}
+	if t.IsGroup() {
+		requester := strings.TrimSpace(t.RequesterName)
+		if requester == "" {
+			requester = "Сотрудник компании"
+		}
+		if username := strings.TrimSpace(t.RequesterUsername); username != "" {
+			requester += " · @" + strings.TrimPrefix(username, "@")
+		}
+		return fmt.Sprintf("<b>%s</b>\n<b>Начало:</b> %s (Иркутск)\n\n<b>Компания:</b> %s\n<b>Чат компании:</b> %s\n<b>Обратился:</b> %s\n<b>Отдел:</b> %s\n<b>Исполнитель:</b> %s\n\n<b>Срочность:</b> %s\n\n<b>Описание</b>\n", heading, t.CreatedAt.In(irkutsk).Format("02.01.2006 15:04"), engineerField(company, 120), engineerField(client, 100), engineerField(requester, 100), departmentName(t.Department), engineerField(assignee, 100), urgency)
+	}
+	return fmt.Sprintf("<b>%s</b>\n<b>Начало:</b> %s (Иркутск)\n\n<b>Компания:</b> %s\n<b>Клиент:</b> %s\n<b>Отдел:</b> %s\n<b>Исполнитель:</b> %s\n\n<b>Срочность:</b> %s\n\n<b>Описание</b>\n", heading, t.CreatedAt.In(irkutsk).Format("02.01.2006 15:04"), engineerField(company, 120), engineerField(client, 100), departmentName(t.Department), engineerField(assignee, 100), urgency)
+}
+
+func engineerCardSuffix(t domain.Ticket) string {
+	if t.RoutingPending {
+		return "\n\n<i>Создаём топик. Кнопки появятся после подготовки.</i>"
+	}
+	return ""
 }
 func engineerTopicButtons(t domain.Ticket) [][]Button {
 	if !t.Status.Active() || t.Status == domain.New {
@@ -55,11 +94,21 @@ func engineerTopicButtons(t domain.Ticket) [][]Button {
 	id := fmt.Sprint(t.ID)
 	return [][]Button{{{Text: engineerCloseLabel, Data: "close:" + id}, {Text: engineerTransferLabel, Data: "transfer:" + id}}}
 }
-func engineerQueueButtons(t domain.Ticket) [][]Button {
+func engineerQueueButtons(t domain.Ticket, companyLink string) [][]Button {
 	if !t.Status.Active() || t.RoutingPending {
 		return [][]Button{}
 	}
 	id := fmt.Sprint(t.ID)
+	if t.IsGroup() {
+		buttons := [][]Button{}
+		if link := strings.TrimSpace(companyLink); link != "" {
+			buttons = append(buttons, []Button{{Text: "В чат компании", URL: link}})
+		}
+		if t.Status == domain.New {
+			return append(buttons, []Button{{Text: "Взять в работу", Data: "claim:" + id}}, []Button{{Text: engineerTransferLabel, Data: "transfer:" + id}})
+		}
+		return append(buttons, []Button{{Text: "Закрыть задачу", Data: "close:" + id}, {Text: engineerTransferLabel, Data: "transfer:" + id}})
+	}
 	if t.Status == domain.New {
 		return [][]Button{{{Text: "Взять в работу", Data: "claim:" + id}}, {{Text: engineerTransferLabel, Data: "transfer:" + id}}}
 	}
@@ -74,6 +123,7 @@ func engineerQueueButtons(t domain.Ticket) [][]Button {
 	}
 	return append(buttons, []Button{{Text: "Закрыть задачу", Data: "close:" + id}, {Text: engineerTransferLabel, Data: "transfer:" + id}})
 }
+
 // Engineer cards are HTML, so they are sent through the shared recorded-parts
 // path with an explicit parse mode rather than a private send helper. That keeps
 // the retry fence in force: a crash between the send and the ticket update used

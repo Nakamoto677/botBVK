@@ -17,7 +17,6 @@ type AuxiliaryMessage struct {
 // contract used by ticket services and lightweight test doubles.
 type WorkflowStore interface {
 	SaveAuxiliary(context.Context, AuxiliaryMessage) error
-	Auxiliary(context.Context, int64, int64, int64, string) ([]AuxiliaryMessage, error)
 	QueueAuxiliaryCleanup(context.Context, int64, int64, int64, string) error
 	SaveWorkflow(context.Context, int64, int64, int64, string, []byte) error
 	Workflow(context.Context, int64, int64, int64, string) ([]byte, error)

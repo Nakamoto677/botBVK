@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"bot-bvk/internal/domain"
@@ -21,6 +22,22 @@ func (w *Worker) retireQueueCard(ctx context.Context, payload operationPayload, 
 	if chat == 0 || payload.MessageID == 0 {
 		return nil
 	}
+	note := "\nПередано в отдел: " + departmentName(payload.ToDepartment)
+	if payload.QueueMediaType != "" {
+		media, hasMedia, e := w.queueCardAttachment(ctx, t)
+		if e != nil {
+			return e
+		}
+		mediaID := int64(0)
+		if hasMedia {
+			mediaID = media.ID
+		}
+		caption, e := w.cardCaption(ctx, t, mediaID)
+		if e != nil {
+			return e
+		}
+		return w.editQueueCardCaption(ctx, chat, payload.MessageID, caption+note, [][]Button{})
+	}
 	text, err := w.card(ctx, t)
 	if err != nil {
 		return err
@@ -28,11 +45,40 @@ func (w *Worker) retireQueueCard(ctx context.Context, payload operationPayload, 
 	if err = w.rate(ctx, chat, "editMessageText"); err != nil {
 		return err
 	}
-	return messageEditError(w.client.Call(ctx, "editMessageText", map[string]any{"chat_id": chat, "message_id": payload.MessageID, "text": text + "\nПередано в отдел: " + departmentName(payload.ToDepartment), "parse_mode": "HTML", "reply_markup": Markup{Buttons: [][]Button{}}}, nil))
+	return messageEditError(w.client.Call(ctx, "editMessageText", map[string]any{"chat_id": chat, "message_id": payload.MessageID, "text": text + note, "parse_mode": "HTML", "reply_markup": Markup{Buttons: [][]Button{}}}, nil))
 }
 
 func (w *Worker) teamNotification(ctx context.Context, payload operationPayload, team Team) error {
 	_, err := w.send(ctx, team.ChatID, team.QueueTopicID, payload.Text, nil)
+	return err
+}
+
+func (w *Worker) urgentAssignmentReminder(ctx context.Context, t domain.Ticket, payload operationPayload, team Team) error {
+	if t.Urgency != domain.Urgent || t.Status != domain.New || t.AssigneeID != 0 {
+		return nil
+	}
+	baseline := t.CreatedAt
+	events, err := w.store.Events(ctx, t.ID)
+	if err != nil {
+		return err
+	}
+	for _, ev := range events {
+		if (ev.Kind == "transferred" || ev.Kind == "reopened") && ev.CreatedAt.After(baseline) {
+			baseline = ev.CreatedAt
+		}
+	}
+	if baseline.UTC().Format(time.RFC3339Nano) != payload.Baseline {
+		return nil
+	}
+	if t.QueueMessageID == 0 {
+		return domain.ErrConflict
+	}
+	buttons := [][]Button{}
+	if strings.HasPrefix(fmt.Sprint(team.ChatID), "-100") {
+		url := fmt.Sprintf("https://t.me/c/%s/%d", strings.TrimPrefix(fmt.Sprint(team.ChatID), "-100"), t.QueueMessageID)
+		buttons = [][]Button{{{Text: "Открыть заявку", URL: url}}}
+	}
+	_, err = w.send(ctx, team.ChatID, team.QueueTopicID, payload.Text, buttons)
 	return err
 }
 
@@ -45,6 +91,11 @@ func (w *Worker) archiveMessage(ctx context.Context, op domain.Operation, t doma
 }
 
 func (w *Worker) relayMessage(ctx context.Context, op domain.Operation, t domain.Ticket) error {
+	if t.IsGroup() {
+		// Company-chat messages are already visible to both sides. A stale
+		// relay operation must never repost them.
+		return nil
+	}
 	var msg domain.Message
 	if err := json.Unmarshal(op.Payload, &msg); err != nil {
 		return domain.ErrInvalid

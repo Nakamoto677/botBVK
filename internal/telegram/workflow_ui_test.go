@@ -113,7 +113,7 @@ func TestEngineerButtonsCollectResolutionAndTransferReasonInTheirOwnScope(t *tes
 			client, _ := capturedClient()
 			store := &adapterStore{user: domain.User{ID: 2, Role: "engineer", Approved: true, Departments: []domain.Department{domain.IT}}, ticket: domain.Ticket{ID: 7, Department: domain.IT, AssigneeID: 2, Status: domain.InProgress, TopicChatID: -100, TopicID: 10, QueueMessageID: 77}}
 			service := &promptService{}
-			adapter := NewAdapter(client, store, service, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100, QueueTopicID: 1}}})
+			adapter := NewAdapter(client, store, service, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100, QueueTopicID: 1}, domain.OneC: {ChatID: -200, QueueTopicID: 1}}})
 			message := &Message{ID: 77, Chat: Chat{ID: -100, Type: "supergroup"}, ThreadID: 1, From: Person{ID: 2}}
 			callback := &Callback{ID: "cb", From: Person{ID: 2}, Message: message, Data: action + ":7"}
 			if err := adapter.callback(context.Background(), callback); err != nil {

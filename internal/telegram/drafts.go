@@ -6,12 +6,36 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"strings"
 )
 
-const draftDescriptionText = "Опишите проблему одним или несколькими сообщениями. Можно добавить вложения. Когда всё готово, нажмите «Отправить»."
+const draftDescriptionText = "Опишите, с чем нужна помощь.\nУкажите, что произошло и как это влияет на работу. При необходимости приложите фото или файл."
+const draftUrgencyText = "Насколько срочно требуется помощь?\n\nСрочно — работа остановлена или возникла критическая проблема, требующая оперативного вмешательства.\n\nВ обычном порядке — нужна консультация, настройка или решение проблемы, которая не блокирует работу."
+
+func urgencyLabel(u domain.Urgency) string {
+	switch u {
+	case domain.Urgent:
+		return "🔴 Срочно"
+	case domain.Routine:
+		return "в обычном порядке"
+	default:
+		return "не указана"
+	}
+}
+
+func draftUrgencyButtons(d draft) [][]Button {
+	back := Button{Text: "Назад", Data: "draftback:" + d.Generation}
+	if d.Step == "change_urgency" {
+		back = Button{Text: "Назад к заявке", Data: "draftreview:" + d.Generation}
+	}
+	return [][]Button{
+		{{Text: "🔴 Срочно", Data: "urgency:urgent:" + d.Generation}},
+		{{Text: "В обычном порядке", Data: "urgency:routine:" + d.Generation}},
+		{back},
+		{{Text: clientCancelDraftLabel, Data: "cancel:" + d.Generation}},
+	}
+}
 
 func (a *Adapter) appendDraft(ctx context.Context, m *Message, d draft) error {
 	for _, id := range d.MessageIDs {
@@ -62,10 +86,10 @@ func draftGeneration() string {
 	return hex.EncodeToString(b[:])
 }
 func draftButtons(d draft) [][]Button {
-	return [][]Button{{{Text: "Отправить", Data: "submit:" + d.Generation}, {Text: clientCancelDraftLabel, Data: "cancel:" + d.Generation}}}
+	return [][]Button{{{Text: "Отправить", Data: "submit:" + d.Generation}}, {{Text: "Изменить срочность", Data: "changeurgency:" + d.Generation}}, {{Text: clientCancelDraftLabel, Data: "cancel:" + d.Generation}}}
 }
-func draftDepartments(d draft) [][]Button {
-	buttons := departmentButtons("new")
+func (a *Adapter) draftDepartments(d draft) [][]Button {
+	buttons := a.departmentButtons("new")
 	for i := range buttons {
 		for j := range buttons[i] {
 			buttons[i][j].Data += ":" + d.Generation
@@ -73,6 +97,7 @@ func draftDepartments(d draft) [][]Button {
 	}
 	return append(buttons, []Button{{Text: clientCancelDraftLabel, Data: "cancel:" + d.Generation}})
 }
+
 // staleDraft tells the user that the tapped screen is outdated, drops its buttons
 // and marks the callback answered. The marker is what keeps the shared error path
 // from answering the same callback a second time with a generic message and
@@ -124,8 +149,24 @@ func (a *Adapter) resumeDraft(ctx context.Context, m *Message) error {
 			return err
 		}
 	}
+	if d.Department != "" && !a.departmentEnabled(d.Department) {
+		d.Department = ""
+		d.Step = "department"
+		if err = a.saveDraft(ctx, m.From.ID, d); err != nil {
+			return err
+		}
+	}
+	if a.departmentEnabled(d.Department) && !d.Urgency.Valid() && d.Step != "department" && d.Step != "urgency" {
+		d.Step = "urgency"
+		if err = a.saveDraft(ctx, m.From.ID, d); err != nil {
+			return err
+		}
+	}
 	if d.Step == "department" {
-		return a.sayAux(ctx, m, m.From.ID, "draft", "Выберите направление.", draftDepartments(d))
+		return a.sayAux(ctx, m, m.From.ID, "draft", "Выберите направление.", a.draftDepartments(d))
+	}
+	if d.Step == "urgency" || d.Step == "change_urgency" {
+		return a.sayAux(ctx, m, m.From.ID, "draft", draftUrgencyText, draftUrgencyButtons(d))
 	}
 	if d.Step == "confirm" {
 		return a.confirmDraft(ctx, m, d)
@@ -140,7 +181,7 @@ func (a *Adapter) confirmDraft(ctx context.Context, m *Message, d draft) error {
 		}
 		return a.say(ctx, m, text, nil)
 	}
-	text := "Создать заявку?\n" + previewText(d.Text, 3000)
+	text := fmt.Sprintf("Проверьте заявку перед отправкой\n\nОтдел: %s\nСрочность: %s\n\nОписание:\n%s", d.Department.Name(), urgencyLabel(d.Urgency), previewText(d.Text, 3000))
 	if len(d.Attachments) > 0 {
 		text += fmt.Sprintf("\nВложений принято: %d. Они сохранятся вместе с заявкой.", len(d.Attachments))
 	}
@@ -160,8 +201,6 @@ func (a *Adapter) submitDraft(ctx context.Context, c *Callback, d draft) error {
 	}
 	return err
 }
-func draftNotFound(err error) bool { return errors.Is(err, domain.ErrNotFound) }
-
 func (a *Adapter) formGeneration(m *Message) string {
 	if a.activeUpdate == 0 {
 		return draftGeneration()

@@ -37,7 +37,22 @@ func (d Department) Name() string {
 	}
 }
 
+// Channel identifies where a ticket was opened. An empty value is the legacy
+// and current private-chat flow; ChannelGroup is the company group chat.
+type Channel string
+
+const ChannelGroup Channel = "group"
+
 type Status string
+
+type Urgency string
+
+const (
+	Urgent  Urgency = "urgent"
+	Routine Urgency = "routine"
+)
+
+func (u Urgency) Valid() bool { return u == Urgent || u == Routine }
 
 const (
 	New        Status = "new"
@@ -70,8 +85,17 @@ type AccessRequest struct {
 	CreatedAt time.Time
 }
 type Ticket struct {
-	ID                int64      `json:"id"`
+	ID      int64   `json:"id"`
+	Urgency Urgency `json:"urgency,omitempty"`
+	// ClientID is the Telegram user for a private ticket and the negative
+	// Telegram chat ID of the company group for a group ticket. The existing
+	// bvk_active_client index therefore keeps one active group ticket per chat.
 	ClientID          int64      `json:"client_id"`
+	Channel           Channel    `json:"channel,omitempty"`
+	RequesterID       int64      `json:"requester_id,omitempty"`
+	RequesterName     string     `json:"requester_name,omitempty"`
+	RequesterUsername string     `json:"requester_username,omitempty"`
+	SourceMessageID   int64      `json:"source_message_id,omitempty"`
 	CompanyID         int64      `json:"company_id"`
 	Department        Department `json:"department"`
 	Description       string     `json:"description"`
@@ -87,9 +111,35 @@ type Ticket struct {
 	TopicChatID       int64      `json:"topic_chat_id"`
 	TopicID           int64      `json:"topic_id"`
 	QueueMessageID    int64      `json:"queue_message_id"`
+	QueueMediaType    string     `json:"queue_media_type,omitempty"`
 	TopicMessageID    int64      `json:"topic_message_id"`
 	RoutingPending    bool       `json:"routing_pending"`
 	RoutingGeneration int64      `json:"routing_generation"`
+}
+
+// IsGroup reports whether the ticket is a conversation in a company group chat
+// rather than a private chat with a client.
+func (t Ticket) IsGroup() bool { return t.Channel == ChannelGroup }
+
+// ClientTopic is the durable Telegram conversation for a client in one department.
+// Ticket IDs and lifecycle remain independent of this binding.
+type ClientTopic struct {
+	ClientID   int64
+	Department Department
+	ChatID     int64
+	TopicID    int64
+}
+
+type ClientTopicStore interface {
+	ClientNumber(context.Context, int64) (int64, error)
+	ClientTopic(context.Context, int64, Department) (ClientTopic, error)
+	PreviousTopicTicket(context.Context, int64, Department, int64) (Ticket, error)
+	ActiveClientTopicTicket(context.Context, int64, Department, int64) (Ticket, error)
+}
+
+type ClientTopicTx interface {
+	BindClientTopic(context.Context, ClientTopic) error
+	ReplaceClientTopic(context.Context, ClientTopic, int64) error
 }
 type MessageRevision struct {
 	Text     string
@@ -106,7 +156,6 @@ type Message struct {
 	TelegramChatID    int64
 	TelegramTopicID   int64
 	TelegramMessageID int64
-	ReplyToMessageID  int64
 	FileID            string
 	FileName          string
 	FileSize          int64
@@ -181,9 +230,9 @@ type StoredUpdate struct {
 }
 
 // QuarantinedUpdate is accepted work that exhausted its attempts and can never
-// complete on its own. It stays unfinished so that destructive topic deletion
-// remains fenced, and it must never order anyone else: nothing selects it again
-// and only an explicit release clears the flag.
+// complete on its own. It stays unfinished until an operator releases it and the
+// update is processed, and it must never order anyone else: nothing selects it
+// again and only an explicit release clears the flag.
 type QuarantinedUpdate struct {
 	ID        int64
 	ActorID   int64
@@ -205,6 +254,7 @@ type Draft struct {
 	Generation  string
 	Step        string
 	Department  Department
+	Urgency     Urgency
 	Text        string
 	Attachments []Message
 	// Source IDs make appending descriptions idempotent across inbox retries.

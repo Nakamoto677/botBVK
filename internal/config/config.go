@@ -13,8 +13,9 @@ import (
 )
 
 type Team struct {
-	ChatID       int64 `json:"chat_id"`
-	QueueTopicID int64 `json:"queue_topic_id"`
+	ChatID       int64    `json:"chat_id"`
+	QueueTopicID int64    `json:"queue_topic_id"`
+	Tags         []string `json:"tags,omitempty"`
 }
 type Staff struct {
 	ID          int64               `json:"id"`
@@ -24,9 +25,11 @@ type Staff struct {
 }
 type Config struct {
 	DatabaseURL          string                     `json:"-"`
+	DatabaseURLFile      string                     `json:"database_url_file,omitempty"`
 	Token                string                     `json:"-"`
 	AdminID              int64                      `json:"admin_id"`
 	Companies            Companies                  `json:"companies"`
+	ClientGroups         []ClientGroup              `json:"client_groups,omitempty"`
 	Staff                []Staff                    `json:"staff"`
 	Departments          map[domain.Department]Team `json:"departments"`
 	ArchiveDir           string                     `json:"archive_dir"`
@@ -38,11 +41,10 @@ type Config struct {
 	FirstResponseMinutes int                        `json:"first_response_minutes"`
 	IdleHours            int                        `json:"idle_hours"`
 	WaitingDays          int                        `json:"waiting_days"`
-	TopicRetentionDays   int                        `json:"-"` // Deprecated; completion backup now controls deletion.
 }
 
 func Load(path string) (Config, error) {
-	c := Config{ArchiveDir: "data/archive", BackupDir: "data/backups", HealthAddress: "127.0.0.1:8080", StartHour: 9, EndHour: 18, FirstResponseMinutes: 30, IdleHours: 4, WaitingDays: 2}
+	c := Config{ArchiveDir: "data/archive", BackupDir: "data/backups", HealthAddress: "127.0.0.1:8080", StartHour: 9, EndHour: 18, FirstResponseMinutes: 30, IdleHours: 4, WaitingDays: 1}
 	f, e := os.Open(path)
 	if e != nil {
 		return c, e
@@ -81,7 +83,24 @@ func Load(path string) (Config, error) {
 	if e = d.Decode(&c); e != nil {
 		return c, fmt.Errorf("config: %w", e)
 	}
+	if e = normalizeDepartmentTags(c.Departments); e != nil {
+		return c, fmt.Errorf("config: %w", e)
+	}
+	if e = validateClientGroups(c.ClientGroups, c.Departments); e != nil {
+		return c, fmt.Errorf("config: %w", e)
+	}
 	c.DatabaseURL = os.Getenv("DATABASE_URL")
+	if c.DatabaseURLFile != "" {
+		urlPath := c.DatabaseURLFile
+		if !filepath.IsAbs(urlPath) {
+			urlPath = filepath.Join(filepath.Dir(path), urlPath)
+		}
+		contents, err := os.ReadFile(urlPath)
+		if err != nil {
+			return c, fmt.Errorf("database_url_file: %w", err)
+		}
+		c.DatabaseURL = strings.TrimSpace(string(contents))
+	}
 	c.Token = os.Getenv("TELEGRAM_BOT_TOKEN")
 	if c.DatabaseURL == "" {
 		return c, fmt.Errorf("DATABASE_URL is required")
@@ -109,6 +128,9 @@ func Load(path string) (Config, error) {
 			if !dept.Valid() {
 				return c, fmt.Errorf("invalid staff department %q", dept)
 			}
+			if _, configured := c.Departments[dept]; !configured {
+				return c, fmt.Errorf("staff department %q is not configured", dept)
+			}
 		}
 	}
 	if strings.TrimSpace(c.ArchiveDir) == "" || strings.TrimSpace(c.BackupDir) == "" {
@@ -133,10 +155,15 @@ func (c Config) ValidateTelegram() error {
 	if c.Token == "" {
 		return fmt.Errorf("TELEGRAM_BOT_TOKEN is required")
 	}
+	if len(c.Departments) == 0 {
+		return fmt.Errorf("at least one department is required")
+	}
 	seen := map[int64]bool{}
-	for _, dept := range []domain.Department{domain.IT, domain.OneC, domain.Installation, domain.Field} {
-		t, ok := c.Departments[dept]
-		if !ok || t.ChatID == 0 || t.QueueTopicID <= 0 {
+	for dept, t := range c.Departments {
+		if !dept.Valid() {
+			return fmt.Errorf("unknown department %s", dept)
+		}
+		if t.ChatID >= 0 || t.QueueTopicID <= 0 {
 			return fmt.Errorf("chat and queue topic required for %s", dept)
 		}
 		if seen[t.ChatID] {

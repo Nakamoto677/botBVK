@@ -1,5 +1,5 @@
 // Package archive creates independent backups and verifies them by restoring
-// PostgreSQL into a disposable database before issuing a cleanup manifest.
+// PostgreSQL into a disposable database.
 package archive
 
 import (
@@ -297,92 +297,4 @@ func messageHash(m domain.Message) string {
 	data, _ := json.Marshal(m)
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
-}
-
-// Load reads a specific durable verification proof, rather than replacing it
-// with a possibly newer snapshot while an old topic waits in the outbox.
-func Load(dir string) (Manifest, error) {
-	data, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
-	if err != nil {
-		return Manifest{}, err
-	}
-	var m Manifest
-	if err = json.Unmarshal(data, &m); err != nil {
-		return m, err
-	}
-	if !m.Verified {
-		return m, domain.ErrConflict
-	}
-	m.Directory = dir
-	return m, nil
-}
-
-// CoversCompletion protects the transcript accepted before this completion.
-// Later routing/claim changes can safely coexist with deletion of a detached
-// old topic. Fingerprints detect later edits to its saved messages.
-func (m Manifest) CoversCompletion(t domain.Ticket, msgs []domain.Message, events []domain.Event, completion domain.Event) bool {
-	snap, ok := m.Tickets[t.ID]
-	if !m.Verified || !ok || !snap.Complete || completion.Kind != "completion_cleanup_requested" || completion.CreatedAt.IsZero() || completion.ID == 0 || completion.ID > snap.EventID {
-		return false
-	}
-	hash, err := checksum(filepath.Join(m.Directory, "database.dump"))
-	if err != nil || m.DumpSHA256 == "" || hash != m.DumpSHA256 {
-		return false
-	}
-	for _, msg := range msgs {
-		if !msg.CreatedAt.IsZero() && msg.CreatedAt.After(completion.CreatedAt) {
-			continue
-		}
-		if msg.ID > snap.MessageID || snap.MessageHashes[msg.ID] != messageHash(msg) {
-			return false
-		}
-		if msg.FileID != "" {
-			f, ok := m.Files[msg.ID]
-			if !ok || !filepath.IsLocal(f.Path) || f.SHA256 != msg.SHA256 {
-				return false
-			}
-			actual, err := checksum(filepath.Join(m.Directory, f.Path))
-			if err != nil || actual != f.SHA256 {
-				return false
-			}
-		}
-	}
-	for _, event := range events {
-		if housekeeping(event.Kind) {
-			continue
-		}
-		// A replacement of old media may arrive after completion without
-		// changing its saved Message. Never discard that loss signal by time.
-		if event.Kind == "media_edit_unsupported" {
-			return false
-		}
-		if event.CreatedAt.After(completion.CreatedAt) {
-			continue
-		}
-		if event.ID > snap.EventID {
-			return false
-		}
-	}
-	return true
-}
-
-// CheckMessages checks live attachment availability before a new backup. This
-// is separate from proof validation, whose copied files survive live-file loss.
-func CheckMessages(msgs []domain.Message) error {
-	for _, msg := range msgs {
-		if msg.FileID == "" {
-			continue
-		}
-		if msg.ArchivePath == "" || msg.SHA256 == "" {
-			return fmt.Errorf("attachment of message %d is not archived", msg.ID)
-		}
-		actual, err := checksum(msg.ArchivePath)
-		if err != nil {
-			return fmt.Errorf("attachment of message %d unavailable: %w", msg.ID, err)
-		}
-		if actual != msg.SHA256 {
-			return fmt.Errorf("attachment of message %d checksum mismatch", msg.ID)
-		}
-	}
-	return nil
 }

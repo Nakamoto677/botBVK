@@ -85,7 +85,7 @@ func (a *Adapter) processUpdate(ctx context.Context, entry domain.StoredUpdate) 
 	log.Printf("inbox update %d attempt %d quarantined=%t: %v", entry.ID, entry.Attempts+1, quarantine, err)
 	if quarantine {
 		w := NewWorker(a.client, a.store, a.cfg)
-		return w.notifyAdmins(ctx, fmt.Sprintf("Входящее действие %d изолировано после ошибки; исходные данные сохранены, зависимые действия и удаление архива заблокированы.", entry.ID))
+		return w.notifyAdmins(ctx, fmt.Sprintf("Входящее действие %d изолировано после ошибки; исходные данные сохранены, зависимые действия ждут проверки.", entry.ID))
 	}
 	return nil
 }

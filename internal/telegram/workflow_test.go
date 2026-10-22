@@ -107,7 +107,7 @@ func TestCloseAndTransferButtonsCaptureScopedTextAndCaption(t *testing.T) {
 	client.BaseURL = server.URL
 	store := &adapterStore{user: domain.User{ID: 2, Role: "engineer", Approved: true, Departments: []domain.Department{domain.IT}}, ticket: domain.Ticket{ID: 7, Department: domain.IT, Status: domain.InProgress, AssigneeID: 2, TopicChatID: -100, TopicID: 10}}
 	service := &adapterService{}
-	adapter := NewAdapter(client, store, service, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100, QueueTopicID: 1}}})
+	adapter := NewAdapter(client, store, service, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100, QueueTopicID: 1}, domain.OneC: {ChatID: -200, QueueTopicID: 1}}})
 	origin := &Message{ID: 20, Chat: Chat{ID: -100, Type: "supergroup"}, ThreadID: 10}
 	callback := &Callback{ID: "cb", From: Person{ID: 2}, Message: origin, Data: "close:7"}
 	if err := adapter.Handle(context.Background(), Update{Callback: callback}); err != nil {
@@ -267,7 +267,7 @@ func TestMaximumBodyAndCaptionAlwaysKeepHumanAuthor(t *testing.T) {
 func TestStaffPrivateCardDoesNotShowClientOnlyOperations(t *testing.T) {
 	client, capture := capturedClient()
 	u := domain.User{ID: 2, Role: "engineer", Approved: true, Departments: []domain.Department{domain.IT}}
-	ticket := domain.Ticket{ID: 7, ClientID: 12, Department: domain.IT, Status: domain.InProgress, TopicChatID: -1001234567890, TopicID: 10}
+	ticket := domain.Ticket{ID: 7, ClientID: 12, Department: domain.IT, Status: domain.InProgress, TopicChatID: -1001234567890, TopicID: 10, TopicMessageID: 88}
 	store := &adapterStore{user: u, ticket: ticket}
 	adapter := NewAdapter(client, store, &adapterService{}, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -1001234567890, QueueTopicID: 1}}})
 	if err := adapter.showTicket(context.Background(), &Message{Chat: Chat{ID: 2, Type: "private"}}, u, ticket); err != nil {
@@ -275,7 +275,7 @@ func TestStaffPrivateCardDoesNotShowClientOnlyOperations(t *testing.T) {
 	}
 	body, _ := json.Marshal(capture.bodies[0]["reply_markup"])
 	text := string(body)
-	if strings.Contains(text, "cancel:") || strings.Contains(text, "reopen:") || !strings.Contains(text, "history:7") || !strings.Contains(text, "https://t.me/c/1234567890/10") {
+	if strings.Contains(text, "cancel:") || strings.Contains(text, "reopen:") || !strings.Contains(text, "history:7") || !strings.Contains(text, "https://t.me/c/1234567890/88") {
 		t.Fatal("wrong staff private controls", text)
 	}
 }

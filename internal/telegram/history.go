@@ -50,10 +50,24 @@ func (a *Adapter) historyPage(ctx context.Context, m *Message, u domain.User, t 
 		return err
 	}
 	client, err := clientContact(ctx, a.store, t.ClientID)
+	if t.IsGroup() {
+		client, err = displayName(ctx, a.store, t.ClientID, "Чат компании")
+	}
 	if err != nil {
 		return err
 	}
 	header := fmt.Sprintf("Заявка #%d · %s · %s\nКлиент: %s\nОтдел: %s\nВремя: Иркутск (UTC+8)\nИсходное обращение:\n%s", t.ID, company, statusName(t.Status), client, departmentName(t.Department), t.Description)
+	if t.IsGroup() {
+		requester := strings.TrimSpace(t.RequesterName)
+		if requester == "" {
+			requester = "Сотрудник компании"
+		}
+		if username := strings.TrimSpace(t.RequesterUsername); username != "" {
+			requester += " · @" + strings.TrimPrefix(username, "@")
+		}
+		header = fmt.Sprintf("Заявка #%d · %s · %s\nКомпания: %s\nЧат компании: %s\nОбратился: %s\nОтдел: %s\nВремя: Иркутск (UTC+8)\nИсходное обращение:\n%s", t.ID, company, statusName(t.Status), company, client, requester, departmentName(t.Department), t.Description)
+	}
+	header = strings.Replace(header, "\nВремя: Иркутск", "\nСрочность: "+urgencyLabel(t.Urgency)+"\nВремя: Иркутск", 1)
 	resolution := ""
 	for _, e := range events {
 		if e.Kind == "closed" {
@@ -81,12 +95,21 @@ func (a *Adapter) historyPage(ctx context.Context, m *Message, u domain.User, t 
 	if u.Role != "client" {
 		headerButtons = [][]Button{{{Text: "История", Data: fmt.Sprintf("history:%d", t.ID)}}}
 		team := a.cfg.Departments[t.Department]
-		target := t.TopicID
+		target := t.TopicMessageID
 		if target == 0 {
 			target = t.QueueMessageID
 		}
-		if strings.HasPrefix(fmt.Sprint(team.ChatID), "-100") && target > 0 {
-			headerButtons = append(headerButtons, []Button{{Text: "Открыть топик", URL: fmt.Sprintf("https://t.me/c/%s/%d", strings.TrimPrefix(fmt.Sprint(team.ChatID), "-100"), target)}})
+		if strings.HasPrefix(fmt.Sprint(t.TopicChatID), "-100") && target > 0 && t.TopicMessageID > 0 {
+			headerButtons = append(headerButtons, []Button{{Text: "Открыть карточку в топике", URL: fmt.Sprintf("https://t.me/c/%s/%d", strings.TrimPrefix(fmt.Sprint(t.TopicChatID), "-100"), target)}})
+		} else if strings.HasPrefix(fmt.Sprint(team.ChatID), "-100") && target > 0 {
+			headerButtons = append(headerButtons, []Button{{Text: "Открыть карточку в очереди", URL: fmt.Sprintf("https://t.me/c/%s/%d", strings.TrimPrefix(fmt.Sprint(team.ChatID), "-100"), target)}})
+		}
+		if t.IsGroup() {
+			if group, ok := a.cfg.ClientGroups[t.ClientID]; ok {
+				if link := groupChatURL(group, t.ClientID, t.SourceMessageID); link != "" {
+					headerButtons = append(headerButtons, []Button{{Text: "В чат компании", URL: link}})
+				}
+			}
 		}
 	}
 	appendPage(header, headerButtons)
@@ -113,6 +136,16 @@ func (a *Adapter) historyPage(ctx context.Context, m *Message, u domain.User, t 
 			text += fmt.Sprintf("\nПредыдущая версия (%s): %s", r.EditedAt.In(irkutsk).Format("02.01.2006 15:04"), r.Text)
 		}
 		appendPage(text, buttons)
+	}
+	for _, e := range events {
+		if e.Kind == "topic_closing_notice" {
+			var v struct {
+				Text string `json:"text"`
+			}
+			if json.Unmarshal(e.Data, &v) == nil && v.Text != "" {
+				appendPage(fmt.Sprintf("%s · Служебное\n%s", e.CreatedAt.In(irkutsk).Format("02.01.2006 15:04"), v.Text), nil)
+			}
+		}
 	}
 	if u.Role != "client" {
 		for _, e := range events {

@@ -55,12 +55,15 @@ func (c *Client) SendLocalFile(ctx context.Context, chat, topic int64, path, nam
 		OK          bool   `json:"ok"`
 		Code        int    `json:"error_code"`
 		Description string `json:"description"`
+		Parameters  struct {
+			RetryAfter int `json:"retry_after"`
+		} `json:"parameters"`
 	}
 	if err = json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&result); err != nil {
 		return &APIError{Description: "invalid upload response", Ambiguous: true}
 	}
 	if !result.OK {
-		return &APIError{Code: result.Code, Description: result.Description}
+		return &APIError{Code: result.Code, Description: result.Description, RetryAfter: result.Parameters.RetryAfter, Ambiguous: response.StatusCode >= 500}
 	}
 	return nil
 }

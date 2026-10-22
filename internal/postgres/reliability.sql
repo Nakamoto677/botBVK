@@ -7,7 +7,7 @@ ALTER TABLE bvk_drafts ADD CONSTRAINT bvk_drafts_department_check CHECK(departme
 ALTER TABLE bvk_drafts ADD COLUMN IF NOT EXISTS state jsonb;
 CREATE UNIQUE INDEX IF NOT EXISTS bvk_ui_idempotency ON bvk_outbox ((payload->>'ui_key')) WHERE kind='ui_screen';
 -- Resolve dependencies on every selection: a ticket created after receipt still
--- joins its client's lane. Quarantine deliberately remains unfinished for archive fences.
+-- joins its client's lane. Quarantine deliberately remains unfinished for review.
 CREATE OR REPLACE FUNCTION bvk_update_keys(p jsonb) RETURNS text[] LANGUAGE plpgsql STABLE AS $$
 DECLARE m jsonb; actor text; chat text; topic text; tid text; command text[]; keys text[] := ARRAY[]::text[];
 BEGIN

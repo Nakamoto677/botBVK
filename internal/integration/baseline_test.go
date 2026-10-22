@@ -13,9 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"bot-bvk/internal/config"
 	"bot-bvk/internal/domain"
-	"bot-bvk/internal/monitor"
 	"bot-bvk/internal/postgres"
 	"bot-bvk/internal/telegram"
 	"bot-bvk/internal/tickets"
@@ -104,8 +102,6 @@ func TestClaimBaselineBreakdown(t *testing.T) {
 	client := telegram.NewClient("test")
 	client.BaseURL = server.URL
 	cfg := telegram.Config{Departments: map[domain.Department]telegram.Team{domain.IT: {ChatID: -1001, QueueTopicID: 2}}, ArchiveDir: t.TempDir()}
-	scheduler := &monitor.Scheduler{Store: store, Config: config.Config{AdminID: 99, BackupDir: t.TempDir(), ArchiveDir: cfg.ArchiveDir}, Calendar: tickets.DefaultCalendar()}
-	cfg.BeforeDelete = scheduler.BeforeDelete
 	worker := telegram.NewWorker(client, store, cfg)
 
 	drain := func() {

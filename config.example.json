@@ -11,7 +11,6 @@
       "departments": [
         "it",
         "1c",
-        "installation",
         "field"
       ]
     }
@@ -19,21 +18,21 @@
   "departments": {
     "it": {
       "chat_id": -1001111111111,
-      "queue_topic_id": 2
+      "queue_topic_id": 2,
+      "tags": ["#it", "#ит"]
     },
     "1c": {
       "chat_id": -1002222222222,
-      "queue_topic_id": 2
-    },
-    "installation": {
-      "chat_id": -1003333333333,
-      "queue_topic_id": 2
+      "queue_topic_id": 2,
+      "tags": ["#1c", "#1с"]
     },
     "field": {
       "chat_id": -1004444444444,
-      "queue_topic_id": 2
+      "queue_topic_id": 2,
+      "tags": ["#выезд", "#field"]
     }
   },
+  "client_groups": [],
   "archive_dir": "data/archive",
   "backup_dir": "data/backups",
   "health_address": "127.0.0.1:8080",
@@ -42,5 +41,5 @@
   "end_hour": 18,
   "first_response_minutes": 30,
   "idle_hours": 4,
-  "waiting_days": 2
+  "waiting_days": 1
 }

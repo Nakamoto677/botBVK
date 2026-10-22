@@ -196,3 +196,34 @@ func TestCompanyMigrationRejectsAmbiguousAndRepeatedSources(t *testing.T) {
 		t.Fatal("ambiguous migration changed catalog")
 	}
 }
+
+func TestCompanyIDByIdentifier(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	defs := []domain.CompanyDefinition{{Key: "alpha", Name: "Alpha"}, domain.LegacyCompany("Legacy name")}
+	if err := s.BootstrapCompanies(ctx, 99, defs); err != nil {
+		t.Fatal(err)
+	}
+	companies, err := s.Companies(ctx)
+	if err != nil || len(companies) != 2 {
+		t.Fatalf("companies: %#v %v", companies, err)
+	}
+	byKey, err := s.CompanyIDByIdentifier(ctx, "alpha")
+	if err != nil || byKey != companies[0].ID {
+		t.Fatalf("by key: %d %v", byKey, err)
+	}
+	byName, err := s.CompanyIDByIdentifier(ctx, "Alpha")
+	if err != nil || byName != companies[0].ID {
+		t.Fatalf("by name: %d %v", byName, err)
+	}
+	legacy, err := s.CompanyIDByIdentifier(ctx, "Legacy name")
+	if err != nil || legacy != companies[1].ID {
+		t.Fatalf("legacy: %d %v", legacy, err)
+	}
+	if _, err = s.CompanyIDByIdentifier(ctx, "missing"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("missing: %v", err)
+	}
+	if _, err = s.CompanyIDByIdentifier(ctx, " "); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("empty: %v", err)
+	}
+}

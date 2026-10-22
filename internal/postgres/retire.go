@@ -33,6 +33,8 @@ func (s *Store) RetireFinishedFailures(ctx context.Context) (int, error) {
 	rows, err := s.pool.Query(ctx, `SELECT o.id, o.kind, o.ticket_id
 		FROM bvk_outbox o
 		WHERE o.state='failed' AND (
+			(o.kind='delete_aux_message' AND lower(o.last_error) LIKE '%message can''t be deleted for everyone%')
+			OR
 			EXISTS (SELECT 1 FROM bvk_tickets t
 			        WHERE t.id=o.ticket_id AND t.status NOT IN ('new','in_progress','waiting_client'))
 			OR (o.ticket_id=0 AND o.available_at < now() - $1::interval)

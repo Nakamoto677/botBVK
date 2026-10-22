@@ -70,23 +70,11 @@ func statusName(s domain.Status) string {
 	}
 	return "Заявка"
 }
-func ticketText(t domain.Ticket, client, company, assignee string) string {
-	description := []rune(t.Description)
-	if len(description) > 2400 {
-		description = append(description[:2400], []rune("…")...)
-	}
-	if t.AssigneeID == 0 {
-		assignee = "Не назначен"
-	}
-	return fmt.Sprintf("Заявка #%d · %s\nКлиент: %s\n%s\nОтдел: %s · %s\nИсполнитель: %s", t.ID, company, client, string(description), departmentName(t.Department), statusName(t.Status), assignee)
-}
 func clientTicketButtons(t domain.Ticket) [][]Button {
 	id := fmt.Sprint(t.ID)
 	buttons := [][]Button{{{Text: "История", Data: "history:" + id}}}
 	if t.Status.Active() {
 		buttons = append(buttons, []Button{{Text: "Отменить заявку", Data: "cancel:" + id}})
-	} else if t.Status == domain.Closed {
-		buttons = append(buttons, []Button{{Text: "Открыть повторно", Data: "reopen:" + id}})
 	}
 	return buttons
 }
@@ -105,10 +93,11 @@ func (a *Adapter) menu(ctx context.Context, m *Message, u domain.User) error {
 	}
 	return a.clientMenu(ctx, m, u)
 }
+
 // Help answers are retained. They are not a transient step of a flow: a person taps
 // Помощь to read something, and a screen registered under the disposable home
 // scenario was wiped by the next cleanup, which is why the button looked dead.
-const clientHelpText = "Чтобы обратиться в поддержку, нажмите «Создать заявку», выберите отдел и опишите проблему. Специалист ответит прямо здесь.\n\nКарточка по номеру: /ticket ID. Список: /tickets. Переписка: /history ID. Продолжить форму: /form. Повторное открытие: /reopen ID."
+const clientHelpText = "Чтобы обратиться в поддержку, нажмите «Создать заявку», выберите отдел, срочность и опишите проблему. Специалист ответит прямо здесь.\n\nКарточка по номеру: /ticket ID. Список: /tickets. Переписка: /history ID. Продолжить форму: /form. После завершения создайте новую заявку."
 const staffHelpText = "В группе отдела: возьмите заявку кнопкой. Обычные сообщения и вложения инженеров текущего отдела в актуальном топике автоматически уходят клиенту. Служебный ввод для закрытия и передачи не пересылается. В очереди нажмите Закрыть задачу, в топике — Закрыть тикет; Передать предложит выбрать отдел и причину. /ticket ID — карточка, /history ID — переписка, /tickets — список, /report — отчёт для администратора. Для отмены ввода нажмите Отменить."
 
 func (a *Adapter) help(ctx context.Context, m *Message, u domain.User) error {

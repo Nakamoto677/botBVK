@@ -69,7 +69,7 @@ func (a *Adapter) callbackNewDraft(ctx context.Context, c *Callback, parts []str
 	if err != nil || !valid {
 		return err
 	}
-	if len(parts) != 3 || !domain.Department(parts[1]).Valid() {
+	if len(parts) != 3 || !a.departmentEnabled(domain.Department(parts[1])) {
 		return domain.ErrInvalid
 	}
 	user, err := a.store.User(ctx, c.From.ID)
@@ -85,18 +85,98 @@ func (a *Adapter) callbackNewDraft(ctx context.Context, c *Callback, parts []str
 		return err
 	}
 	d.Department = domain.Department(parts[1])
-	d.Step = "description"
+	d.Step = "urgency"
 	if err = a.saveDraft(ctx, c.From.ID, d); err != nil {
 		return err
 	}
 	a.cleanupBestEffort(ctx, scope(c.From.ID, c.Message), "draft")
+	return a.sayAux(ctx, c.Message, c.From.ID, "draft", draftUrgencyText, draftUrgencyButtons(d))
+}
+
+func (a *Adapter) callbackUrgency(ctx context.Context, c *Callback, parts []string) error {
+	if len(parts) != 3 {
+		return domain.ErrInvalid
+	}
+	d, valid, err := a.boundDraft(ctx, c, parts, "")
+	if err != nil || !valid {
+		return err
+	}
+	if d.Step != "urgency" && d.Step != "change_urgency" {
+		return domain.ErrConflict
+	}
+	u := domain.Urgency(parts[1])
+	if !u.Valid() {
+		return domain.ErrInvalid
+	}
+	d.Urgency = u
+	d.Generation = a.formGeneration(c.Message)
+	if d.Step == "change_urgency" {
+		d.Step = "confirm"
+	} else {
+		d.Step = "description"
+	}
+	if err := a.saveDraft(ctx, c.From.ID, d); err != nil {
+		return err
+	}
+	a.cleanupBestEffort(ctx, scope(c.From.ID, c.Message), "draft")
+	if d.Step == "confirm" {
+		return a.confirmDraft(ctx, c.Message, d)
+	}
 	return a.clientScreen(ctx, c.Message, "draft", draftDescriptionText, clientDraftKeyboard)
+}
+
+func (a *Adapter) callbackChangeUrgency(ctx context.Context, c *Callback, parts []string) error {
+	d, valid, err := a.boundDraft(ctx, c, parts, "confirm")
+	if err != nil || !valid {
+		return err
+	}
+	d.Step = "change_urgency"
+	if err := a.saveDraft(ctx, c.From.ID, d); err != nil {
+		return err
+	}
+	a.cleanupBestEffort(ctx, scope(c.From.ID, c.Message), "draft")
+	return a.sayAux(ctx, c.Message, c.From.ID, "draft", draftUrgencyText, draftUrgencyButtons(d))
+}
+
+func (a *Adapter) callbackDraftBack(ctx context.Context, c *Callback, parts []string) error {
+	d, valid, err := a.boundDraft(ctx, c, parts, "urgency")
+	if err != nil || !valid {
+		return err
+	}
+	d.Step = "department"
+	d.Generation = a.formGeneration(c.Message)
+	if err := a.saveDraft(ctx, c.From.ID, d); err != nil {
+		return err
+	}
+	a.cleanupBestEffort(ctx, scope(c.From.ID, c.Message), "draft")
+	return a.sayAux(ctx, c.Message, c.From.ID, "draft", "Выберите направление.", a.draftDepartments(d))
+}
+
+func (a *Adapter) callbackDraftReview(ctx context.Context, c *Callback, parts []string) error {
+	d, valid, err := a.boundDraft(ctx, c, parts, "change_urgency")
+	if err != nil || !valid {
+		return err
+	}
+	d.Step = "confirm"
+	if err := a.saveDraft(ctx, c.From.ID, d); err != nil {
+		return err
+	}
+	a.cleanupBestEffort(ctx, scope(c.From.ID, c.Message), "draft")
+	return a.confirmDraft(ctx, c.Message, d)
 }
 
 func (a *Adapter) callbackSubmitDraft(ctx context.Context, c *Callback, parts []string) error {
 	d, valid, err := a.boundDraft(ctx, c, parts, "confirm")
 	if err != nil || !valid {
 		return err
+	}
+	if !a.departmentEnabled(d.Department) {
+		d.Department = ""
+		d.Step = "department"
+		if err = a.saveDraft(ctx, c.From.ID, d); err != nil {
+			return err
+		}
+		return a.sayAux(ctx, c.Message, c.From.ID, "draft", "Этот отдел больше недоступен. Выберите направление.", a.draftDepartments(d))
 	}
 	err = a.submitDraft(ctx, c, d)
 	if err == nil {

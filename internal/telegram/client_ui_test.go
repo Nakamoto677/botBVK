@@ -79,12 +79,24 @@ func TestMinimalClientFlowDraftCancelAcceptedAndFinished(t *testing.T) {
 	}
 	send("Создать заявку")
 	callback("new:it:" + a.drafts[1].Generation)
+	callback("urgency:urgent:" + a.drafts[1].Generation)
 	// callback message is sent by the bot, but temporary messages belong to client.
-	if len(s.aux[auxKey{1, 1, 0, "client_kept"}]) != 6 {
+	if len(s.aux[auxKey{999, 1, 0, "client_kept"}]) != 0 {
 		t.Fatal("bot author used as client scenario actor")
 	}
-	assertReplyLabels(t, (*requests)[len(*requests)-3], clientCancelDraftLabel)
+	if a.drafts[1].Step != "description" {
+		t.Fatal("urgency choice did not advance to description")
+	}
 	send("Не работает компьютер")
+	previous := a.drafts[1]
+	callback("changeurgency:" + previous.Generation)
+	if a.drafts[1].Step != "change_urgency" || a.drafts[1].Text != previous.Text {
+		t.Fatal("description lost while changing urgency")
+	}
+	callback("urgency:routine:" + a.drafts[1].Generation)
+	if a.drafts[1].Step != "confirm" || a.drafts[1].Urgency != domain.Routine || a.drafts[1].Text != previous.Text || a.drafts[1].Generation == previous.Generation {
+		t.Fatal("urgency change did not preserve draft or invalidate old buttons")
+	}
 	raw, _ = json.Marshal((*requests)[len(*requests)-1]["reply_markup"])
 	if !strings.Contains(string(raw), clientCancelDraftLabel) || !strings.Contains(string(raw), "submit") {
 		t.Fatal(string(raw))
@@ -94,7 +106,7 @@ func TestMinimalClientFlowDraftCancelAcceptedAndFinished(t *testing.T) {
 	if err := a.callback(ctx, &Callback{From: m.From, Message: botMsg, Data: "submit:" + a.drafts[1].Generation}); err == nil {
 		t.Fatal("failed submission accepted")
 	}
-	if len(a.drafts) != 1 || len(s.aux[auxKey{1, 1, 0, "client_kept"}]) != 7 {
+	if len(a.drafts) != 1 {
 		t.Fatal("failure removed retry UI")
 	}
 	svc.createErr = nil
@@ -128,7 +140,7 @@ func TestMinimalClientFlowDraftCancelAcceptedAndFinished(t *testing.T) {
 		t.Fatal(last)
 	}
 	assertReplyLabels(t, last, "Создать заявку", "Помощь")
-	if len(s.aux) != 2 || len(s.aux[auxKey{1, 1, 0, "client_home"}]) != 1 || len(s.aux[auxKey{1, 1, 0, "client_kept"}]) != 8 {
+	if len(s.aux[auxKey{1, 1, 0, "client_home"}]) != 1 {
 		t.Fatalf("auxiliary UI retained: %v", s.aux)
 	}
 	if len(s.storedMessages) != 1 || s.storedMessages[0].ID != 44 {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -22,9 +23,6 @@ func (s *durableUIStore) SaveAuxiliary(_ context.Context, m domain.AuxiliaryMess
 	k := auxKey{m.UserID, m.ChatID, m.TopicID, m.Scenario}
 	s.aux[k] = append(s.aux[k], m)
 	return nil
-}
-func (s *durableUIStore) Auxiliary(_ context.Context, u, c, t int64, scenario string) ([]domain.AuxiliaryMessage, error) {
-	return s.aux[auxKey{u, c, t, scenario}], nil
 }
 func (s *durableUIStore) QueueAuxiliaryCleanup(_ context.Context, u, c, t int64, scenario string) error {
 	if s.cleanupErr != nil {
@@ -58,16 +56,14 @@ type cancelUIService struct {
 	adapterService
 	store   *durableUIStore
 	calls   int
-	reason  string
 	failure error
 }
 
-func (s *cancelUIService) Cancel(_ context.Context, _ int64, _ int64, reason string) error {
+func (s *cancelUIService) Cancel(_ context.Context, _ int64, _ int64) error {
 	if s.failure != nil {
 		return s.failure
 	}
 	s.calls++
-	s.reason = reason
 	s.store.ticket.Status = domain.Cancelled
 	return nil
 }
@@ -111,6 +107,12 @@ func TestCancelConfirmationDeclineRestartRepeatAndCleanup(t *testing.T) {
 	if err := a.promptCallback(ctx, &Callback{From: Person{ID: 1}, Message: m}, "promptcancel", 7, currentParts(s)); err != nil {
 		t.Fatal(err)
 	}
+	// The question is disposable, but the decline itself must be confirmed:
+	// otherwise the screen vanishes and the client cannot tell what happened.
+	last = (*requests)[len(*requests)-1]
+	if last["text"] != fmt.Sprintf(clientCancelDeclinedText, 7) {
+		t.Fatalf("decline left no receipt: %v", last)
+	}
 	if svc.calls != 0 || len(s.workflows) != 0 || len(s.operations) != 1 {
 		t.Fatal("decline did not end scoped flow")
 	}
@@ -122,8 +124,11 @@ func TestCancelConfirmationDeclineRestartRepeatAndCleanup(t *testing.T) {
 	if err := a.promptCallback(ctx, &Callback{From: Person{ID: 1}, Message: m}, "cancelconfirm", 7, currentParts(s)); err != nil {
 		t.Fatal(err)
 	}
-	if svc.calls != 1 || svc.reason != "" || len(s.workflows) != 0 {
+	if svc.calls != 1 || len(s.workflows) != 0 {
 		t.Fatal("cancellation requested a reason or persisted stale state")
+	}
+	if len(s.aux) != 0 {
+		t.Fatalf("decline receipt outlived its flow: %v", s.aux)
 	}
 	if err := a.promptCallback(ctx, &Callback{From: Person{ID: 1}, Message: m}, "cancelconfirm", 7, currentParts(s)); err != nil {
 		t.Fatal(err)
@@ -187,6 +192,27 @@ func TestOldConfirmationCannotCancelNewScenarioOrReopenedCycle(t *testing.T) {
 	}
 	if svc.calls != 0 {
 		t.Fatal("stale confirmation cancelled new cycle")
+	}
+}
+
+func TestDeclineNoticeDescribesRealTicketState(t *testing.T) {
+	ctx := context.Background()
+	a, s, svc, m, requests := clientUIFixture(t)
+	if err := a.beginCancel(ctx, 1, m, 7); err != nil {
+		t.Fatal(err)
+	}
+	// A colleague may finish the ticket before the client answers the question;
+	// the receipt must not promise an open ticket in that case.
+	s.ticket.Status = domain.Cancelled
+	if err := a.promptCallback(ctx, &Callback{From: Person{ID: 1}, Message: m}, "promptcancel", 7, currentParts(s)); err != nil {
+		t.Fatal(err)
+	}
+	last := (*requests)[len(*requests)-1]
+	if last["text"] != "Заявка #7 уже завершена — отменять нечего." {
+		t.Fatalf("decline misreported ticket state: %v", last)
+	}
+	if svc.calls != 0 {
+		t.Fatal("decline cancelled the ticket")
 	}
 }
 

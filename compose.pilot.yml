@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    env_file:
+      - ./data/pilot/postgres.env
+    ports:
+      - "127.0.0.1:55434:5432"
+    volumes:
+      - pilot_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bvk_pilot -d bvk_pilot"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+volumes:
+  pilot_postgres_data:
+    name: bvk_pilot_postgres_data

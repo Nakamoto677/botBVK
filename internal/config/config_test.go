@@ -4,7 +4,43 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"bot-bvk/internal/domain"
 )
+
+func TestValidateTelegramWithThreeDepartments(t *testing.T) {
+	c := Config{Token: "test", Departments: map[domain.Department]Team{
+		domain.IT:    {ChatID: -1001, QueueTopicID: 2},
+		domain.OneC:  {ChatID: -1002, QueueTopicID: 3},
+		domain.Field: {ChatID: -1003, QueueTopicID: 4},
+	}}
+	if err := c.ValidateTelegram(); err != nil {
+		t.Fatalf("three configured departments rejected: %v", err)
+	}
+	c.Departments[domain.Field] = Team{ChatID: 1003, QueueTopicID: 4}
+	if err := c.ValidateTelegram(); err == nil {
+		t.Fatal("positive department chat ID accepted")
+	}
+}
+
+func TestDatabaseURLFileOverridesStaleEnvironment(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://localhost/old")
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "database.url"), []byte("postgres://localhost/pilot\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"admin_id":1,"companies":[],"database_url_file":"database.url"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.DatabaseURL != "postgres://localhost/pilot" {
+		t.Fatal("stale environment won over database_url_file")
+	}
+}
 
 func TestLoadValidation(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://localhost/test")

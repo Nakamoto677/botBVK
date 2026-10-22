@@ -120,14 +120,6 @@ func (w *Worker) runOperation(ctx context.Context, op domain.Operation) error {
 			dead = true
 		}
 		dead = dead || op.Attempts >= 12
-		if op.Kind == "delete_topic" && !errors.Is(err, domain.ErrInvalid) && !errors.Is(err, domain.ErrForbidden) {
-			dead = false
-			if op.Attempts == 0 || op.Attempts == 11 || op.Attempts > 0 && op.Attempts%100 == 0 {
-				if e := w.notifyAdmins(ctx, fmt.Sprintf("Удаление прежнего топика заявки #%d отложено: %s. Бот продолжит автоматически после восстановления доступа.", op.TicketID, err)); e != nil {
-					return e
-				}
-			}
-		}
 		if op.Kind == "client_message" && (op.Attempts <= 1 || dead) {
 			if e := w.notifyAuthor(ctx, op, err, dead); e != nil {
 				return e
@@ -217,10 +209,15 @@ func (w *Worker) send(ctx context.Context, chat, topic int64, text string, butto
 	}
 	return w.client.Send(ctx, chat, topic, text, buttons, parseMode...)
 }
-func card(t domain.Ticket) string {
-	return engineerCardText(t, "Клиент", "Компания", "Специалист")
+func (w *Worker) cardButtons(t domain.Ticket) [][]Button {
+	link := ""
+	if t.IsGroup() {
+		if group, ok := w.cfg.ClientGroups[t.ClientID]; ok {
+			link = groupChatURL(group, t.ClientID, t.SourceMessageID)
+		}
+	}
+	return engineerQueueButtons(t, link)
 }
-func cardButtons(t domain.Ticket) [][]Button { return engineerQueueButtons(t) }
 func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 	w.currentOperation = op.ID
 	var payload operationPayload
@@ -241,6 +238,10 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 	if op.Kind == "delete_aux_message" {
 		return w.deleteAuxMessage(ctx, payload)
 	}
+	if op.Kind == "delete_topic" {
+		// An old outbox row may have been leased when the migration ran.
+		return nil
+	}
 
 	t, err := w.store.Ticket(ctx, op.TicketID)
 	if err != nil {
@@ -259,6 +260,13 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 		return w.retireQueueCard(ctx, payload, t)
 	case "team_notification":
 		return w.teamNotification(ctx, payload, team)
+	case "first_response_reminder":
+		if !t.Status.Active() || t.FirstResponseAt != nil {
+			return nil
+		}
+		return w.teamNotification(ctx, payload, team)
+	case "urgent_assignment_reminder":
+		return w.urgentAssignmentReminder(ctx, t, payload, team)
 	case "notify_client":
 		return w.clientNotification(ctx, t, payload.Text)
 	case "archive_message":
@@ -269,8 +277,6 @@ func (w *Worker) Handle(ctx context.Context, op domain.Operation) error {
 		return w.closeTopic(ctx, op, payload, t)
 	case "reopen_topic":
 		return w.reopenTopic(ctx, payload, t)
-	case "delete_topic":
-		return w.deleteTopic(ctx, payload, t)
 
 	default:
 		return domain.ErrInvalid
@@ -285,11 +291,21 @@ func (w *Worker) retire(ctx context.Context, id, chat, topic int64) error {
 func (w *Worker) refresh(ctx context.Context, t domain.Ticket) error {
 	team := w.cfg.Departments[t.Department]
 
+	media, hasMedia, err := w.queueCardAttachment(ctx, t)
+	if err != nil {
+		return err
+	}
+	mediaID := int64(0)
+	if hasMedia {
+		mediaID = media.ID
+	}
+	// The text card does not embed the attachment, so it must count it as a
+	// client supplement. Only the caption path excludes the photo it carries.
 	text, err := w.card(ctx, t)
 	if err != nil {
 		return err
 	}
-	if t.TopicID != 0 && t.TopicMessageID != 0 {
+	if !t.IsGroup() && t.TopicID != 0 && t.TopicMessageID != 0 {
 		buttons := engineerTopicButtons(t)
 		if t.Status == domain.New {
 			buttons = [][]Button{}
@@ -301,37 +317,57 @@ func (w *Worker) refresh(ctx context.Context, t domain.Ticket) error {
 			return err
 		}
 	}
-	if t.TopicID != 0 && provisioningStatus(t.Status) {
+	if !t.IsGroup() && t.TopicID != 0 && provisioningStatus(t.Status) {
 		if err = w.ensureEngineerKeyboard(ctx, t); err != nil {
 			return err
 		}
 	}
 	if t.QueueMessageID != 0 {
+		buttons := w.cardButtons(t)
+		if t.QueueMediaType != "" {
+			caption, e := w.cardCaption(ctx, t, mediaID)
+			if e != nil {
+				return e
+			}
+			return w.editQueueCardCaption(ctx, team.ChatID, t.QueueMessageID, caption, w.cardButtons(t))
+		}
+		if hasMedia {
+			caption, e := w.cardCaption(ctx, t, mediaID)
+			if e != nil {
+				return e
+			}
+			if e = w.editQueueCardMedia(ctx, team.ChatID, t.QueueMessageID, media, caption, w.cardButtons(t)); e == nil {
+				return w.saveQueueCard(ctx, t, t.QueueMessageID, media.MediaType)
+			} else if !queueMediaFallback(e) {
+				return e
+			}
+			w.queueMediaFallbackLog(t, e)
+		}
 		if err = w.rate(ctx, team.ChatID, "editMessageText"); err != nil {
 			return err
 		}
-		err := w.client.Call(ctx, "editMessageText", map[string]any{"chat_id": team.ChatID, "message_id": t.QueueMessageID, "text": text, "parse_mode": "HTML", "reply_markup": Markup{cardButtons(t)}}, nil)
-		var api *APIError
-		if errors.As(err, &api) && strings.Contains(api.Description, "message is not modified") {
-			return nil
-		}
-		return err
+		err := w.client.Call(ctx, "editMessageText", map[string]any{"chat_id": team.ChatID, "message_id": t.QueueMessageID, "text": text, "parse_mode": "HTML", "reply_markup": Markup{Buttons: buttons}}, nil)
+		return messageEditError(err)
 	}
-	sent, err := w.sendEngineerCard(ctx, team.ChatID, team.QueueTopicID, text, cardButtons(t))
-	if err != nil {
-		return err
-	}
-	return w.store.Transact(ctx, func(tx domain.Tx) error {
-		now, e := tx.GetTicket(ctx, t.ID)
+	if hasMedia {
+		caption, e := w.cardCaption(ctx, t, mediaID)
 		if e != nil {
 			return e
 		}
-		if now.TopicID != t.TopicID || now.Department != t.Department {
-			return nil
+		sent, e := w.sendQueueCardMedia(ctx, team.ChatID, team.QueueTopicID, media, caption, w.cardButtons(t))
+		if e == nil {
+			return w.saveQueueCard(ctx, t, sent.ID, media.MediaType)
 		}
-		now.QueueMessageID = sent.ID
-		return tx.SaveTicket(ctx, &now)
-	})
+		if !queueMediaFallback(e) {
+			return e
+		}
+		w.queueMediaFallbackLog(t, e)
+	}
+	sent, err := w.sendEngineerCard(ctx, team.ChatID, team.QueueTopicID, text, w.cardButtons(t))
+	if err != nil {
+		return err
+	}
+	return w.saveQueueCard(ctx, t, sent.ID, "")
 }
 func (w *Worker) deliver(ctx context.Context, chat, topic int64, msg domain.Message, toTeam bool) (Message, error) {
 	name := ""
@@ -513,50 +549,99 @@ func (w *Worker) notifyAdmins(ctx context.Context, text string) error {
 	})
 }
 func (w *Worker) card(ctx context.Context, t domain.Ticket) (string, error) {
-	name, err := clientContact(ctx, w.store, t.ClientID)
+	name, company, assignee, extras, err := w.cardParts(ctx, t, 0)
 	if err != nil {
 		return "", err
 	}
-	company, err := companyName(ctx, w.store, t.CompanyID)
+	return engineerCardText(t, name, company, assignee) + extras, nil
+}
+
+// cardCaption renders the same card for a media caption. Telegram caps a caption
+// at 1024 units after entity parsing, so the description budget is whatever the
+// fixed fields and queue-only extras leave. The description is trimmed before
+// escaping, so no HTML tag is ever cut. Extras are dropped if they would leave no
+// room for the description at all.
+func (w *Worker) cardCaption(ctx context.Context, t domain.Ticket, mediaID int64) (string, error) {
+	name, company, assignee, extras, err := w.cardParts(ctx, t, mediaID)
 	if err != nil {
 		return "", err
 	}
-	assignee := "Не назначен"
+	prefix := engineerCardPrefix(t, name, company, assignee)
+	suffix := engineerCardSuffix(t)
+	fixed := visibleTextLength(prefix) + visibleTextLength(suffix) + visibleTextLength(extras)
+	budget := captionLimit - queueCaptionReserve - fixed
+	if budget < 1 {
+		extras = ""
+		fixed = visibleTextLength(prefix) + visibleTextLength(suffix)
+		budget = captionLimit - queueCaptionReserve - fixed
+	}
+	if budget < 1 {
+		budget = 1
+	}
+	return engineerCardTextLimit(t, name, company, assignee, budget) + extras, nil
+}
+
+func (w *Worker) cardParts(ctx context.Context, t domain.Ticket, mediaID int64) (name, company, assignee, extras string, err error) {
+	if t.IsGroup() {
+		name, err = displayName(ctx, w.store, t.ClientID, "Чат компании")
+	} else {
+		name, err = clientContact(ctx, w.store, t.ClientID)
+	}
+	if err != nil {
+		return "", "", "", "", err
+	}
+	company, err = companyName(ctx, w.store, t.CompanyID)
+	if err != nil {
+		return "", "", "", "", err
+	}
+	assignee = "Не назначен"
 	if t.AssigneeID != 0 {
 		assignee, err = displayName(ctx, w.store, t.AssigneeID, "Специалист")
 		if err != nil {
-			return "", err
+			return "", "", "", "", err
 		}
 	}
-	text := engineerCardText(t, name, company, assignee)
-	contextText, e := w.queueTransferContext(ctx, t)
-	if e != nil {
-		return "", e
+	extras, err = w.queueTransferContext(ctx, t)
+	if err != nil {
+		return "", "", "", "", err
 	}
-	text += contextText
 	if t.Status == domain.New {
 		messages, e := w.store.Messages(ctx, t.ID)
 		if e != nil {
-			return "", e
+			return "", "", "", "", e
 		}
 		count := 0
 		for _, m := range messages {
-			if m.Direction == "inbound" {
+			// The attachment already embedded in the media card is part of the
+			// ticket itself, not a supplement the engineer has to read separately.
+			if m.Direction == "inbound" && m.ID != mediaID {
 				count++
 			}
 		}
 		if count > 0 {
-			text += fmt.Sprintf("\nДополнений от клиента: %d", count)
+			extras += fmt.Sprintf("\nДополнений от клиента: %d", count)
 		}
 	}
-	return text, nil
+	if !t.IsGroup() {
+		if topics, ok := w.store.(domain.ClientTopicStore); ok {
+			previous, e := topics.PreviousTopicTicket(ctx, t.ClientID, t.Department, t.ID)
+			if e != nil && !errors.Is(e, domain.ErrNotFound) {
+				return "", "", "", "", e
+			}
+			if e == nil {
+				extras += fmt.Sprintf("\n\nПредыдущая заявка в этом отделе: #%d", previous.ID)
+				if previous.TopicChatID != 0 && previous.TopicMessageID > 0 && strings.HasPrefix(fmt.Sprint(previous.TopicChatID), "-100") {
+					extras += fmt.Sprintf(" — <a href=\"https://t.me/c/%s/%d\">открыть карточку</a>", strings.TrimPrefix(fmt.Sprint(previous.TopicChatID), "-100"), previous.TopicMessageID)
+				}
+			}
+		}
+	}
+	return name, company, assignee, extras, nil
 }
-// messageEditError classifies an edit that has nothing left to change as success, the
-// same way topic deletion treats an already absent topic.
-//
-// "message is not modified" means the card already shows this text. "message to edit
-// not found" and "message thread not found" mean the card or its whole topic is gone,
-// which is a normal outcome of the cleanup that deletes finished topics. Without this
+
+// messageEditError classifies an edit that has nothing left to change as success.
+// A message may have been removed manually, or the topic may have been replaced.
+// Without this
 // they were 400s, so the worker marked the refresh permanently failed and the failures
 // piled up until readiness reported not-ready. Production logs show exactly these two.
 func messageEditError(err error) error {
@@ -711,17 +796,9 @@ func auxiliaryDeleteError(err error) error {
 	}
 	return err
 }
-func topicDeleteError(err error) error {
+func auxiliaryDeleteBlocked(err error) bool {
 	var api *APIError
-	if errors.As(err, &api) && api.Code == 400 {
-		description := strings.ToLower(api.Description)
-		for _, marker := range []string{"topic_id_invalid", "topic not found", "message thread not found", "message_thread_id_invalid"} {
-			if strings.Contains(description, marker) {
-				return nil
-			}
-		}
-	}
-	return err
+	return errors.As(err, &api) && api.Code == 400 && strings.Contains(strings.ToLower(api.Description), "message can't be deleted for everyone")
 }
 func (w *Worker) notifyAuthor(ctx context.Context, op domain.Operation, cause error, permanent bool) error {
 	var msg domain.Message

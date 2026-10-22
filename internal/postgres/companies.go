@@ -4,12 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"bot-bvk/internal/domain"
 	"github.com/jackc/pgx/v5"
 )
 
-// Bootstrap keeps the legacy programmatic interface used by existing callers.
+// Bootstrap converts name-only companies for tests that do not need stable keys.
 func (s *Store) Bootstrap(ctx context.Context, adminID int64, names []string) error {
 	companies := make([]domain.CompanyDefinition, 0, len(names))
 	for _, name := range names {
@@ -98,4 +99,46 @@ func (s *Store) Company(ctx context.Context, id int64) (domain.Company, error) {
 	var c domain.Company
 	err := s.pool.QueryRow(ctx, "SELECT id,name FROM bvk_companies WHERE id=$1", id).Scan(&c.ID, &c.Name)
 	return c, mapError(err)
+}
+
+// CompanyIDByIdentifier resolves a client-group company without relying on a
+// numeric row ID. The stable config key wins; an exact unique name is accepted
+// for legacy name-only installations.
+func (s *Store) CompanyIDByIdentifier(ctx context.Context, value string) (int64, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, domain.ErrInvalid
+	}
+	var id int64
+	err := s.pool.QueryRow(ctx, "SELECT id FROM bvk_companies WHERE config_key=$1", value).Scan(&id)
+	if err == nil {
+		return id, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return 0, err
+	}
+	rows, err := s.pool.Query(ctx, "SELECT id FROM bvk_companies WHERE name=$1 ORDER BY id LIMIT 2", value)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	ids := []int64{}
+	for rows.Next() {
+		var candidate int64
+		if err = rows.Scan(&candidate); err != nil {
+			return 0, err
+		}
+		ids = append(ids, candidate)
+	}
+	if err = rows.Err(); err != nil {
+		return 0, err
+	}
+	switch len(ids) {
+	case 0:
+		return 0, domain.ErrNotFound
+	case 1:
+		return ids[0], nil
+	default:
+		return 0, domain.ErrConflict
+	}
 }

@@ -27,6 +27,7 @@ func (w *Worker) confirmedPart(ctx context.Context, key string, part int, send f
 	}
 	return sent, err
 }
+
 // textParts sends a message in Telegram-sized chunks and records every confirmed
 // part, so a retry after a crash resumes instead of duplicating. An optional
 // parse mode is applied to every chunk; engineer cards need HTML, plain text must

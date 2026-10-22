@@ -15,11 +15,34 @@ import (
 
 type workerStore struct {
 	domain.Store
-	ticket   domain.Ticket
-	current  domain.Ticket
-	events   []domain.Event
-	messages []domain.Message
-	parts    map[string]int64
+	ticket      domain.Ticket
+	current     domain.Ticket
+	events      []domain.Event
+	messages    []domain.Message
+	parts       map[string]int64
+	bindings    map[domain.Department]domain.ClientTopic
+	previous    domain.Ticket
+	activeTopic domain.Ticket
+}
+
+func (s *workerStore) ClientNumber(context.Context, int64) (int64, error) { return 1, nil }
+func (s *workerStore) ClientTopic(_ context.Context, _ int64, department domain.Department) (domain.ClientTopic, error) {
+	if topic, ok := s.bindings[department]; ok {
+		return topic, nil
+	}
+	return domain.ClientTopic{}, domain.ErrNotFound
+}
+func (s *workerStore) PreviousTopicTicket(context.Context, int64, domain.Department, int64) (domain.Ticket, error) {
+	if s.previous.ID != 0 {
+		return s.previous, nil
+	}
+	return domain.Ticket{}, domain.ErrNotFound
+}
+func (s *workerStore) ActiveClientTopicTicket(context.Context, int64, domain.Department, int64) (domain.Ticket, error) {
+	if s.activeTopic.ID != 0 {
+		return s.activeTopic, nil
+	}
+	return domain.Ticket{}, domain.ErrNotFound
 }
 
 // Confirmed send parts make the retry fence active in tests. Without them the
@@ -72,6 +95,72 @@ func (s *workerStore) Transact(ctx context.Context, f func(domain.Tx) error) err
 type workerTx struct {
 	domain.Tx
 	store *workerStore
+}
+
+func (tx *workerTx) BindClientTopic(_ context.Context, topic domain.ClientTopic) error {
+	if tx.store.bindings == nil {
+		tx.store.bindings = map[domain.Department]domain.ClientTopic{}
+	}
+	tx.store.bindings[topic.Department] = topic
+	return nil
+}
+func (tx *workerTx) ReplaceClientTopic(ctx context.Context, topic domain.ClientTopic, _ int64) error {
+	return tx.BindClientTopic(ctx, topic)
+}
+
+func TestMissingPermanentTopicIsReplacedButTransientErrorIsRetried(t *testing.T) {
+	for _, tc := range []struct {
+		name, response string
+		created        bool
+	}{
+		{"missing", `{"ok":false,"error_code":400,"description":"TOPIC_ID_INVALID"}`, true},
+		{"temporary", `{"ok":false,"error_code":429,"description":"Too Many Requests","parameters":{"retry_after":1}}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			created := 0
+			sent := []string{}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/reopenForumTopic"):
+					_, _ = w.Write([]byte(tc.response))
+				case strings.HasSuffix(r.URL.Path, "/createForumTopic"):
+					created++
+					_, _ = w.Write([]byte(`{"ok":true,"result":{"message_thread_id":55}}`))
+				case strings.HasSuffix(r.URL.Path, "/sendMessage"):
+					var p map[string]any
+					_ = json.NewDecoder(r.Body).Decode(&p)
+					if text, _ := p["text"].(string); text != "" {
+						sent = append(sent, text)
+					}
+					_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":75}}`))
+				default:
+					_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":75}}`))
+				}
+			}))
+			defer server.Close()
+			client := NewClient("test")
+			client.BaseURL = server.URL
+			ticket := domain.Ticket{ID: 7, ClientID: 12, CompanyID: 10, Department: domain.IT, Status: domain.InProgress, AssigneeID: 2, RoutingPending: true, RoutingGeneration: 1}
+			store := &workerStore{current: ticket, bindings: map[domain.Department]domain.ClientTopic{domain.IT: {ClientID: 12, Department: domain.IT, ChatID: -100, TopicID: 10}}}
+			worker := NewWorker(client, store, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100, QueueTopicID: 1}}})
+			worker.interval = 0
+			err := worker.Handle(t.Context(), domain.Operation{ID: 1, Kind: "create_topic", TicketID: ticket.ID, Payload: json.RawMessage(`{"routing_generation":1}`)})
+			if tc.created {
+				if err != nil || created != 1 || store.bindings[domain.IT].TopicID != 55 || store.current.TopicID != 55 {
+					t.Fatal("topic replacement failed", err, created, store.current)
+				}
+				noted := false
+				for _, text := range sent {
+					noted = noted || (strings.Contains(text, "Прежний топик недоступен") && strings.Contains(text, "/history ID"))
+				}
+				if !noted {
+					t.Fatalf("replacement left no archive note: %v", sent)
+				}
+			} else if err == nil || created != 0 || store.bindings[domain.IT].TopicID != 10 {
+				t.Fatal("transient error changed binding", err, created, store.bindings)
+			}
+		})
+	}
 }
 
 func (tx *workerTx) GetTicket(context.Context, int64) (domain.Ticket, error) {
@@ -262,40 +351,6 @@ func TestEngineerCardIsHtmlAndRetryDoesNotResend(t *testing.T) {
 	}
 }
 
-func TestCompletionDeleteUsesExactOldBindingAndAbsentTopicIsSuccess(t *testing.T) {
-	ctx := context.Background()
-	calls := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
-		var p map[string]any
-		json.NewDecoder(r.Body).Decode(&p)
-		if p["message_thread_id"] != float64(10) {
-			t.Errorf("new topic targeted %v", p)
-		}
-		w.Write([]byte(`{"ok":false,"error_code":400,"description":"TOPIC_ID_INVALID"}`))
-	}))
-	defer server.Close()
-	client := NewClient("test")
-	client.BaseURL = server.URL
-	current := domain.Ticket{ID: 1, Department: domain.IT, Status: domain.InProgress, TopicChatID: -100, TopicID: 20, RoutingGeneration: 2}
-	payload := json.RawMessage(`{"chat_id":-100,"topic_id":10,"routing_generation":1,"completion_key":"old"}`)
-	store := &workerStore{current: current, events: []domain.Event{{Kind: "completion_cleanup_requested", Data: payload}}}
-	worker := NewWorker(client, store, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100}}, BeforeDelete: func(context.Context, domain.Tx, domain.Ticket, int64, int64) error { return nil }})
-	op := domain.Operation{TicketID: 1, Kind: "delete_topic", Payload: payload}
-	if err := worker.Handle(ctx, op); err != nil {
-		t.Fatal(err)
-	}
-	if calls != 1 || store.current.TopicID != 20 || store.events[len(store.events)-1].Kind != "topic_deleted" {
-		t.Fatal("old cleanup affected reopened ticket")
-	}
-	op.Payload = json.RawMessage(`{"chat_id":-100,"topic_id":20,"routing_generation":2,"completion_key":"old"}`)
-	if err := worker.Handle(ctx, op); err != domain.ErrForbidden {
-		t.Fatalf("unmatched binding allowed: %v", err)
-	}
-	if calls != 1 {
-		t.Fatal("invalid intent reached Telegram")
-	}
-}
 func TestAuxiliaryDeletionHasNoTicketDependencyAndMissingMessageIsSuccess(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"ok":false,"error_code":400,"description":"message to delete not found"}`))
@@ -306,6 +361,28 @@ func TestAuxiliaryDeletionHasNoTicketDependencyAndMissingMessageIsSuccess(t *tes
 	worker := NewWorker(client, nil, Config{})
 	if err := worker.Handle(context.Background(), domain.Operation{Kind: "delete_aux_message", Payload: json.RawMessage(`{"chat_id":-100,"message_id":9}`)}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestUndeletableAuxiliaryMessageHidesKeyboardWithoutFailingOperation(t *testing.T) {
+	var methods []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		methods = append(methods, r.URL.Path)
+		if strings.HasSuffix(r.URL.Path, "/deleteMessage") {
+			w.Write([]byte(`{"ok":false,"error_code":400,"description":"Bad Request: message can't be deleted for everyone"}`))
+			return
+		}
+		w.Write([]byte(`{"ok":true,"result":true}`))
+	}))
+	defer server.Close()
+	client := NewClient("test")
+	client.BaseURL = server.URL
+	worker := NewWorker(client, nil, Config{})
+	if err := worker.Handle(context.Background(), domain.Operation{Kind: "delete_aux_message", Payload: json.RawMessage(`{"chat_id":123,"message_id":9}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if len(methods) != 2 || !strings.HasSuffix(methods[0], "/deleteMessage") || !strings.HasSuffix(methods[1], "/editMessageReplyMarkup") {
+		t.Fatalf("cleanup calls: %v", methods)
 	}
 }
 
@@ -321,7 +398,7 @@ func TestClosingNoticeTargetsOldTopicAndSurvivesCloseRetry(t *testing.T) {
 		payload, want string
 		status        domain.Status
 	}{
-		{`{"chat_id":-100,"topic_id":10,"retire":true,"to_department":"1c"}`, "Передано в отдел 1С", domain.New},
+		{`{"chat_id":-100,"topic_id":10,"retire":true,"to_department":"1c"}`, "Заявка #7 передана в отдел 1С", domain.New},
 		{`{"chat_id":-100,"topic_id":10,"text":"Тикет закрыт инженером"}`, "Тикет закрыт инженером", domain.Closed},
 	} {
 		t.Run(tc.want, func(t *testing.T) {

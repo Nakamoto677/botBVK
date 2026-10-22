@@ -12,9 +12,8 @@ a green `go test ./...` proves nothing about persistence. Add `TEST_BACKUP_TOOLS
 for backup and restore coverage.
 
 Do not restore removed features (emergency routing, dispatcher chat, internal-note mode,
-mandatory reply controls, or thirty-day cleanup) without a new user request.
-Preserve existing records and archives; new completion cleanup must never bulk-delete
-topics belonging to historical closures. Report real Telegram pilot separately from mocks.
+mandatory reply controls, ticket reopening, or topic deletion) without a new user request.
+Preserve existing records, topics and archives. Report real Telegram pilot separately from mocks.
 
 Apply $telegram-bot-ui when working on the bot interface: messages, button labels,
 keyboards, menus, navigation, confirmations, and error states. Read

@@ -12,7 +12,7 @@ import (
 
 func TestEngineerQueueAndTopicActionMatrix(t *testing.T) {
 	ticket := domain.Ticket{ID: 42, Status: domain.New, Department: domain.IT}
-	buttons := engineerQueueButtons(ticket)
+	buttons := engineerQueueButtons(ticket, "")
 	if len(buttons) != 2 || buttons[0][0].Data != "claim:42" || buttons[1][0].Data != "transfer:42" {
 		t.Fatalf("unclaimed controls: %+v", buttons)
 	}
@@ -21,7 +21,7 @@ func TestEngineerQueueAndTopicActionMatrix(t *testing.T) {
 	ticket.TopicChatID = -1001234567890
 	ticket.TopicID = 7
 	ticket.TopicMessageID = 88
-	buttons = engineerQueueButtons(ticket)
+	buttons = engineerQueueButtons(ticket, "")
 	if len(buttons) != 2 || len(buttons[1]) != 2 || buttons[0][0].Text != "В чат" || buttons[0][0].URL != "https://t.me/c/1234567890/88?thread=7" || buttons[1][0].Text != "Закрыть задачу" {
 		t.Fatalf("assigned controls: %+v", buttons)
 	}
@@ -30,12 +30,12 @@ func TestEngineerQueueAndTopicActionMatrix(t *testing.T) {
 		t.Fatal(topic)
 	}
 	ticket.RoutingPending = true
-	if len(engineerQueueButtons(ticket)) != 0 {
+	if len(engineerQueueButtons(ticket, "")) != 0 {
 		t.Fatal("actions before provisioning")
 	}
 	for _, status := range []domain.Status{domain.Closed, domain.Cancelled} {
 		ticket.Status = status
-		if len(engineerQueueButtons(ticket))+len(engineerTopicButtons(ticket)) != 0 {
+		if len(engineerQueueButtons(ticket, ""))+len(engineerTopicButtons(ticket)) != 0 {
 			t.Fatal("terminal actions")
 		}
 	}
@@ -156,10 +156,8 @@ func TestClientContactTracksUsernameChangesAndMissingUsername(t *testing.T) {
 			want = "@" + username
 		}
 		ticket := domain.Ticket{ID: 7, Department: domain.IT}
-		for _, text := range []string{ticketText(ticket, name, "Компания", ""), engineerCardText(ticket, name, "Компания", "")} {
-			if !strings.Contains(text, want) {
-				t.Fatal(text)
-			}
+		if text := engineerCardText(ticket, name, "Компания", ""); !strings.Contains(text, want) {
+			t.Fatal(text)
 		}
 	}
 	var person Person
@@ -174,7 +172,7 @@ func TestTransferPromptCommentAndControlCleanup(t *testing.T) {
 		client, requests := uiClient(t)
 		s := &durableUIStore{adapterStore: &adapterStore{user: domain.User{ID: 2, Role: "engineer", Approved: true, Departments: []domain.Department{domain.IT}}, ticket: domain.Ticket{ID: 7, Status: domain.InProgress, Department: domain.IT, AssigneeID: 2, TopicChatID: -100, TopicID: 10}}, workflows: map[promptKey][]byte{}, aux: map[auxKey][]domain.AuxiliaryMessage{}}
 		svc := &adapterService{}
-		a := NewAdapter(client, s, svc, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100, QueueTopicID: 1}}})
+		a := NewAdapter(client, s, svc, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100, QueueTopicID: 1}, domain.OneC: {ChatID: -200, QueueTopicID: 1}}})
 		m := &Message{ID: 80, From: Person{ID: 2}, Chat: Chat{ID: -100, Type: "supergroup"}, ThreadID: 10, Text: engineerTransferLabel}
 		if err := a.Handle(ctx, Update{Message: m}); err != nil {
 			t.Fatal(err)
@@ -199,6 +197,8 @@ func TestTransferPromptCommentAndControlCleanup(t *testing.T) {
 			}
 		} else if err := a.promptCallback(ctx, &Callback{From: m.From, Message: m}, "promptcancel", 7, []string{"promptcancel", "7"}); err != nil {
 			t.Fatal(err)
+		} else if got := (*requests)[len(*requests)-1]["text"]; got != "Передача отменена — заявка #7 осталась в текущем отделе." {
+			t.Fatalf("declined transfer left no receipt: %v", got)
 		}
 		removed := false
 		for _, op := range s.operations {
@@ -216,5 +216,44 @@ func TestTransferPromptCommentAndControlCleanup(t *testing.T) {
 		if !removed {
 			t.Fatal("transfer control retained")
 		}
+	}
+}
+
+func TestGroupQueueCardLinksToCompanyChatAndHidesTopicControls(t *testing.T) {
+	ticket := domain.Ticket{ID: 42, ClientID: -100500, Channel: domain.ChannelGroup, Status: domain.New, Department: domain.OneC, SourceMessageID: 55}
+	buttons := engineerQueueButtons(ticket, "https://t.me/c/500/55")
+	if len(buttons) != 3 || buttons[0][0].Text != "В чат компании" || buttons[0][0].URL != "https://t.me/c/500/55" || buttons[1][0].Data != "claim:42" || buttons[2][0].Data != "transfer:42" {
+		t.Fatalf("new group controls: %+v", buttons)
+	}
+	ticket.Status = domain.InProgress
+	ticket.AssigneeID = 2
+	buttons = engineerQueueButtons(ticket, "https://t.me/c/500/55")
+	if len(buttons) != 2 || buttons[0][0].Text != "В чат компании" || buttons[1][0].Text != "Закрыть задачу" || buttons[1][1].Data != "transfer:42" {
+		t.Fatalf("active group controls: %+v", buttons)
+	}
+	if len(engineerQueueButtons(ticket, "")) != 1 {
+		t.Fatal("missing-link group card should still expose close and transfer")
+	}
+}
+
+func TestGroupCardShowsCompanyChatAndRequester(t *testing.T) {
+	ticket := domain.Ticket{
+		ID:                42,
+		ClientID:          -100500,
+		Channel:           domain.ChannelGroup,
+		Status:            domain.New,
+		Department:        domain.OneC,
+		Description:       "Не открывается 1С",
+		RequesterName:     "Иван",
+		RequesterUsername: "ivan",
+	}
+	text := engineerCardText(ticket, "ООО Ромашка", "Компания", "")
+	for _, want := range []string{"Чат компании:", "ООО Ромашка", "Обратился:", "Иван · @ivan"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("card missing %q: %s", want, text)
+		}
+	}
+	if strings.Contains(text, "<b>Клиент:</b>") {
+		t.Fatalf("group card still labels the chat as a private client: %s", text)
 	}
 }

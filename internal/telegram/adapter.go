@@ -5,8 +5,11 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -16,14 +19,25 @@ import (
 type Team struct {
 	ChatID       int64
 	QueueTopicID int64
+	Tags         []string
 }
+
+// ClientGroup is a company group chat admitted by the group intake channel.
+// CompanyID is resolved from the stable company config key at startup.
+type ClientGroup struct {
+	CompanyID int64
+	Link      string
+}
+
 type Config struct {
-	Departments       map[domain.Department]Team
-	AdminIDs          []int64
-	ArchiveDir        string
-	ReportCSV         func(context.Context) (string, error)
-	BeforeDelete      func(context.Context, domain.Tx, domain.Ticket, int64, int64) error
-	BusinessHoursText string
+	Departments  map[domain.Department]Team
+	ClientGroups map[int64]ClientGroup
+	BotUsername  string
+	StartHour    int
+	EndHour      int
+	AdminIDs     []int64
+	ArchiveDir   string
+	ReportCSV    func(context.Context) (string, error)
 }
 type Service interface {
 	Register(context.Context, int64, string, int64) error
@@ -32,9 +46,16 @@ type Service interface {
 	Claim(context.Context, int64, int64) error
 	Transfer(context.Context, int64, int64, domain.Department, string) error
 	Close(context.Context, int64, int64, string) error
-	Reopen(context.Context, int64, int64) error
 	SetWaiting(context.Context, int64, int64, bool) error
 	AddMessage(context.Context, int64, int64, domain.Message, bool) error
+}
+
+// groupService is implemented by tickets.Service. Keeping it as a separate
+// optional interface leaves the private-chat service contract unchanged for
+// existing tests and lightweight adapters.
+type groupService interface {
+	CreateFromGroup(context.Context, domain.GroupTicketRequest) (domain.Ticket, error)
+	AddGroupMessage(context.Context, int64, int64, int64, domain.GroupAuthor, domain.Message) error
 }
 type DraftStore interface {
 	SaveDraft(context.Context, int64, domain.Department, string) error
@@ -59,6 +80,9 @@ type Adapter struct {
 	lastPoll  atomic.Int64
 	prompts   map[promptKey]prompt
 	auxiliary map[auxKey][]domain.AuxiliaryMessage
+	// unrecognised records group chats the bot can see but has no rule for, so
+	// a mistyped client_groups entry is reported once instead of on every message.
+	unrecognised sync.Map
 }
 
 func NewAdapter(c *Client, s domain.Store, v Service, cfg Config) *Adapter {
@@ -207,7 +231,19 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 	if u.Callback != nil {
 		return a.callback(ctx, u.Callback)
 	}
+	if u.MyChatMember != nil {
+		// Adding the bot to a group is the cheapest way to obtain the real chat
+		// id: the warning names it even before any message is written there.
+		a.noteUnrecognisedChat(u.MyChatMember.Chat)
+		return nil
+	}
 	if u.EditedMessage != nil {
+		if a.isClientGroup(u.EditedMessage.Chat.ID) {
+			return a.groupEdit(ctx, u.EditedMessage)
+		}
+		if u.EditedMessage.Chat.Type != "private" && !a.trustedGroup(u.EditedMessage.Chat.ID) {
+			a.noteUnrecognisedChat(u.EditedMessage.Chat)
+		}
 		return a.edit(ctx, u.EditedMessage)
 	}
 	m := u.Message
@@ -217,7 +253,14 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 	if m.From.IsBot || m.serviceMessage() {
 		return nil
 	}
+	if a.isClientGroup(m.Chat.ID) {
+		if m.From.ID == 0 || m.SenderChat != nil {
+			return nil
+		}
+		return a.groupMessage(ctx, m)
+	}
 	if m.Chat.Type != "private" && !a.trustedGroup(m.Chat.ID) {
+		a.noteUnrecognisedChat(m.Chat)
 		return domain.ErrForbidden
 	}
 	if m.From.ID == 0 || m.SenderChat != nil {
@@ -319,12 +362,8 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 	if text == "/tickets" {
 		return a.ticketList(ctx, m, user)
 	}
-	if strings.HasPrefix(text, "/reopen ") {
-		id, err := strconv.ParseInt(strings.TrimSpace(strings.TrimPrefix(text, "/reopen ")), 10, 64)
-		if err != nil {
-			return domain.ErrInvalid
-		}
-		return a.service.Reopen(ctx, m.From.ID, id)
+	if text == "/reopen" || strings.HasPrefix(text, "/reopen ") {
+		return a.say(ctx, m, "Заявка завершена. Создайте новую заявку через меню.", nil)
 	}
 	if text == "/new" || text == "Новая заявка" {
 		if _, err := a.store.ActiveTicket(ctx, m.From.ID); err == nil {
@@ -346,7 +385,7 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 		if err := a.clientScreen(ctx, m, "draft", "Создание заявки.", clientDraftKeyboard); err != nil {
 			return err
 		}
-		return a.sayAux(ctx, m, m.From.ID, "draft", "Выберите направление.", draftDepartments(d))
+		return a.sayAux(ctx, m, m.From.ID, "draft", "Выберите направление.", a.draftDepartments(d))
 	}
 	if strings.HasPrefix(text, "/") {
 		return a.help(ctx, m, user)
@@ -366,7 +405,10 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 		}
 	}
 	if ok && d.Step != "submitted" {
-		if !d.Department.Valid() {
+		if !a.departmentEnabled(d.Department) {
+			return a.resumeDraft(ctx, m)
+		}
+		if !d.Urgency.Valid() || d.Step == "change_urgency" {
 			return a.resumeDraft(ctx, m)
 		}
 		if strings.HasPrefix(text, "/") {
@@ -383,12 +425,34 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 	}
 	return a.receive(ctx, m, t, false)
 }
+
 // departmentButtons builds the shared department picker, two per row, from the
 // canonical department order so labels and data never diverge from the domain.
-func departmentButtons(prefix string) [][]Button {
+func (a *Adapter) configuredDepartments() []domain.Department {
+	if a.cfg.Departments == nil {
+		return domain.Departments()
+	}
+	departments := make([]domain.Department, 0, len(a.cfg.Departments))
+	for _, department := range domain.Departments() {
+		if _, ok := a.cfg.Departments[department]; ok {
+			departments = append(departments, department)
+		}
+	}
+	return departments
+}
+
+func (a *Adapter) departmentEnabled(department domain.Department) bool {
+	if a.cfg.Departments == nil {
+		return department.Valid()
+	}
+	_, ok := a.cfg.Departments[department]
+	return ok
+}
+
+func (a *Adapter) departmentButtons(prefix string) [][]Button {
 	rows := [][]Button{}
 	row := []Button{}
-	for _, d := range domain.Departments() {
+	for _, d := range a.configuredDepartments() {
 		row = append(row, Button{Text: d.Name(), Data: prefix + ":" + string(d)})
 		if len(row) == 2 {
 			rows = append(rows, row)
@@ -401,6 +465,11 @@ func departmentButtons(prefix string) [][]Button {
 	return rows
 }
 func (a *Adapter) callback(ctx context.Context, c *Callback) error {
+	if c.Message != nil && a.isClientGroup(c.Message.Chat.ID) {
+		// The group channel has no client-side buttons. Accepting callbacks
+		// there would let anyone in the chat act on an internal ticket.
+		return domain.ErrForbidden
+	}
 	if c.Message != nil && c.Message.Chat.Type != "private" && !a.trustedGroup(c.Message.Chat.ID) {
 		return domain.ErrForbidden
 	}
@@ -428,6 +497,14 @@ func (a *Adapter) callback(ctx context.Context, c *Callback) error {
 		err = a.service.ApproveAccess(ctx, c.From.ID, id, action == "approve")
 	case "new":
 		return a.callbackNewDraft(ctx, c, parts)
+	case "urgency":
+		return a.callbackUrgency(ctx, c, parts)
+	case "changeurgency":
+		return a.callbackChangeUrgency(ctx, c, parts)
+	case "draftback":
+		return a.callbackDraftBack(ctx, c, parts)
+	case "draftreview":
+		return a.callbackDraftReview(ctx, c, parts)
 	case "submit":
 		return a.callbackSubmitDraft(ctx, c, parts)
 	case "cancel":
@@ -439,7 +516,12 @@ func (a *Adapter) callback(ctx context.Context, c *Callback) error {
 	case "resume":
 		err = a.service.SetWaiting(ctx, c.From.ID, id, false)
 	case "reopen":
-		err = a.service.Reopen(ctx, c.From.ID, id)
+		if c.Message != nil {
+			_ = a.client.Answer(ctx, c.ID, "Заявка завершена. Создайте новую заявку.")
+			a.markCallbackAnswered()
+			return a.say(ctx, c.Message, "Заявка завершена. Создайте новую заявку через меню.", nil)
+		}
+		return domain.ErrConflict
 	case "close", "transfer":
 		err = a.beginStaffPrompt(ctx, c, id, action)
 	case "transferdept", "cancelconfirm", "promptcancel":
@@ -565,6 +647,19 @@ func (a *Adapter) staff(ctx context.Context, m *Message) error {
 	if !provisioningStatus(t.Status) || t.RoutingPending || m.Chat.ID != t.TopicChatID || m.ThreadID != t.TopicID || m.ThreadID == a.cfg.Departments[t.Department].QueueTopicID {
 		return nil
 	}
+	if m.Reply != nil {
+		if lookup, ok := a.store.(interface {
+			MessageTicket(context.Context, int64, int64) (domain.Ticket, error)
+		}); ok {
+			original, e := lookup.MessageTicket(ctx, m.Chat.ID, m.Reply.ID)
+			if e == nil && original.ID != t.ID {
+				return a.say(ctx, m, fmt.Sprintf("Это сообщение относится к заявке #%d. Ответьте в рамках текущей заявки #%d отдельным сообщением.", original.ID, t.ID), nil)
+			}
+			if e != nil && !errors.Is(e, domain.ErrNotFound) {
+				return e
+			}
+		}
+	}
 	return a.receive(ctx, m, t, true)
 }
 
@@ -583,9 +678,6 @@ func normalise(m *Message, public bool) domain.Message {
 	if m.EditDate != 0 {
 		at := time.Unix(m.EditDate, 0).UTC()
 		msg.EditedAt = &at
-	}
-	if m.Reply != nil {
-		msg.ReplyToMessageID = m.Reply.ID
 	}
 
 	var f *File
@@ -640,7 +732,7 @@ func (a *Adapter) receive(ctx context.Context, m *Message, t domain.Ticket, publ
 		}
 	}
 	if msg.FileSize > 20<<20 {
-		return a.say(ctx, m, "Вложение больше 20 МБ: оно передано, но не может быть скачано в независимый архив стандартным Bot API. Отправьте меньший файл или согласуйте другой способ передачи с поддержкой. Топик не будет удалён без архива.", nil)
+		return a.say(ctx, m, "Вложение больше 20 МБ: оно передано, но не может быть скачано в независимый архив стандартным Bot API. Отправьте меньший файл или согласуйте другой способ передачи с поддержкой.", nil)
 	}
 	return nil
 }
@@ -703,14 +795,6 @@ func (a *Adapter) edit(ctx context.Context, m *Message) error {
 
 func (a *Adapter) history(ctx context.Context, m *Message, u domain.User, t domain.Ticket) error {
 	return a.historyPage(ctx, m, u, t, 0, 0)
-}
-func (a *Adapter) sendChunks(ctx context.Context, m *Message, text string) error {
-	for _, part := range splitText(text, messageLimit) {
-		if err := a.say(ctx, m, part, nil); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 func (a *Adapter) report(ctx context.Context, m *Message, u domain.User) error {
 	if m.Chat.Type != "private" && !a.trustedGroup(m.Chat.ID) {
@@ -801,6 +885,45 @@ func (a *Adapter) trustedGroup(chatID int64) bool {
 		}
 	}
 	return false
+}
+
+func (a *Adapter) clientGroup(chatID int64) (ClientGroup, bool) {
+	group, ok := a.cfg.ClientGroups[chatID]
+	return group, ok
+}
+
+// noteUnrecognisedChat names a group the bot receives messages from but cannot
+// use. Without this line a wrong chat_id in client_groups is silent: the bot
+// ignores the chat, and getUpdates is not an option because it would confirm
+// updates the bot has not stored yet. The real id is printed here once.
+func (a *Adapter) noteUnrecognisedChat(chat Chat) {
+	if chat.Type == "" || chat.Type == "private" || a.isClientGroup(chat.ID) || a.trustedGroup(chat.ID) {
+		return
+	}
+	if _, seen := a.unrecognised.LoadOrStore(chat.ID, true); seen {
+		return
+	}
+	slog.Warn("message from an unrecognised group chat: add it to client_groups or departments",
+		"chat_id", chat.ID, "type", chat.Type, "title", chat.Title,
+		"hint", "supergroup ids are -100<internal> where <internal> is the number in a t.me/c/<internal>/<message> link")
+}
+
+func (a *Adapter) isClientGroup(chatID int64) bool {
+	_, ok := a.clientGroup(chatID)
+	return ok
+}
+
+func (a *Adapter) groupTags() map[domain.Department][]string {
+	tags := make(map[domain.Department][]string, len(a.cfg.Departments))
+	for _, department := range a.configuredDepartments() {
+		team := a.cfg.Departments[department]
+		if len(team.Tags) == 0 {
+			tags[department] = domain.DefaultDepartmentTags(department)
+			continue
+		}
+		tags[department] = team.Tags
+	}
+	return tags
 }
 func historyAuthorized(u domain.User, t domain.Ticket) bool {
 	return u.Approved && ((u.Role == "client" && u.ID == t.ClientID && u.CompanyID == t.CompanyID) || staffAuthorized(u, t))

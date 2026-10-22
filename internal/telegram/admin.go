@@ -70,9 +70,8 @@ func (a *Adapter) admin(ctx context.Context, m *Message, u domain.User) error {
 		}
 		return domain.ErrInvalid
 	case "/quarantine":
-		// Accepted updates that can never complete on their own. They stay
-		// unfinished to protect the archive, so an operator must see and release
-		// them; nothing else clears the flag.
+		// Accepted updates that can never complete on their own stay unfinished
+		// until an operator reviews and releases them.
 		quarantine, ok := a.store.(domain.QuarantineStore)
 		if !ok {
 			return domain.ErrInvalid
@@ -130,6 +129,14 @@ func (a *Adapter) admin(ctx context.Context, m *Message, u domain.User) error {
 			return domain.ErrConflict
 		}
 		team := a.cfg.Departments[ticket.Department]
+		clientTopics, ok := a.store.(domain.ClientTopicStore)
+		if !ok {
+			return domain.ErrInvalid
+		}
+		previous, bindingErr := clientTopics.ClientTopic(ctx, ticket.ClientID, ticket.Department)
+		if bindingErr != nil && !errors.Is(bindingErr, domain.ErrNotFound) {
+			return bindingErr
+		}
 		if existing, e := a.store.TopicTicket(ctx, team.ChatID, topic); e == nil && existing.ID != ticket.ID {
 			return domain.ErrConflict
 		} else if e != nil && !errors.Is(e, domain.ErrNotFound) {
@@ -154,10 +161,24 @@ func (a *Adapter) admin(ctx context.Context, m *Message, u domain.User) error {
 				return domain.ErrConflict
 			}
 			oldChat, oldTopic := current.TopicChatID, current.TopicID
+			bindingTx, ok := tx.(domain.ClientTopicTx)
+			if !ok {
+				return domain.ErrInvalid
+			}
+			binding := domain.ClientTopic{ClientID: current.ClientID, Department: current.Department, ChatID: team.ChatID, TopicID: topic}
+			if errors.Is(bindingErr, domain.ErrNotFound) {
+				e = bindingTx.BindClientTopic(ctx, binding)
+			} else if previous.ChatID != team.ChatID || previous.TopicID != topic {
+				e = bindingTx.ReplaceClientTopic(ctx, binding, previous.TopicID)
+			}
+			if e != nil {
+				return e
+			}
 			current.TopicChatID = team.ChatID
 			current.TopicID = topic
 			current.RoutingPending = false
 			current.QueueMessageID = 0
+			current.QueueMediaType = ""
 			current.TopicMessageID = 0
 			if e = tx.SaveTicket(ctx, &current); e != nil {
 				return e
@@ -201,7 +222,7 @@ func (a *Adapter) admin(ctx context.Context, m *Message, u domain.User) error {
 		if fields[0] == "/staff" {
 			for _, field := range fields[3:] {
 				d := domain.Department(field)
-				if !d.Valid() {
+				if !a.departmentEnabled(d) {
 					return domain.ErrInvalid
 				}
 				departments = append(departments, d)
@@ -272,9 +293,9 @@ func (a *Adapter) ticketCommand(ctx context.Context, m *Message) error {
 			return a.beginCancel(ctx, m.From.ID, m, id)
 		}
 		if service, ok := a.service.(interface {
-			Cancel(context.Context, int64, int64, string) error
+			Cancel(context.Context, int64, int64) error
 		}); ok {
-			return service.Cancel(ctx, m.From.ID, id, "")
+			return service.Cancel(ctx, m.From.ID, id)
 		}
 	case "/assign":
 		target, e := strconv.ParseInt(parts[2], 10, 64)

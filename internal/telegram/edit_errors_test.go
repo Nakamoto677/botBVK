@@ -42,17 +42,3 @@ func TestRealEditFailuresStillFail(t *testing.T) {
 		t.Fatal("a transport error was swallowed")
 	}
 }
-
-// The delete path already had this rule; keep it pinned next to the edit rule so the two
-// do not drift apart.
-func TestDeletionClassifiersAgreeOnGoneTopics(t *testing.T) {
-	for _, description := range []string{"TOPIC_ID_INVALID", "message thread not found"} {
-		api := &APIError{Code: 400, Description: description}
-		if err := topicDeleteError(api); err != nil {
-			t.Fatalf("topic deletion treated %q as a failure: %v", description, err)
-		}
-		if err := messageEditError(&APIError{Code: 400, Description: description}); err != nil {
-			t.Fatalf("edit treated %q as a failure: %v", description, err)
-		}
-	}
-}

@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"html"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -71,6 +72,32 @@ func splitText(s string, limit int) []string {
 	}
 	return parts
 }
+
+// visibleTextLength approximates how Telegram counts an HTML message after
+// entity parsing: tags are not characters and escaped entities decode to one
+// character. It is used only to budget a media caption before sending; the bot's
+// own tags never contain ">" inside attributes, and user text is escaped, so
+// stripping between angle brackets cannot cut through user content.
+func visibleTextLength(s string) int {
+	var b strings.Builder
+	depth := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '<':
+			depth++
+		case '>':
+			if depth > 0 {
+				depth--
+			}
+		default:
+			if depth == 0 {
+				b.WriteByte(s[i])
+			}
+		}
+	}
+	return utf16Length(html.UnescapeString(b.String()))
+}
+
 func previewText(s string, limit int) string {
 	if utf16Length(s) <= limit {
 		return s

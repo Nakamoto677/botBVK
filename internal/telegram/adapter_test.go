@@ -102,7 +102,7 @@ func (s *adapterService) Transfer(_ context.Context, _ int64, id int64, d domain
 	s.transferReason = text
 	return nil
 }
-func (s *adapterService) Cancel(_ context.Context, _ int64, id int64, _ string) error {
+func (s *adapterService) Cancel(_ context.Context, _ int64, id int64) error {
 	s.cancelID = id
 	return nil
 }
@@ -151,7 +151,7 @@ func TestAnonymousSenderRejected(t *testing.T) {
 }
 func TestCardLengthBounded(t *testing.T) {
 	ticket := domain.Ticket{Description: string(make([]rune, 5000))}
-	if len([]rune(card(ticket))) > 4096 {
+	if len([]rune(engineerCardText(ticket, "Клиент", "Компания", "Специалист"))) > 4096 {
 		t.Fatal("card exceeds Telegram text limit")
 	}
 }
@@ -212,4 +212,34 @@ func (s *adapterStore) ActiveTicket(_ context.Context, id int64) (domain.Ticket,
 		return s.ticket, nil
 	}
 	return domain.Ticket{}, domain.ErrNotFound
+}
+
+func TestUnrecognisedGroupChatIsReportedOnce(t *testing.T) {
+	adapter := NewAdapter(nil, nil, nil, Config{})
+	message := &Message{Chat: Chat{ID: -100777, Type: "supergroup", Title: "Ромашки"}}
+	for i := 0; i < 3; i++ {
+		if err := adapter.Handle(context.Background(), Update{Message: message}); !errors.Is(err, domain.ErrForbidden) {
+			t.Fatalf("unknown group accepted: %v", err)
+		}
+	}
+	if _, seen := adapter.unrecognised.Load(int64(-100777)); !seen {
+		t.Fatal("the real chat_id must be recorded so the operator can find it in the log")
+	}
+}
+
+func TestMembershipUpdateRevealsUnconfiguredChat(t *testing.T) {
+	adapter := NewAdapter(nil, nil, nil, Config{ClientGroups: map[int64]ClientGroup{-100888: {CompanyID: 1}}})
+	// Adding the bot to a group the operator typed wrong must still name the chat,
+	// because this update arrives even with privacy mode on.
+	raw := []byte(`{"update_id":1,"my_chat_member":{"chat":{"id":-100999,"type":"supergroup","title":"Ромашки"},"new_chat_member":{"status":"member"}}}`)
+	var update Update
+	if err := json.Unmarshal(raw, &update); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.Handle(context.Background(), update); err != nil {
+		t.Fatal(err)
+	}
+	if _, seen := adapter.unrecognised.Load(int64(-100999)); !seen {
+		t.Fatal("membership update must report the real chat_id")
+	}
 }

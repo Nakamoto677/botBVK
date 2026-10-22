@@ -118,6 +118,19 @@ func TestUntiedFailureIsRetiredOnlyAfterTheWindow(t *testing.T) {
 	}
 }
 
+func TestUndeletableAuxiliaryFailureIsRetiredImmediately(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	id := failedKind(t, s, 0, "delete_aux_message", time.Minute)
+	if _, err := s.pool.Exec(ctx, `UPDATE bvk_outbox SET last_error=$2 WHERE id=$1`, id, "telegram 400: Bad Request: message can't be deleted for everyone"); err != nil {
+		t.Fatal(err)
+	}
+	retired, err := s.RetireFinishedFailures(ctx)
+	if err != nil || retired != 1 || state(t, s, id) != "done" {
+		t.Fatalf("retired=%d state=%s error=%v", retired, state(t, s, id), err)
+	}
+}
+
 // An operation pointing at a ticket that no longer exists is a data problem worth
 // looking at, not noise, so it is left alone.
 func TestFailureWithDanglingTicketReferenceIsKept(t *testing.T) {

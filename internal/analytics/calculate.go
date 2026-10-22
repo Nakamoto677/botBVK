@@ -11,7 +11,7 @@ import (
 // Calculate reconstructs history from facts in the snapshot. Current ticket
 // fields are used for current attention flags, never as historical assignees.
 func Calculate(src Source, opt Options) Snapshot {
-	out := Snapshot{At: src.At, Tickets: []Ticket{}, Cycles: []Cycle{}, Events: []Event{}, Intervals: []Interval{}, Users: src.Users, Companies: src.Companies}
+	out := Snapshot{At: src.At, Departments: opt.Departments, Tickets: []Ticket{}, Cycles: []Cycle{}, Events: []Event{}, Intervals: []Interval{}, Users: src.Users, Companies: src.Companies}
 	users := make(map[int64]domain.User, len(src.Users))
 	for _, u := range src.Users {
 		users[u.ID] = u

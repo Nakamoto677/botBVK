@@ -471,6 +471,8 @@ func TestDraftFileReplacementRestartSubmitAndStaleScreens(t *testing.T) {
 		}
 	}
 	callback("new:it:" + d.Generation)
+	// The form asks for urgency before it accepts the description.
+	callback("urgency:routine:" + d.Generation)
 	m.ID = 2
 	m.Text = ""
 	m.Caption = "File description"
@@ -525,7 +527,7 @@ func TestDraftFileReplacementRestartSubmitAndStaleScreens(t *testing.T) {
 	if err != nil || len(messages) != 1 || messages[0].Text != "File description" {
 		t.Fatal("draft attachment not committed exactly once", messages, err)
 	}
-	if err = svc.Cancel(ctx, 1, active.ID, ""); err != nil {
+	if err = svc.Cancel(ctx, 1, active.ID); err != nil {
 		t.Fatal(err)
 	}
 	m.ID = 4

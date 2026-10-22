@@ -15,10 +15,76 @@ import (
 )
 
 func TestSchemaSafety(t *testing.T) {
-	for _, required := range []string{"bvk_active_client", "bvk_message_source", "bvk_topic", "REFERENCES bvk_users", "REFERENCES bvk_companies"} {
+	for _, required := range []string{"bvk_active_client", "bvk_message_source", "REFERENCES bvk_users", "REFERENCES bvk_companies"} {
 		if !strings.Contains(schema, required) {
 			t.Errorf("schema lacks %s", required)
 		}
+	}
+	if !strings.Contains(persistentTopicsMigration, "DROP INDEX IF EXISTS bvk_topic") || !strings.Contains(persistentTopicsMigration, "bvk_client_topics") {
+		t.Fatal("persistent topic migration must replace ticket ownership")
+	}
+}
+
+func TestPersistentTopicBindsNewTicketAndRetainsHistory(t *testing.T) {
+	s := testStore(t)
+	ctx := t.Context()
+	first := seed(t, s)
+	number, err := s.ClientNumber(ctx, first.ClientID)
+	if err != nil || number <= 0 {
+		t.Fatal("client number missing", number, err)
+	}
+	if err := s.Transact(ctx, func(tx domain.Tx) error {
+		binding := domain.ClientTopic{ClientID: first.ClientID, Department: first.Department, ChatID: -100, TopicID: 42}
+		if err := tx.(domain.ClientTopicTx).BindClientTopic(ctx, binding); err != nil {
+			return err
+		}
+		first.Status, first.TopicChatID, first.TopicID, first.TopicMessageID = domain.InProgress, -100, 42, 70
+		return tx.SaveTicket(ctx, &first)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Transact(ctx, func(tx domain.Tx) error {
+		first.Status = domain.Closed
+		return tx.SaveTicket(ctx, &first)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	second := domain.Ticket{ClientID: first.ClientID, CompanyID: first.CompanyID, Department: first.Department, Status: domain.InProgress, TopicChatID: -100, TopicID: 42, TopicMessageID: 90}
+	if err := s.Transact(ctx, func(tx domain.Tx) error { return tx.SaveTicket(ctx, &second) }); err != nil {
+		t.Fatal(err)
+	}
+	binding, err := s.ClientTopic(ctx, first.ClientID, first.Department)
+	if err != nil || binding.TopicID != 42 {
+		t.Fatal("permanent binding changed", binding, err)
+	}
+	active, err := s.TopicTicket(ctx, -100, 42)
+	if err != nil || active.ID != second.ID {
+		t.Fatal("topic did not route to new ticket", active, err)
+	}
+	previous, err := s.PreviousTopicTicket(ctx, first.ClientID, first.Department, second.ID)
+	if err != nil || previous.ID != first.ID || previous.TopicMessageID != 70 {
+		t.Fatal("previous card missing", previous, err)
+	}
+	oldCard, err := s.MessageTicket(ctx, -100, 70)
+	if err != nil || oldCard.ID != first.ID {
+		t.Fatal("old card routed to a newer ticket", oldCard, err)
+	}
+	if err = s.Transact(ctx, func(tx domain.Tx) error {
+		second.Status = domain.Closed
+		return tx.SaveTicket(ctx, &second)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	third := domain.Ticket{ClientID: first.ClientID, CompanyID: first.CompanyID, Department: first.Department, Status: domain.InProgress, TopicChatID: -100, TopicID: 43}
+	if err = s.Transact(ctx, func(tx domain.Tx) error { return tx.SaveTicket(ctx, &third) }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.PreviousTopicTicket(ctx, first.ClientID, first.Department, third.ID); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("replacement topic linked to a missing old card: %v", err)
+	}
+	old, err := s.Ticket(ctx, first.ID)
+	if err != nil || old.Status != domain.Closed || old.TopicID != 42 {
+		t.Fatal("old ticket history lost", old, err)
 	}
 }
 

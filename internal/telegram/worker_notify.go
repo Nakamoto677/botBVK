@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"bot-bvk/internal/domain"
 )
@@ -50,5 +51,14 @@ func (w *Worker) deleteAuxMessage(ctx context.Context, payload operationPayload)
 	if err := w.rate(ctx, payload.ChatID, "deleteMessage"); err != nil {
 		return err
 	}
-	return auxiliaryDeleteError(w.client.Call(ctx, "deleteMessage", map[string]any{"chat_id": payload.ChatID, "message_id": payload.MessageID}, nil))
+	err := w.client.Call(ctx, "deleteMessage", map[string]any{"chat_id": payload.ChatID, "message_id": payload.MessageID}, nil)
+	if auxiliaryDeleteBlocked(err) {
+		// Telegram can refuse deletion of an old service screen. Its buttons can
+		// still be disabled, and the screen's cleanup is otherwise finished.
+		if editErr := messageEditError(w.client.HideMessageKeyboard(ctx, payload.ChatID, payload.MessageID)); editErr != nil {
+			slog.Warn("could not hide keyboard on undeletable auxiliary message", "chat", payload.ChatID, "message", payload.MessageID, "error", editErr)
+		}
+		return nil
+	}
+	return auxiliaryDeleteError(err)
 }

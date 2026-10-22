@@ -17,6 +17,17 @@ type Service struct {
 	now   func() time.Time
 }
 
+func urgencyText(u domain.Urgency) string {
+	switch u {
+	case domain.Urgent:
+		return "срочно"
+	case domain.Routine:
+		return "в обычном порядке"
+	default:
+		return "не указана"
+	}
+}
+
 func New(store domain.Store) *Service {
 	return &Service{store: store, now: func() time.Time { return time.Now().UTC() }}
 }
@@ -51,6 +62,12 @@ func (s *Service) event(ctx context.Context, tx domain.Tx, t domain.Ticket, acto
 	return tx.AddEvent(ctx, domain.Event{TicketID: t.ID, ActorID: actor, Kind: kind, Data: encode(data), CreatedAt: s.now()})
 }
 func (s *Service) notify(ctx context.Context, tx domain.Tx, t domain.Ticket, text string) error {
+	// A company group chat is the conversation surface itself. The bot does not
+	// post lifecycle messages there: the client only tags to start a ticket and
+	// engineers answer in the same chat.
+	if t.IsGroup() {
+		return nil
+	}
 	return s.enqueue(ctx, tx, t, "notify_client", map[string]string{"text": text})
 }
 
@@ -152,7 +169,7 @@ func (s *Service) create(ctx context.Context, actorID int64, department domain.D
 				t, err = tx.GetTicket(ctx, d.TicketID)
 				return err
 			}
-			if d.Step != "confirm" || !d.Department.Valid() || strings.TrimSpace(d.Text) == "" {
+			if d.Step != "confirm" || !d.Department.Valid() || !d.Urgency.Valid() || strings.TrimSpace(d.Text) == "" {
 				return domain.ErrConflict
 			}
 			department, description = d.Department, d.Text
@@ -165,7 +182,7 @@ func (s *Service) create(ctx context.Context, actorID int64, department domain.D
 			return err
 		}
 		now := s.now()
-		t = domain.Ticket{ClientID: u.ID, CompanyID: u.CompanyID, Department: department, Description: strings.TrimSpace(description), Status: domain.New, RoutingPending: false, CreatedAt: now, UpdatedAt: now}
+		t = domain.Ticket{ClientID: u.ID, CompanyID: u.CompanyID, Department: department, Urgency: d.Urgency, Description: strings.TrimSpace(description), Status: domain.New, RoutingPending: false, CreatedAt: now, UpdatedAt: now}
 		if err := tx.SaveTicket(ctx, &t); err != nil {
 			return err
 		}
@@ -204,8 +221,8 @@ func (s *Service) create(ctx context.Context, actorID int64, department domain.D
 }
 func (s *Service) mutate(ctx context.Context, actorID, ticketID int64, fn func(domain.Tx, domain.User, *domain.Ticket) error, otherUsers ...int64) error {
 	return s.store.Transact(ctx, func(tx domain.Tx) error {
-		// Lock users in ID order before the ticket, including assignment and
-		// reopening. A second user lock after the ticket can create a cycle.
+		// Lock users in ID order before the ticket. A second user lock after
+		// the ticket can create a cycle.
 		ids := append([]int64{actorID}, otherUsers...)
 		slices.Sort(ids)
 		var u domain.User
@@ -242,10 +259,19 @@ func (s *Service) Claim(ctx context.Context, actorID, ticketID int64) error {
 		}
 		t.AssigneeID = u.ID
 		t.Status = domain.InProgress
-		t.RoutingPending = true
-		t.RoutingGeneration++
+		if t.IsGroup() {
+			// The company group is the conversation surface; there is no topic
+			// to prepare and no client notification to send.
+			t.RoutingPending = false
+		} else {
+			t.RoutingPending = true
+			t.RoutingGeneration++
+		}
 		if err := s.save(ctx, tx, t, actorID, "claimed", nil); err != nil {
 			return err
+		}
+		if t.IsGroup() {
+			return s.enqueue(ctx, tx, *t, "refresh_card", nil)
 		}
 		if err := s.activateTopic(ctx, tx, *t); err != nil {
 			return err
@@ -280,6 +306,7 @@ func (s *Service) transfer(ctx context.Context, actorID, ticketID int64, departm
 		}
 		oldDept := t.Department
 		oldChat, oldTopic, oldQueue := t.TopicChatID, t.TopicID, t.QueueMessageID
+		oldQueueMedia := t.QueueMediaType
 		t.Department = department
 		t.Status = domain.New
 		t.AssigneeID = 0
@@ -287,24 +314,28 @@ func (s *Service) transfer(ctx context.Context, actorID, ticketID int64, departm
 		t.TopicChatID = 0
 		t.TopicID = 0
 		t.QueueMessageID = 0
+		t.QueueMediaType = ""
 		t.TopicMessageID = 0
 		if err := s.save(ctx, tx, t, actorID, "transferred", map[string]any{"from": oldDept, "to": department, "reason": reason, "old_chat_id": oldChat, "old_topic_id": oldTopic, "message_id": attachmentID(msg)}); err != nil {
 			return err
 		}
-		if oldChat != 0 && oldTopic != 0 {
-			if err := s.enqueue(ctx, tx, *t, "close_topic", map[string]any{"chat_id": oldChat, "topic_id": oldTopic, "retire": true, "to_department": department}); err != nil {
+		if oldChat != 0 && oldTopic != 0 && !t.IsGroup() {
+			if err := s.enqueue(ctx, tx, *t, "close_topic", map[string]any{"chat_id": oldChat, "topic_id": oldTopic, "retire": true, "from_department": oldDept, "to_department": department}); err != nil {
 				return err
 			}
 		}
 		if oldQueue != 0 {
-			if err := s.enqueue(ctx, tx, *t, "retire_queue_card", map[string]any{"chat_id": oldChat, "message_id": oldQueue, "from_department": oldDept, "to_department": department}); err != nil {
+			if err := s.enqueue(ctx, tx, *t, "retire_queue_card", map[string]any{"chat_id": oldChat, "message_id": oldQueue, "queue_media_type": oldQueueMedia, "from_department": oldDept, "to_department": department}); err != nil {
 				return err
 			}
 		}
 		if err := s.enqueue(ctx, tx, *t, "refresh_card", nil); err != nil {
 			return err
 		}
-		return s.notify(ctx, tx, *t, fmt.Sprintf("Ваше обращение передали в отдел %s\nИнженеры увидели вашу заявку, скоро возьмут в работу!", department.Name()))
+		if !t.Urgency.Valid() {
+			return s.notify(ctx, tx, *t, fmt.Sprintf("Ваше обращение передали в отдел %s\nИнженеры увидели вашу заявку, скоро возьмут в работу!", department.Name()))
+		}
+		return s.notify(ctx, tx, *t, fmt.Sprintf("Ваше обращение передали в отдел «%s».\nСрочность сохранена: %s.\nИнженеры увидели вашу заявку, скоро возьмут в работу!", department.Name(), urgencyText(t.Urgency)))
 	})
 }
 func (s *Service) Close(ctx context.Context, actorID, ticketID int64, resolution string) error {
@@ -338,11 +369,8 @@ func (s *Service) close(ctx context.Context, actorID, ticketID int64, resolution
 		if err := s.save(ctx, tx, t, actorID, "closed", map[string]string{"resolution": t.Resolution}); err != nil {
 			return err
 		}
-		if err := s.completionCleanup(ctx, tx, *t, actorID); err != nil {
-			return err
-		}
-		if t.TopicChatID != 0 && t.TopicID != 0 {
-			if err := s.enqueue(ctx, tx, *t, "close_topic", map[string]any{"chat_id": t.TopicChatID, "topic_id": t.TopicID, "text": "Тикет закрыт инженером"}); err != nil {
+		if t.TopicChatID != 0 && t.TopicID != 0 && !t.IsGroup() {
+			if err := s.enqueue(ctx, tx, *t, "close_topic", map[string]any{"chat_id": t.TopicChatID, "topic_id": t.TopicID, "text": fmt.Sprintf("Заявка #%d закрыта. Итог: %s", t.ID, t.Resolution)}); err != nil {
 				return err
 			}
 		}
@@ -351,50 +379,6 @@ func (s *Service) close(ctx context.Context, actorID, ticketID int64, resolution
 		}
 		return s.notify(ctx, tx, *t, "Заявка закрыта. Результат: "+t.Resolution)
 	})
-}
-func (s *Service) Reopen(ctx context.Context, actorID, ticketID int64) error {
-	snapshot, err := s.store.Ticket(ctx, ticketID)
-	if err != nil {
-		return err
-	}
-	return s.mutate(ctx, actorID, ticketID, func(tx domain.Tx, u domain.User, t *domain.Ticket) error {
-		if t.ClientID != snapshot.ClientID {
-			return domain.ErrConflict
-		}
-		if !u.Approved || (!privileged(u) && (u.Role != "client" || u.ID != t.ClientID)) {
-			return domain.ErrForbidden
-		}
-		if t.Status != domain.Closed || t.ClosedAt == nil {
-			return domain.ErrConflict
-		}
-		if !privileged(u) && s.now().Sub(*t.ClosedAt) > 7*24*time.Hour {
-			return domain.ErrConflict
-		}
-		_, err := tx.ActiveTicket(ctx, t.ClientID)
-		if err == nil {
-			return domain.ErrConflict
-		}
-		if !errors.Is(err, domain.ErrNotFound) {
-			return err
-		}
-		oldChat, oldTopic := t.TopicChatID, t.TopicID
-		t.Status = domain.New
-		t.AssigneeID = 0
-		t.ClosedAt = nil
-		t.ClosedBy = 0
-		t.Resolution = ""
-		t.RoutingPending = false
-		t.TopicChatID = 0
-		t.TopicID = 0
-		t.TopicMessageID = 0
-		if err := s.save(ctx, tx, t, actorID, "reopened", map[string]any{"old_chat_id": oldChat, "old_topic_id": oldTopic, "from": t.Department, "routing_generation": t.RoutingGeneration}); err != nil {
-			return err
-		}
-		if err := s.enqueue(ctx, tx, *t, "refresh_card", nil); err != nil {
-			return err
-		}
-		return s.notify(ctx, tx, *t, "Заявка повторно открыта.")
-	}, snapshot.ClientID)
 }
 func (s *Service) SetWaiting(ctx context.Context, actorID, ticketID int64, waiting bool) error {
 	return s.mutate(ctx, actorID, ticketID, func(tx domain.Tx, u domain.User, t *domain.Ticket) error {
@@ -420,6 +404,11 @@ func (s *Service) AddMessage(ctx context.Context, actorID, ticketID int64, msg d
 		return domain.ErrInvalid
 	}
 	return s.mutate(ctx, actorID, ticketID, func(tx domain.Tx, u domain.User, t *domain.Ticket) error {
+		if t.IsGroup() {
+			// Group messages are recorded by AddGroupMessage; the private relay
+			// path must never publish into a company chat.
+			return domain.ErrInvalid
+		}
 		client := u.Role == "client" && u.Approved && u.ID == t.ClientID && u.CompanyID == t.CompanyID
 		if !client && !team(u, t.Department) {
 			return domain.ErrForbidden
@@ -493,7 +482,8 @@ func (s *Service) EditMessage(ctx context.Context, actorID, ticketID int64, msg 
 	}
 	return s.mutate(ctx, actorID, ticketID, func(tx domain.Tx, u domain.User, t *domain.Ticket) error {
 		client := u.Role == "client" && u.Approved && u.ID == t.ClientID && u.CompanyID == t.CompanyID
-		if !client && !team(u, t.Department) {
+		groupParticipant := t.IsGroup() && msg.TelegramChatID == t.ClientID && (u.Role == "client" || team(u, t.Department))
+		if !client && !groupParticipant && !team(u, t.Department) {
 			return domain.ErrForbidden
 		}
 		msg.TicketID = t.ID
@@ -513,6 +503,11 @@ func (s *Service) EditMessage(ctx context.Context, actorID, ticketID int64, msg 
 			if err := s.enqueue(ctx, tx, *t, "archive_message", msg); err != nil {
 				return err
 			}
+		}
+		if t.IsGroup() {
+			// The edited message already exists in the company chat. There is
+			// nobody to relay it to and no private menu to refresh.
+			return nil
 		}
 		if client && t.Status == domain.New {
 			return s.enqueue(ctx, tx, *t, "refresh_card", nil)
@@ -539,8 +534,8 @@ func (s *Service) EditMessage(ctx context.Context, actorID, ticketID int64, msg 
 }
 
 // Cancel records a client withdrawal separately from an engineer completion.
-// reason is ignored for API compatibility; clients are not asked for one.
-func (s *Service) Cancel(ctx context.Context, actorID, ticketID int64, reason string) error {
+// Clients are not asked for a reason.
+func (s *Service) Cancel(ctx context.Context, actorID, ticketID int64) error {
 	return s.mutate(ctx, actorID, ticketID, func(tx domain.Tx, u domain.User, t *domain.Ticket) error {
 		owner := u.Approved && u.Role == "client" && u.ID == t.ClientID && u.CompanyID == t.CompanyID
 		if !owner && !privileged(u) {
@@ -561,11 +556,8 @@ func (s *Service) Cancel(ctx context.Context, actorID, ticketID int64, reason st
 		if err := s.save(ctx, tx, t, actorID, "cancelled", nil); err != nil {
 			return err
 		}
-		if err := s.completionCleanup(ctx, tx, *t, actorID); err != nil {
-			return err
-		}
-		if t.TopicChatID != 0 && t.TopicID != 0 {
-			if err := s.enqueue(ctx, tx, *t, "close_topic", map[string]int64{"chat_id": t.TopicChatID, "topic_id": t.TopicID}); err != nil {
+		if t.TopicChatID != 0 && t.TopicID != 0 && !t.IsGroup() {
+			if err := s.enqueue(ctx, tx, *t, "close_topic", map[string]any{"chat_id": t.TopicChatID, "topic_id": t.TopicID, "text": fmt.Sprintf("Заявка #%d отменена.", t.ID)}); err != nil {
 				return err
 			}
 		}
@@ -612,6 +604,9 @@ func (s *Service) Assign(ctx context.Context, actorID, ticketID, engineerID int6
 
 // activateTopic is called only when an engineer explicitly takes a queued request.
 func (s *Service) activateTopic(ctx context.Context, tx domain.Tx, t domain.Ticket) error {
+	if t.IsGroup() {
+		return nil
+	}
 	if t.TopicChatID != 0 && t.TopicID != 0 {
 		return s.enqueue(ctx, tx, t, "reopen_topic", map[string]any{"routing_generation": t.RoutingGeneration})
 	}
@@ -644,16 +639,6 @@ func (s *Service) actionAttachment(ctx context.Context, tx domain.Tx, t domain.T
 	}
 	*input = msg
 	return s.enqueue(ctx, tx, t, "archive_message", msg)
-}
-
-// completionCleanup records only new explicit completion intents; historical
-// closed tickets receive no implicit cleanup request.
-func (s *Service) completionCleanup(ctx context.Context, tx domain.Tx, t domain.Ticket, actorID int64) error {
-	if t.TopicChatID == 0 || t.TopicID == 0 {
-		return nil
-	}
-	key := fmt.Sprintf("completion:%d:%d:%d:%d", t.ID, t.RoutingGeneration, t.TopicChatID, t.TopicID)
-	return s.event(ctx, tx, t, actorID, "completion_cleanup_requested", map[string]any{"chat_id": t.TopicChatID, "topic_id": t.TopicID, "routing_generation": t.RoutingGeneration, "completion_key": key})
 }
 
 func attachmentID(msg *domain.Message) int64 {

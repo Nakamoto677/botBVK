@@ -52,8 +52,8 @@ func (s Store) Refresh(ctx context.Context, opts Options) (result Snapshot, err 
 		}
 	}()
 	var locked bool
-	// 731903 belongs to the bot's inbox/archive fence. Analytics must not hold
-	// that lock while calculating and publishing a potentially large snapshot.
+	// Analytics uses its own advisory key, separate from bot migrations and
+	// singleton control, while publishing a potentially large snapshot.
 	if err = tx.QueryRow(ctx, "SELECT pg_try_advisory_xact_lock(731904)").Scan(&locked); err != nil {
 		return result, err
 	}
@@ -194,7 +194,14 @@ func publish(ctx context.Context, tx pgx.Tx, s Snapshot) error {
 	if err := copyRows(ctx, tx, "companies", []string{"id", "name"}, rows); err != nil {
 		return err
 	}
-	rows = [][]any{{"it", "IT"}, {"1c", "1С"}, {"installation", "Монтаж"}, {"field", "Выезд"}}
+	departments := s.Departments
+	if departments == nil {
+		departments = domain.Departments()
+	}
+	rows = nil
+	for _, department := range departments {
+		rows = append(rows, []any{string(department), department.Name()})
+	}
 	if err := copyRows(ctx, tx, "departments", []string{"code", "name"}, rows); err != nil {
 		return err
 	}

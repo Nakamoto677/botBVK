@@ -39,6 +39,9 @@ var companySyncMigration string
 //go:embed burst_delivery.sql
 var burstDeliveryMigration string
 
+//go:embed persistent_topics.sql
+var persistentTopicsMigration string
+
 type Store struct{ pool *pgxpool.Pool }
 type transaction struct{ tx pgx.Tx }
 
@@ -129,6 +132,16 @@ func (s *Store) Migrate(ctx context.Context) error {
 		}
 		if marker.RowsAffected() != 0 {
 			_, err = tx.Exec(ctx, burstDeliveryMigration)
+		}
+		if err != nil {
+			return err
+		}
+		marker, err = tx.Exec(ctx, "INSERT INTO bvk_migrations(version) VALUES('009_persistent_topics') ON CONFLICT DO NOTHING")
+		if err != nil {
+			return err
+		}
+		if marker.RowsAffected() != 0 {
+			_, err = tx.Exec(ctx, persistentTopicsMigration)
 		}
 		return err
 	})
@@ -238,6 +251,9 @@ func (t *transaction) SaveTicket(ctx context.Context, v *domain.Ticket) error {
 	copy := *v
 	if copy.ID == 0 {
 		if _, err := t.tx.Exec(ctx, "SELECT pg_advisory_xact_lock(-$1::bigint)", copy.ClientID); err != nil {
+			return err
+		}
+		if _, err := t.tx.Exec(ctx, "INSERT INTO bvk_client_numbers(client_id) VALUES($1) ON CONFLICT DO NOTHING", copy.ClientID); err != nil {
 			return err
 		}
 		if err := t.tx.QueryRow(ctx, "SELECT nextval(pg_get_serial_sequence('bvk_tickets','id'))").Scan(&copy.ID); err != nil {
@@ -382,6 +398,7 @@ func (t *transaction) Enqueue(ctx context.Context, v domain.Operation) error {
 	// "engineer took your ticket" notice behind the whole topic setup.
 	if _, err := t.tx.Exec(ctx, `INSERT INTO bvk_outbox(kind,ticket_id,payload,available_at,conversation_id)
 		VALUES($1,$2,$3,COALESCE($4::timestamptz,now()),COALESCE(
+			CASE WHEN $1 = ANY(ARRAY['create_topic','reopen_topic','close_topic']::text[]) THEN -(SELECT client_id FROM bvk_tickets WHERE id=$2) END,
 			NULLIF(($3::jsonb->>'user_id')::bigint,0),
 			CASE WHEN ($3::jsonb->>'chat_id')::bigint>0 THEN ($3::jsonb->>'chat_id')::bigint END,
 			CASE WHEN $1 = ANY($5::text[]) THEN (SELECT client_id FROM bvk_tickets WHERE id=$2) END,
@@ -447,7 +464,7 @@ func (s *Store) TopicTicket(ctx context.Context, chatID, topicID int64) (domain.
 	if topicID == 0 {
 		return domain.Ticket{}, domain.ErrNotFound
 	}
-	return readJSON[domain.Ticket](ctx, s.pool, "SELECT payload FROM bvk_tickets WHERE topic_chat_id=$1 AND topic_id=$2", chatID, topicID)
+	return readJSON[domain.Ticket](ctx, s.pool, "SELECT payload FROM bvk_tickets WHERE topic_chat_id=$1 AND topic_id=$2 AND status IN ('in_progress','waiting_client') ORDER BY id DESC LIMIT 1", chatID, topicID)
 }
 func (s *Store) Tickets(ctx context.Context) ([]domain.Ticket, error) {
 	return listJSON[domain.Ticket](ctx, s.pool, "SELECT payload FROM bvk_tickets ORDER BY id")
@@ -500,24 +517,14 @@ func (s *Store) AccessRequests(ctx context.Context) ([]domain.AccessRequest, err
 	return result, rows.Err()
 }
 func (s *Store) SaveUpdate(ctx context.Context, id int64, payload json.RawMessage) (bool, error) {
-	var inserted bool
-	err := s.Transact(ctx, func(tx domain.Tx) error {
-		raw := tx.(*transaction).tx
-		if _, err := raw.Exec(ctx, "SELECT pg_advisory_xact_lock_shared(731903)"); err != nil {
-			return err
-		}
-		tag, err := raw.Exec(ctx, "INSERT INTO bvk_updates(id,payload) VALUES($1,$2) ON CONFLICT(id) DO NOTHING", id, payload)
-		inserted = tag.RowsAffected() == 1
-		return err
-	})
-	return inserted, err
+	tag, err := s.pool.Exec(ctx, "INSERT INTO bvk_updates(id,payload) VALUES($1,$2) ON CONFLICT(id) DO NOTHING", id, payload)
+	return tag.RowsAffected() == 1, err
 }
 func (s *Store) PendingUpdates(ctx context.Context, limit int) ([]domain.StoredUpdate, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	// Quarantined updates stay unfinished so that CleanupSettled and CleanupFence
-	// keep protecting the archive, but they must not order anyone else. An update
+	// Quarantined updates stay unfinished, but they must not order anyone else. An update
 	// that can never succeed would otherwise block its actor's lane forever, with
 	// no way out: it is never selected and nothing clears the flag. Only work that
 	// can still run takes part in the dependency check.
@@ -639,7 +646,11 @@ func (s *Store) MessageTicket(ctx context.Context, telegramChatID, telegramMessa
 	if telegramMessageID == 0 {
 		return domain.Ticket{}, domain.ErrInvalid
 	}
-	matches, err := listJSON[domain.Ticket](ctx, s.pool, `SELECT t.payload FROM bvk_tickets t JOIN (SELECT DISTINCT ticket_id FROM bvk_messages WHERE telegram_chat_id=$1 AND telegram_message_id=$2) source ON source.ticket_id=t.id ORDER BY t.id LIMIT 2`, telegramChatID, telegramMessageID)
+	matches, err := listJSON[domain.Ticket](ctx, s.pool, `SELECT t.payload FROM bvk_tickets t JOIN (
+		SELECT DISTINCT ticket_id FROM bvk_messages WHERE telegram_chat_id=$1 AND telegram_message_id=$2
+		UNION SELECT id FROM bvk_tickets WHERE topic_chat_id=$1 AND (payload->>'topic_message_id')::bigint=$2
+		UNION SELECT ticket_id FROM bvk_events WHERE (payload->>'Kind') IN ('message_delivered','topic_closing_notice') AND COALESCE((payload->'Data'->>'telegram_chat_id')::bigint,(payload->'Data'->>'chat_id')::bigint)=$1 AND COALESCE((payload->'Data'->>'telegram_message_id')::bigint,(payload->'Data'->>'message_id')::bigint)=$2
+	) source ON source.ticket_id=t.id ORDER BY t.id LIMIT 2`, telegramChatID, telegramMessageID)
 	if err != nil {
 		return domain.Ticket{}, err
 	}

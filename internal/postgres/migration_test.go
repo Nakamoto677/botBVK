@@ -299,18 +299,12 @@ func TestCardRefreshMigrationRunsAfterRoutingUpgrade(t *testing.T) {
 	}
 }
 
-func TestCompletionMigrationRetainsHistoricalTopics(t *testing.T) {
+func TestPersistentTopicsMigrationDisablesAllQueuedDeletes(t *testing.T) {
 	s := testStore(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	v := seed(t, s)
-	if _, err := s.pool.Exec(ctx, `DELETE FROM bvk_migrations WHERE version='004_completion_cleanup'`); err != nil {
-		t.Fatal(err)
-	}
 	if err := s.Transact(ctx, func(tx domain.Tx) error {
-		if err := tx.AddEvent(ctx, domain.Event{TicketID: v.ID, Kind: "completion_cleanup_requested", Data: json.RawMessage(`{"completion_key":"new-intent","chat_id":-10,"topic_id":9}`)}); err != nil {
-			return err
-		}
-		for _, raw := range []string{`{"chat_id":-10,"topic_id":8}`, `{"completion_key":"new-intent","chat_id":-10,"topic_id":9}`} {
+		for _, raw := range []string{`{"chat_id":-10,"topic_id":8}`, `{"chat_id":-10,"topic_id":9,"completion_key":"old"}`} {
 			if err := tx.Enqueue(ctx, domain.Operation{TicketID: v.ID, Kind: "delete_topic", Payload: json.RawMessage(raw)}); err != nil {
 				return err
 			}
@@ -319,18 +313,18 @@ func TestCompletionMigrationRetainsHistoricalTopics(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.pool.Exec(ctx, `DELETE FROM bvk_migrations WHERE version='009_persistent_topics'`); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
-	var historical, current string
-	if err := s.pool.QueryRow(ctx, `SELECT state FROM bvk_outbox WHERE kind='delete_topic' AND payload->>'topic_id'='8'`).Scan(&historical); err != nil {
+	var pending int
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM bvk_outbox WHERE kind='delete_topic' AND state<>'done'`).Scan(&pending); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.pool.QueryRow(ctx, `SELECT state FROM bvk_outbox WHERE kind='delete_topic' AND payload->>'topic_id'='9'`).Scan(&current); err != nil {
-		t.Fatal(err)
-	}
-	if historical != "done" || current != "pending" {
-		t.Fatalf("historical=%s new=%s", historical, current)
+	if pending != 0 {
+		t.Fatalf("queued topic deletions remain: %d", pending)
 	}
 }
 

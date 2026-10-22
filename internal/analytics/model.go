@@ -79,6 +79,7 @@ type Interval struct {
 
 type Snapshot struct {
 	At              time.Time
+	Departments     []domain.Department
 	Tickets         []Ticket
 	Cycles          []Cycle
 	Events          []Event
@@ -91,6 +92,7 @@ type Snapshot struct {
 type Options struct {
 	Calendar                                     tickets.Calendar
 	FirstResponseMinutes, IdleHours, WaitingDays int
+	Departments                                  []domain.Department
 }
 
 func OptionsFromConfig(c config.Config) Options {
@@ -100,5 +102,11 @@ func OptionsFromConfig(c config.Config) Options {
 	for _, day := range c.Holidays {
 		cal.Holidays[day] = true
 	}
-	return Options{cal, c.FirstResponseMinutes, c.IdleHours, c.WaitingDays}
+	departments := make([]domain.Department, 0, len(c.Departments))
+	for _, department := range domain.Departments() {
+		if _, configured := c.Departments[department]; configured {
+			departments = append(departments, department)
+		}
+	}
+	return Options{Calendar: cal, FirstResponseMinutes: c.FirstResponseMinutes, IdleHours: c.IdleHours, WaitingDays: c.WaitingDays, Departments: departments}
 }

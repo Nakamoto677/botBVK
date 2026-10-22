@@ -62,7 +62,7 @@ func (a *Adapter) beginStaffPrompt(ctx context.Context, c *Callback, id int64, a
 		return err
 	}
 	buttons := [][]Button{}
-	for _, d := range domain.Departments() {
+	for _, d := range a.configuredDepartments() {
 		if d != t.Department {
 			buttons = append(buttons, []Button{{Text: departmentName(d), Data: fmt.Sprintf("transferdept:%d:%s", id, d)}})
 		}
@@ -140,10 +140,10 @@ func (a *Adapter) promptCallback(ctx context.Context, c *Callback, action string
 	}
 	if action == "promptcancel" {
 		a.finishPrompt(ctx, key, p)
-		return nil
+		return a.declineNotice(ctx, c, p)
 	}
 	if action == "transferdept" {
-		if p.Action != "transfer" || p.Phase != "department" || len(parts) != 3 || !domain.Department(parts[2]).Valid() || domain.Department(parts[2]) == p.SourceDepartment {
+		if p.Action != "transfer" || p.Phase != "department" || len(parts) != 3 || !a.departmentEnabled(domain.Department(parts[2])) || domain.Department(parts[2]) == p.SourceDepartment {
 			return domain.ErrInvalid
 		}
 		p.Department = domain.Department(parts[2])
@@ -167,18 +167,41 @@ func (a *Adapter) promptCallback(ctx context.Context, c *Callback, action string
 			return domain.ErrConflict
 		}
 		service, ok := a.service.(interface {
-			Cancel(context.Context, int64, int64, string) error
+			Cancel(context.Context, int64, int64) error
 		})
 		if !ok {
 			return domain.ErrInvalid
 		}
-		if err = service.Cancel(ctx, c.From.ID, id, ""); err != nil {
+		if err = service.Cancel(ctx, c.From.ID, id); err != nil {
 			return err
 		}
 		a.finishPrompt(ctx, key, p)
 		return nil
 	}
 	return domain.ErrInvalid
+}
+
+// Declining a confirmation only deletes the question, so the user used to face
+// an empty chat with no way to tell whether the action had run. Every decline
+// ends with a service receipt describing the state the ticket is really in; it
+// is registered under the action scenario and disappears with the next cleanup.
+func (a *Adapter) declineNotice(ctx context.Context, c *Callback, p prompt) error {
+	text := fmt.Sprintf("Действие отменено — заявка #%d не изменилась.", p.TicketID)
+	t, err := a.store.Ticket(ctx, p.TicketID)
+	switch {
+	case err != nil:
+		// The prompt is already finished; a store hiccup must not turn the
+		// acknowledgement into "action unavailable".
+	case !t.Status.Active():
+		text = fmt.Sprintf("Заявка #%d уже завершена — отменять нечего.", p.TicketID)
+	case p.Action == "cancel":
+		text = fmt.Sprintf(clientCancelDeclinedText, p.TicketID)
+	case p.Action == "close":
+		text = fmt.Sprintf("Закрытие отменено — заявка #%d остаётся открытой.", p.TicketID)
+	case p.Action == "transfer":
+		text = fmt.Sprintf("Передача отменена — заявка #%d осталась в текущем отделе.", p.TicketID)
+	}
+	return a.sayAux(ctx, c.Message, c.From.ID, actionScenario(p.TicketID), text, nil)
 }
 func (a *Adapter) consumePrompt(ctx context.Context, m *Message, u domain.User) (bool, error) {
 	key := scope(m.From.ID, m)

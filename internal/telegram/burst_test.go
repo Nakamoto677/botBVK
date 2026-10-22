@@ -23,7 +23,7 @@ func TestBurstDraftKeepsAllMessagesAndOnlyLatestPreview(t *testing.T) {
 	ctx := t.Context()
 	client, capture := capturedClient()
 	a := NewAdapter(client, store, tickets.New(store), Config{})
-	if err := store.PutDraft(ctx, 1, draft{Generation: "initial", Step: "description", Department: domain.IT}); err != nil {
+	if err := store.PutDraft(ctx, 1, draft{Generation: "initial", Step: "description", Department: domain.IT, Urgency: domain.Routine}); err != nil {
 		t.Fatal(err)
 	}
 	messages := []Message{
@@ -94,7 +94,7 @@ func TestBurstDraftKeepsAllMessagesAndOnlyLatestPreview(t *testing.T) {
 		if strings.HasPrefix(text, "Вложений принято:") {
 			t.Fatal("outdated request for description", text)
 		}
-		if strings.HasPrefix(text, "Создать заявку?") {
+		if strings.HasPrefix(text, "Проверьте заявку перед отправкой") {
 			previews++
 			if !strings.Contains(text, d.Text) || !strings.Contains(text, "Вложений принято: 4") {
 				t.Fatal(text)

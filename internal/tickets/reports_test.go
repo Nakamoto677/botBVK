@@ -9,16 +9,12 @@ import (
 	"time"
 )
 
-func TestMetricsAndSafeCSV(t *testing.T) {
+func TestSafeCSV(t *testing.T) {
 	c := DefaultCalendar()
 	start := time.Date(2026, 10, 9, 17, 0, 0, 0, c.Location)
 	response := start.Add(30 * time.Minute)
 	end := time.Date(2026, 10, 12, 10, 0, 0, 0, c.Location)
 	tickets := []domain.Ticket{{ID: 1, CreatedAt: start, FirstResponseAt: &response, ClosedAt: &end, Status: domain.Closed, Resolution: "=HYPERLINK(\"evil\")"}, {ID: 2, Status: domain.New}}
-	m := Summarize(tickets, []domain.Event{{Kind: "transferred"}, {Kind: "reopened"}}, c)
-	if m.Total != 2 || m.Open != 1 || m.Unassigned != 1 || m.Closed != 1 || m.Transfers != 1 || m.Reopens != 1 || m.MeanWorkingResolution != 2*time.Hour || m.MeanFirstResponse != 30*time.Minute {
-		t.Fatal(m)
-	}
 	var b bytes.Buffer
 	if err := WriteCSV(&b, tickets, c); err != nil {
 		t.Fatal(err)

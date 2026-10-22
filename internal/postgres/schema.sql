@@ -7,7 +7,6 @@ CREATE TABLE IF NOT EXISTS bvk_tickets (
  version bigint NOT NULL, topic_chat_id bigint NOT NULL DEFAULT 0, topic_id bigint NOT NULL DEFAULT 0, payload jsonb NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS bvk_active_client ON bvk_tickets(client_id) WHERE status IN ('new','in_progress','waiting_client');
-CREATE UNIQUE INDEX IF NOT EXISTS bvk_topic ON bvk_tickets(topic_chat_id,topic_id) WHERE topic_id <> 0;
 CREATE TABLE IF NOT EXISTS bvk_messages (id bigserial PRIMARY KEY, ticket_id bigint NOT NULL REFERENCES bvk_tickets(id), telegram_chat_id bigint NOT NULL DEFAULT 0, telegram_message_id bigint NOT NULL DEFAULT 0, direction text NOT NULL DEFAULT '', payload jsonb NOT NULL);
 CREATE UNIQUE INDEX IF NOT EXISTS bvk_message_source ON bvk_messages(telegram_chat_id,telegram_message_id,direction) WHERE telegram_message_id<>0;
 CREATE INDEX IF NOT EXISTS bvk_messages_ticket ON bvk_messages(ticket_id,id);

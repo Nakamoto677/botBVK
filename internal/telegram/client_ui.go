@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"log"
 	"strings"
+
+	"bot-bvk/internal/tickets"
 )
 
 const clientAcceptedText = "Заявка принята!\nВ ближайшее время в этот чат вам ответит специалист)"
 const clientFinishedText = "Рады, что ваша проблема решилась)\nОбращайтесь в любое время, мы всегда рады помочь!"
+const clientCancelDeclinedText = "Заявка #%d остаётся открытой.\nПродолжайте переписку — ваша заявка и её переписка актуальны в этом чате."
 const clientCancelDraftLabel = "Отменить подачу заявки"
 
 var clientDraftKeyboard = [][]string{{clientCancelDraftLabel}}
@@ -19,7 +22,7 @@ var clientActiveKeyboard = [][]string{{"Отменить заявку"}}
 // Client menus are contextual; the staff keyboard builders are independent.
 // The markup shape itself is shared with SendKeyboard through replyKeyboard.
 func clientReplyMarkup(keyboard [][]string) map[string]any { return replyKeyboard(keyboard) }
-func clientTicketScenario(id int64) string { return fmt.Sprintf("client_ticket:%d", id) }
+func clientTicketScenario(id int64) string                 { return fmt.Sprintf("client_ticket:%d", id) }
 func (a *Adapter) clientScreen(ctx context.Context, m *Message, scenario, text string, keyboard [][]string) error {
 	if a.activeUpdate != 0 {
 		return a.queueScreen(ctx, m, m.Chat.ID, scenario, text, clientReplyMarkup(keyboard))
@@ -45,7 +48,7 @@ func (a *Adapter) clientMenu(ctx context.Context, m *Message, u domain.User) err
 	if d, exists, err := a.getDraft(ctx, u.ID); err != nil {
 		return err
 	} else if exists && d.Step != "submitted" {
-		return a.clientScreen(ctx, m, "draft", "Опишите проблему или отмените подачу заявки", clientDraftKeyboard)
+		return a.resumeDraft(ctx, m)
 	}
 	return a.clientHome(ctx, m, "Чем можем помочь?")
 }
@@ -62,6 +65,11 @@ func (a *Adapter) cancelClientDraft(ctx context.Context, m *Message) error {
 	return a.clientHome(ctx, m, "Подача заявки отменена. Вы можете создать новую!")
 }
 func (w *Worker) clientNotification(ctx context.Context, t domain.Ticket, text string) error {
+	if t.IsGroup() {
+		// Group intake is intentionally silent. This guard also protects old
+		// queued operations from ever sending a private menu into a company chat.
+		return nil
+	}
 	accepted := text == "Заявка принята и поставлена в очередь" || text == "Заявка принята и поставлена в очередь."
 	cancelled := text == "Заявка завершена по вашему запросу" || text == "Заявка завершена по вашему запросу."
 	// An older queued notification must never restore an active menu after completion.
@@ -79,6 +87,20 @@ func (w *Worker) clientNotification(ctx context.Context, t domain.Ticket, text s
 			}
 		}
 		text = clientAcceptedText
+		if t.Urgency.Valid() {
+			level := urgencyLabel(t.Urgency)
+			text = fmt.Sprintf("Заявка #%d принята.\n\nСрочность: %s.\nСпециалист ответит в этом чате.", t.ID, level)
+			if t.Urgency == domain.Urgent {
+				text = fmt.Sprintf("Заявка #%d принята.\n\nСрочность: %s.\nОтдел %s уведомлён. Специалист ответит в этом чате.", t.ID, level, t.Department.Name())
+			}
+			calendar := tickets.DefaultCalendar()
+			if w.cfg.EndHour > w.cfg.StartHour {
+				calendar.StartHour, calendar.EndHour = w.cfg.StartHour, w.cfg.EndHour
+			}
+			if !calendar.IsWorking(t.CreatedAt) {
+				text += fmt.Sprintf("\n\nПоддержка работает по будням с %02d:00 до %02d:00 по иркутскому времени. Заявка зарегистрирована; её обработка начнётся в рабочее время.", calendar.StartHour, calendar.EndHour)
+			}
+		}
 	}
 	if !t.Status.Active() {
 		keyboard = clientKeyboard
@@ -156,6 +178,7 @@ func clientAuxScenario(m *Message, scenario, text string) string {
 		return "client_kept"
 	}
 	if (strings.HasPrefix(text, "Ваше обращение передали в отдел ") && strings.HasSuffix(text, "\nИнженеры увидели вашу заявку, скоро возьмут в работу!")) ||
+		(strings.HasPrefix(text, "Заявка #") && strings.Contains(text, " принята.\n\nСрочность:")) ||
 		(strings.HasPrefix(text, "Инженер ") && strings.HasSuffix(text, "\nВаша переписка продолжится прямо в этом чате:")) {
 		return "client_kept"
 	}
