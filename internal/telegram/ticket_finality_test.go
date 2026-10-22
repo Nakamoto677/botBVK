@@ -163,7 +163,7 @@ func TestUrgentAcceptanceDoesNotWaitForTheQueueCard(t *testing.T) {
 		t.Fatal("client was not told that the ticket was accepted")
 	}
 	text, _ := capture.bodies[0]["text"].(string)
-	if !strings.HasPrefix(text, "Заявка #7 принята.") || !strings.Contains(text, "🔴 Срочно") {
+	if !strings.HasPrefix(text, "Заявка №7 принята") || !strings.Contains(text, "Срочность: Срочно") {
 		t.Fatalf("acceptance text = %q", text)
 	}
 }

@@ -76,6 +76,19 @@ func TestGroupTagCreatesTicketWithoutBotMessage(t *testing.T) {
 	}
 }
 
+func TestGroupReceiptIsOptional(t *testing.T) {
+	client, capture := capturedClient()
+	service := &groupAdapterService{}
+	a := groupTestAdapter(client, &adapterStore{}, service)
+	a.cfg.GroupReceipt = true
+	if err := a.Handle(context.Background(), Update{Message: groupTestMessage("#it Не работает VPN", 55)}); err != nil {
+		t.Fatal(err)
+	}
+	if len(capture.bodies) != 1 || capture.bodies[0]["text"] != "Заявка №7 создана для отдела IT. Ответим здесь." {
+		t.Fatalf("group receipt: %v", capture.bodies)
+	}
+}
+
 func TestGroupUrgentTagAndAttachment(t *testing.T) {
 	store := &adapterStore{}
 	service := &groupAdapterService{}

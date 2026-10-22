@@ -63,17 +63,16 @@ func TestMinimalClientFlowDraftCancelAcceptedAndFinished(t *testing.T) {
 		}
 	}
 	send("/start")
-	assertReplyLabels(t, (*requests)[len(*requests)-1], "Создать заявку", "Помощь")
+	assertReplyLabels(t, (*requests)[len(*requests)-1], "Создать заявку", "Мои заявки", "Помощь")
 	send("Создать заявку")
-	assertReplyLabels(t, (*requests)[len(*requests)-2], clientCancelDraftLabel)
 	raw, _ := json.Marshal((*requests)[len(*requests)-1]["reply_markup"])
 	var options Markup
 	json.Unmarshal(raw, &options)
-	if len(options.Buttons) != 3 || len(options.Buttons[0]) != 2 || len(options.Buttons[1]) != 2 {
+	if len(options.Buttons) != 3 || len(options.Buttons[0]) != 2 || len(options.Buttons[1]) != 2 || !strings.Contains(string(raw), clientCancelDraftLabel) {
 		t.Fatal(string(raw))
 	}
-	send(clientCancelDraftLabel)
-	assertReplyLabels(t, (*requests)[len(*requests)-1], "Создать заявку", "Помощь")
+	callback("cancel:" + a.drafts[1].Generation)
+	assertReplyLabels(t, (*requests)[len(*requests)-1], "Создать заявку", "Мои заявки", "Помощь")
 	if svc.createCalls != 0 || len(a.drafts) != 0 {
 		t.Fatal("draft cancellation created ticket")
 	}
@@ -97,6 +96,20 @@ func TestMinimalClientFlowDraftCancelAcceptedAndFinished(t *testing.T) {
 	if a.drafts[1].Step != "confirm" || a.drafts[1].Urgency != domain.Routine || a.drafts[1].Text != previous.Text || a.drafts[1].Generation == previous.Generation {
 		t.Fatal("urgency change did not preserve draft or invalidate old buttons")
 	}
+	callback("changedescription:" + a.drafts[1].Generation)
+	if a.drafts[1].Step != "edit_description" || a.drafts[1].Text != previous.Text {
+		t.Fatal("description edit lost saved text")
+	}
+	m.ID++ // Telegram assigns a new message ID to the replacement text.
+	send("Не включается монитор")
+	if a.drafts[1].Step != "confirm" || a.drafts[1].Text != "Не включается монитор" {
+		t.Fatal("description edit did not replace old text")
+	}
+	callback("changedepartment:" + a.drafts[1].Generation)
+	callback("new:1c:" + a.drafts[1].Generation)
+	if a.drafts[1].Step != "confirm" || a.drafts[1].Department != domain.OneC || a.drafts[1].Text != "Не включается монитор" || a.drafts[1].Urgency != domain.Routine {
+		t.Fatal("department edit reset the reviewed draft")
+	}
 	raw, _ = json.Marshal((*requests)[len(*requests)-1]["reply_markup"])
 	if !strings.Contains(string(raw), clientCancelDraftLabel) || !strings.Contains(string(raw), "submit") {
 		t.Fatal(string(raw))
@@ -108,6 +121,9 @@ func TestMinimalClientFlowDraftCancelAcceptedAndFinished(t *testing.T) {
 	}
 	if len(a.drafts) != 1 {
 		t.Fatal("failure removed retry UI")
+	}
+	if got := (*requests)[len(*requests)-1]["text"]; got != "Не удалось отправить заявку. Черновик сохранён. Попробуйте ещё раз или откройте его через /form." {
+		t.Fatalf("failed submission left no retry guidance: %v", got)
 	}
 	svc.createErr = nil
 	callback("submit:" + a.drafts[1].Generation)
@@ -123,9 +139,9 @@ func TestMinimalClientFlowDraftCancelAcceptedAndFinished(t *testing.T) {
 	if last["text"] != clientAcceptedText {
 		t.Fatal(last)
 	}
-	assertReplyLabels(t, last, "Отменить заявку")
-	send("Отменить заявку")
-	if (*requests)[len(*requests)-1]["text"] != "Точно проблема решена?" {
+	assertReplyLabels(t, last, "Мои заявки", "Завершить заявку")
+	send("Завершить заявку")
+	if (*requests)[len(*requests)-1]["text"] != "Завершить заявку №7?\nПереписка сохранится в истории. Если помощь ещё нужна, оставьте заявку открытой." {
 		t.Fatal("wrong confirmation")
 	}
 	parts := currentParts(s)
@@ -136,15 +152,35 @@ func TestMinimalClientFlowDraftCancelAcceptedAndFinished(t *testing.T) {
 		t.Fatal(err)
 	}
 	last = (*requests)[len(*requests)-1]
-	if last["text"] != clientFinishedText {
+	if last["text"] != "Заявка №7 завершена по вашему запросу. Если помощь снова понадобится, создайте новую заявку." {
 		t.Fatal(last)
 	}
-	assertReplyLabels(t, last, "Создать заявку", "Помощь")
+	assertReplyLabels(t, last, "Создать заявку", "Мои заявки", "Помощь")
 	if len(s.aux[auxKey{1, 1, 0, "client_home"}]) != 1 {
 		t.Fatalf("auxiliary UI retained: %v", s.aux)
 	}
 	if len(s.storedMessages) != 1 || s.storedMessages[0].ID != 44 {
 		t.Fatal("history deleted")
+	}
+}
+
+func TestMenuAndStartPreserveDraft(t *testing.T) {
+	a, s, _, m, requests := clientUIFixture(t)
+	s.ticket = domain.Ticket{}
+	m.Text = "/new"
+	if err := a.Handle(context.Background(), Update{Message: m}); err != nil {
+		t.Fatal(err)
+	}
+	original := a.drafts[1]
+	for _, command := range []string{"/menu", "/start"} {
+		m.Text = command
+		if err := a.Handle(context.Background(), Update{Message: m}); err != nil {
+			t.Fatal(err)
+		}
+		if a.drafts[1].Generation != original.Generation || a.drafts[1].Step != "department" {
+			t.Fatalf("%s removed draft", command)
+		}
+		assertReplyLabels(t, (*requests)[len(*requests)-1], "Продолжить заявку", "Удалить черновик")
 	}
 }
 func TestStaleDraftCancelAndDepartmentCannotAffectActiveTicket(t *testing.T) {
@@ -184,7 +220,7 @@ func TestLateApprovalPreservesActiveMenuAndRegistersTemporaryMessage(t *testing.
 	if err := w.clientAccessNotification(context.Background(), 1, "Доступ одобрен"); err != nil {
 		t.Fatal(err)
 	}
-	assertReplyLabels(t, (*requests)[len(*requests)-1], "Отменить заявку")
+	assertReplyLabels(t, (*requests)[len(*requests)-1], "Мои заявки", "Завершить заявку")
 	if len(s.aux[auxKey{1, 1, 0, clientTicketScenario(7)}]) != 1 {
 		t.Fatal("approval notification not tracked")
 	}

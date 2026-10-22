@@ -97,11 +97,11 @@ func TestCancelConfirmationDeclineRestartRepeatAndCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	last := (*requests)[len(*requests)-1]
-	if last["text"] != "Точно проблема решена?" {
+	if last["text"] != "Завершить заявку №7?\nПереписка сохранится в истории. Если помощь ещё нужна, оставьте заявку открытой." {
 		t.Fatal(last)
 	}
 	raw, _ := json.Marshal(last["reply_markup"])
-	if !strings.Contains(string(raw), "Да, завершить") || !strings.Contains(string(raw), "Нет, продолжить") {
+	if !strings.Contains(string(raw), "Завершить заявку") || !strings.Contains(string(raw), "Оставить открытой") {
 		t.Fatal(string(raw))
 	}
 	if err := a.promptCallback(ctx, &Callback{From: Person{ID: 1}, Message: m}, "promptcancel", 7, currentParts(s)); err != nil {
@@ -222,7 +222,7 @@ func TestCancelCommandWithoutReasonStartsConfirmation(t *testing.T) {
 	if err := a.ticketCommand(context.Background(), m); err != nil {
 		t.Fatal(err)
 	}
-	if svc.calls != 0 || (*requests)[len(*requests)-1]["text"] != "Точно проблема решена?" {
+	if svc.calls != 0 || (*requests)[len(*requests)-1]["text"] != "Завершить заявку №7?\nПереписка сохранится в истории. Если помощь ещё нужна, оставьте заявку открытой." {
 		t.Fatal("command bypassed confirmation")
 	}
 }

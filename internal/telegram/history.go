@@ -92,8 +92,11 @@ func (a *Adapter) historyPage(ctx context.Context, m *Message, u domain.User, t 
 		}
 	}
 	headerButtons := clientTicketButtons(t)
+	if u.Role == "client" {
+		headerButtons[0] = []Button{{Text: "К списку заявок", Data: "tickets:0:0"}}
+	}
 	if u.Role != "client" {
-		headerButtons = [][]Button{{{Text: "История", Data: fmt.Sprintf("history:%d", t.ID)}}}
+		headerButtons = [][]Button{{{Text: "К списку заявок", Data: "tickets:0:0"}}}
 		team := a.cfg.Departments[t.Department]
 		target := t.TopicMessageID
 		if target == 0 {
@@ -165,13 +168,13 @@ func (a *Adapter) historyPage(ctx context.Context, m *Message, u domain.User, t 
 		return domain.ErrInvalid
 	}
 	p := pages[page]
-	p.text = fmt.Sprintf("История #%d · страница %d/%d\n\n", t.ID, page+1, len(pages)) + p.text
+	p.text = fmt.Sprintf("Заявка №%d · история · страница %d/%d\n\n", t.ID, page+1, len(pages)) + p.text
 	nav := []Button{}
 	if page > 0 {
-		nav = append(nav, Button{Text: "Назад", Data: fmt.Sprintf("history:%d:%d:%d", t.ID, page-1, anchor)})
+		nav = append(nav, Button{Text: fmt.Sprintf("← Страница %d", page), Data: fmt.Sprintf("history:%d:%d:%d", t.ID, page-1, anchor)})
 	}
 	if page+1 < len(pages) {
-		nav = append(nav, Button{Text: "Далее", Data: fmt.Sprintf("history:%d:%d:%d", t.ID, page+1, anchor)})
+		nav = append(nav, Button{Text: fmt.Sprintf("Страница %d →", page+2), Data: fmt.Sprintf("history:%d:%d:%d", t.ID, page+1, anchor)})
 	}
 	if len(nav) > 0 {
 		p.buttons = append(p.buttons, nav)
@@ -216,21 +219,28 @@ func (a *Adapter) ticketListPage(ctx context.Context, m *Message, u domain.User,
 		return domain.ErrInvalid
 	}
 	end := min(start+10, len(visible))
-	text := fmt.Sprintf("Ваши заявки · страница %d\n", page+1)
+	title := "Мои заявки"
+	if u.Role != "client" {
+		title = "Доступные заявки"
+	}
+	pageCount := max(1, (len(visible)+9)/10)
+	text := fmt.Sprintf("%s · страница %d/%d", title, page+1, pageCount)
 	buttons := [][]Button{}
 	for _, t := range visible[start:end] {
-		text += fmt.Sprintf("#%d · %s · %s\n", t.ID, departmentName(t.Department), statusName(t.Status))
-		buttons = append(buttons, []Button{{Text: fmt.Sprintf("#%d · %s", t.ID, statusName(t.Status)), Data: fmt.Sprintf("ticket:%d", t.ID)}})
+		buttons = append(buttons, []Button{{Text: fmt.Sprintf("№%d · %s · %s", t.ID, statusName(t.Status), departmentName(t.Department)), Data: fmt.Sprintf("ticket:%d", t.ID)}})
 	}
 	if len(visible) == 0 {
-		text += "Заявок нет."
+		text = "У вас пока нет заявок. Создайте заявку, чтобы обратиться в поддержку."
+		if u.Role == "client" && m.Chat.Type == "private" {
+			buttons = append(buttons, []Button{{Text: "Создать заявку", Data: "newdraft"}})
+		}
 	}
 	nav := []Button{}
 	if page > 0 {
-		nav = append(nav, Button{Text: "Назад", Data: fmt.Sprintf("tickets:%d:%d", page-1, anchor)})
+		nav = append(nav, Button{Text: fmt.Sprintf("← Страница %d", page), Data: fmt.Sprintf("tickets:%d:%d", page-1, anchor)})
 	}
 	if end < len(visible) {
-		nav = append(nav, Button{Text: "Далее", Data: fmt.Sprintf("tickets:%d:%d", page+1, anchor)})
+		nav = append(nav, Button{Text: fmt.Sprintf("Страница %d →", page+2), Data: fmt.Sprintf("tickets:%d:%d", page+1, anchor)})
 	}
 	if len(nav) > 0 {
 		buttons = append(buttons, nav)

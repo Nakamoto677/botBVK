@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -70,7 +71,7 @@ func (a *Adapter) groupMessage(ctx context.Context, m *Message) error {
 	if trigger.Urgent {
 		urgency = domain.Urgent
 	}
-	_, err = service.CreateFromGroup(ctx, domain.GroupTicketRequest{
+	created, err := service.CreateFromGroup(ctx, domain.GroupTicketRequest{
 		ChatID:            m.Chat.ID,
 		ChatTitle:         m.Chat.Title,
 		CompanyID:         group.CompanyID,
@@ -98,7 +99,13 @@ func (a *Adapter) groupMessage(ctx context.Context, m *Message) error {
 		}
 		return err
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	if a.cfg.GroupReceipt {
+		return a.groupHint(ctx, m, fmt.Sprintf("Заявка №%d создана для отдела %s. Ответим здесь.", created.ID, departmentName(created.Department)))
+	}
+	return nil
 }
 
 func (a *Adapter) receiveGroup(ctx context.Context, m *Message, ticket domain.Ticket, group ClientGroup) error {

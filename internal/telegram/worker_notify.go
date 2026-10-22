@@ -23,9 +23,18 @@ func (w *Worker) accessRequestNotification(ctx context.Context, op domain.Operat
 	if err := json.Unmarshal(op.Payload, &request); err != nil {
 		return domain.ErrInvalid
 	}
+	company, err := companyName(ctx, w.store, request.CompanyID)
+	if err != nil {
+		return err
+	}
+	user, err := displayName(ctx, w.store, request.UserID, "Пользователь")
+	if err != nil {
+		return err
+	}
 	for _, id := range w.cfg.AdminIDs {
-		buttons := [][]Button{{{Text: "Одобрить", Data: fmt.Sprintf("approve:%d", request.RequestID)}, {Text: "Отклонить", Data: fmt.Sprintf("reject:%d", request.RequestID)}}}
-		if _, err := w.send(ctx, id, 0, fmt.Sprintf("Заявка на доступ #%d. Аккаунт %d, компания %d", request.RequestID, request.UserID, request.CompanyID), buttons); err != nil {
+		buttons := [][]Button{{{Text: "Одобрить доступ", Data: fmt.Sprintf("approve:%d", request.RequestID)}, {Text: "Отклонить доступ", Data: fmt.Sprintf("reject:%d", request.RequestID)}}}
+		body := fmt.Sprintf("Запрос доступа №%d\nПользователь: %s · ID %d\nКомпания: %s\nПроверьте принадлежность пользователя перед решением.", request.RequestID, user, request.UserID, company)
+		if _, err := w.send(ctx, id, 0, body, buttons); err != nil {
 			return err
 		}
 	}

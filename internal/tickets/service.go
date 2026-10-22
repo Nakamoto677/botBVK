@@ -20,9 +20,9 @@ type Service struct {
 func urgencyText(u domain.Urgency) string {
 	switch u {
 	case domain.Urgent:
-		return "срочно"
+		return "Срочно"
 	case domain.Routine:
-		return "в обычном порядке"
+		return "Обычно"
 	default:
 		return "не указана"
 	}
@@ -78,7 +78,7 @@ func engineerName(u domain.User) string {
 	if username := strings.TrimSpace(u.Username); username != "" {
 		return "@" + strings.TrimPrefix(username, "@")
 	}
-	return "поддержки"
+	return "служба поддержки"
 }
 func (s *Service) Register(ctx context.Context, id int64, name string, companyID int64) error {
 	if id <= 0 || companyID <= 0 || strings.TrimSpace(name) == "" {
@@ -279,7 +279,7 @@ func (s *Service) Claim(ctx context.Context, actorID, ticketID int64) error {
 		if err := s.enqueue(ctx, tx, *t, "refresh_card", nil); err != nil {
 			return err
 		}
-		return s.notify(ctx, tx, *t, fmt.Sprintf("Инженер %s взял вашу заявку в работу\nВаша переписка продолжится прямо в этом чате:", engineerName(u)))
+		return s.notify(ctx, tx, *t, fmt.Sprintf("Заявка №%d · В работе\nНа связи: %s. Продолжайте переписку в этом чате.", t.ID, engineerName(u)))
 	})
 }
 func (s *Service) Transfer(ctx context.Context, actorID, ticketID int64, department domain.Department, reason string) error {
@@ -332,10 +332,11 @@ func (s *Service) transfer(ctx context.Context, actorID, ticketID int64, departm
 		if err := s.enqueue(ctx, tx, *t, "refresh_card", nil); err != nil {
 			return err
 		}
-		if !t.Urgency.Valid() {
-			return s.notify(ctx, tx, *t, fmt.Sprintf("Ваше обращение передали в отдел %s\nИнженеры увидели вашу заявку, скоро возьмут в работу!", department.Name()))
+		text := fmt.Sprintf("Заявка №%d передана в отдел «%s». Специалисты увидят обращение в очереди.", t.ID, department.Name())
+		if t.Urgency.Valid() {
+			text += " Срочность: " + urgencyText(t.Urgency) + "."
 		}
-		return s.notify(ctx, tx, *t, fmt.Sprintf("Ваше обращение передали в отдел «%s».\nСрочность сохранена: %s.\nИнженеры увидели вашу заявку, скоро возьмут в работу!", department.Name(), urgencyText(t.Urgency)))
+		return s.notify(ctx, tx, *t, text)
 	})
 }
 func (s *Service) Close(ctx context.Context, actorID, ticketID int64, resolution string) error {
@@ -377,7 +378,7 @@ func (s *Service) close(ctx context.Context, actorID, ticketID int64, resolution
 		if err := s.enqueue(ctx, tx, *t, "refresh_card", nil); err != nil {
 			return err
 		}
-		return s.notify(ctx, tx, *t, "Заявка закрыта. Результат: "+t.Resolution)
+		return s.notify(ctx, tx, *t, fmt.Sprintf("Заявка №%d завершена\nИтог: %s", t.ID, t.Resolution))
 	})
 }
 func (s *Service) SetWaiting(ctx context.Context, actorID, ticketID int64, waiting bool) error {
@@ -598,7 +599,7 @@ func (s *Service) Assign(ctx context.Context, actorID, ticketID, engineerID int6
 		if err := s.enqueue(ctx, tx, *t, "refresh_card", nil); err != nil {
 			return err
 		}
-		return s.notify(ctx, tx, *t, "По заявке назначен другой инженер.")
+		return s.notify(ctx, tx, *t, fmt.Sprintf("По заявке №%d назначен другой специалист.", t.ID))
 	}, engineerID)
 }
 

@@ -12,7 +12,7 @@ import (
 	"bot-bvk/internal/domain"
 )
 
-const engineerCloseLabel = "Закрыть тикет"
+const engineerCloseLabel = "Завершить заявку"
 const engineerTransferLabel = "Передать"
 
 // Telegram text limits count rendered characters. Bound UTF-16 length before
@@ -107,7 +107,7 @@ func engineerQueueButtons(t domain.Ticket, companyLink string) [][]Button {
 		if t.Status == domain.New {
 			return append(buttons, []Button{{Text: "Взять в работу", Data: "claim:" + id}}, []Button{{Text: engineerTransferLabel, Data: "transfer:" + id}})
 		}
-		return append(buttons, []Button{{Text: "Закрыть задачу", Data: "close:" + id}, {Text: engineerTransferLabel, Data: "transfer:" + id}})
+		return append(buttons, []Button{{Text: engineerCloseLabel, Data: "close:" + id}, {Text: engineerTransferLabel, Data: "transfer:" + id}})
 	}
 	if t.Status == domain.New {
 		return [][]Button{{{Text: "Взять в работу", Data: "claim:" + id}}, {{Text: engineerTransferLabel, Data: "transfer:" + id}}}
@@ -121,7 +121,7 @@ func engineerQueueButtons(t domain.Ticket, companyLink string) [][]Button {
 		link := fmt.Sprintf("https://t.me/c/%s/%d?thread=%d", strings.TrimPrefix(fmt.Sprint(t.TopicChatID), "-100"), messageID, t.TopicID)
 		buttons = append(buttons, []Button{{Text: "В чат", URL: link}})
 	}
-	return append(buttons, []Button{{Text: "Закрыть задачу", Data: "close:" + id}, {Text: engineerTransferLabel, Data: "transfer:" + id}})
+	return append(buttons, []Button{{Text: engineerCloseLabel, Data: "close:" + id}, {Text: engineerTransferLabel, Data: "transfer:" + id}})
 }
 
 // Engineer cards are HTML, so they are sent through the shared recorded-parts

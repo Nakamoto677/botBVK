@@ -22,7 +22,7 @@ func TestEngineerQueueAndTopicActionMatrix(t *testing.T) {
 	ticket.TopicID = 7
 	ticket.TopicMessageID = 88
 	buttons = engineerQueueButtons(ticket, "")
-	if len(buttons) != 2 || len(buttons[1]) != 2 || buttons[0][0].Text != "В чат" || buttons[0][0].URL != "https://t.me/c/1234567890/88?thread=7" || buttons[1][0].Text != "Закрыть задачу" {
+	if len(buttons) != 2 || len(buttons[1]) != 2 || buttons[0][0].Text != "В чат" || buttons[0][0].URL != "https://t.me/c/1234567890/88?thread=7" || buttons[1][0].Text != engineerCloseLabel {
 		t.Fatalf("assigned controls: %+v", buttons)
 	}
 	topic := engineerTopicButtons(ticket)
@@ -183,7 +183,7 @@ func TestTransferPromptCommentAndControlCleanup(t *testing.T) {
 			if err := a.promptCallback(ctx, &Callback{From: m.From, Message: m}, "transferdept", 7, []string{"transferdept", "7", "1c"}); err != nil {
 				t.Fatal(err)
 			}
-			want := "Передача заявки #7\n\nОтдел: 1С\n\nНапишите комментарий к передаче следующим сообщением.\nЕсли комментарий не нужен, отправьте прочерк «-»."
+			want := "Передача заявки №7 → 1С\nНапишите причину передачи. Её увидят инженеры нового отдела. На ввод есть 15 минут."
 			if (*requests)[len(*requests)-1]["text"] != want {
 				t.Fatal(*requests)
 			}
@@ -219,6 +219,27 @@ func TestTransferPromptCommentAndControlCleanup(t *testing.T) {
 	}
 }
 
+func TestTransferWithoutCommentButtonCompletesPrompt(t *testing.T) {
+	ctx := context.Background()
+	client, _ := uiClient(t)
+	s := &durableUIStore{adapterStore: &adapterStore{user: domain.User{ID: 2, Role: "engineer", Approved: true, Departments: []domain.Department{domain.IT}}, ticket: domain.Ticket{ID: 7, Status: domain.InProgress, Department: domain.IT, AssigneeID: 2, TopicChatID: -100, TopicID: 10}}, workflows: map[promptKey][]byte{}, aux: map[auxKey][]domain.AuxiliaryMessage{}}
+	svc := &adapterService{}
+	a := NewAdapter(client, s, svc, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100, QueueTopicID: 1}, domain.OneC: {ChatID: -200, QueueTopicID: 1}}})
+	m := &Message{ID: 80, From: Person{ID: 2}, Chat: Chat{ID: -100, Type: "supergroup"}, ThreadID: 10}
+	if err := a.beginStaffPrompt(ctx, &Callback{From: m.From, Message: m}, 7, "transfer"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.promptCallback(ctx, &Callback{From: m.From, Message: m}, "transferdept", 7, []string{"transferdept", "7", "1c"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.promptCallback(ctx, &Callback{From: m.From, Message: m}, "transferwithout", 7, []string{"transferwithout", "7"}); err != nil {
+		t.Fatal(err)
+	}
+	if svc.transferID != 7 || svc.transferDepartment != domain.OneC || svc.transferReason != "-" || len(s.workflows) != 0 || len(svc.messages) != 0 {
+		t.Fatal("button did not complete a silent transfer")
+	}
+}
+
 func TestGroupQueueCardLinksToCompanyChatAndHidesTopicControls(t *testing.T) {
 	ticket := domain.Ticket{ID: 42, ClientID: -100500, Channel: domain.ChannelGroup, Status: domain.New, Department: domain.OneC, SourceMessageID: 55}
 	buttons := engineerQueueButtons(ticket, "https://t.me/c/500/55")
@@ -228,7 +249,7 @@ func TestGroupQueueCardLinksToCompanyChatAndHidesTopicControls(t *testing.T) {
 	ticket.Status = domain.InProgress
 	ticket.AssigneeID = 2
 	buttons = engineerQueueButtons(ticket, "https://t.me/c/500/55")
-	if len(buttons) != 2 || buttons[0][0].Text != "В чат компании" || buttons[1][0].Text != "Закрыть задачу" || buttons[1][1].Data != "transfer:42" {
+	if len(buttons) != 2 || buttons[0][0].Text != "В чат компании" || buttons[1][0].Text != engineerCloseLabel || buttons[1][1].Data != "transfer:42" {
 		t.Fatalf("active group controls: %+v", buttons)
 	}
 	if len(engineerQueueButtons(ticket, "")) != 1 {

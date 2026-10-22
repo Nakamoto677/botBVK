@@ -33,6 +33,7 @@
     }
   },
   "client_groups": [],
+  "group_receipt": false,
   "archive_dir": "data/archive",
   "backup_dir": "data/backups",
   "health_address": "127.0.0.1:8080",

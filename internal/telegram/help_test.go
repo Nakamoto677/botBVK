@@ -27,11 +27,11 @@ func TestClientHelpButtonAnswersAndKeepsTheAnswer(t *testing.T) {
 	if len(delivered) != 1 {
 		t.Fatalf("help produced %d messages, want one: %v", len(delivered), delivered)
 	}
-	if !strings.Contains(delivered[0], "Создать заявку") || !strings.Contains(delivered[0], "/tickets") {
+	if !strings.Contains(delivered[0], "Создать заявку") || !strings.Contains(delivered[0], "Мои заявки") {
 		t.Fatalf("help answer does not describe the client flow: %q", delivered[0])
 	}
 	// The answer must carry the client menu, otherwise the person is left without a way on.
-	assertReplyLabels(t, (*requests)[len(*requests)-1], "Создать заявку", "Помощь")
+	assertReplyLabels(t, (*requests)[len(*requests)-1], "Создать заявку", "Мои заявки", "Помощь")
 
 	// And it must be retained, not queued for deletion.
 	kept := store.aux[auxKey{1, 1, 0, "client_kept"}]

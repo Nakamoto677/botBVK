@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -145,7 +146,7 @@ func TestClaimNotifiesClientWithEngineerTelegramName(t *testing.T) {
 	}{
 		{"Анна Иванова", "anna", "Анна Иванова"},
 		{"", "anna", "@anna"},
-		{"", "", "поддержки"},
+		{"", "", "служба поддержки"},
 	} {
 		t.Run(tt.want, func(t *testing.T) {
 			s, f := setup()
@@ -159,7 +160,7 @@ func TestClaimNotifiesClientWithEngineerTelegramName(t *testing.T) {
 			if err := s.Claim(t.Context(), 2, ticket.ID); err != nil {
 				t.Fatal(err)
 			}
-			want := "Инженер " + tt.want + " взял вашу заявку в работу\nВаша переписка продолжится прямо в этом чате:"
+			want := fmt.Sprintf("Заявка №%d · В работе\nНа связи: %s. Продолжайте переписку в этом чате.", ticket.ID, tt.want)
 			if got := notificationText(t, f.ops[len(f.ops)-1]); got != want {
 				t.Fatalf("notice = %q, want %q", got, want)
 			}
@@ -266,7 +267,7 @@ func TestTransferRetainsHistoryAndClosedTicketAllowsNew(t *testing.T) {
 			t.Fatal(f.ops[before+i])
 		}
 	}
-	if got, want := notificationText(t, f.ops[before+3]), "Ваше обращение передали в отдел 1С\nИнженеры увидели вашу заявку, скоро возьмут в работу!"; got != want {
+	if got, want := notificationText(t, f.ops[before+3]), fmt.Sprintf("Заявка №%d передана в отдел «1С». Специалисты увидят обращение в очереди.", v.ID); got != want {
 		t.Fatalf("transfer notice = %q, want %q", got, want)
 	}
 	var payload map[string]any
@@ -277,7 +278,7 @@ func TestTransferRetainsHistoryAndClosedTicketAllowsNew(t *testing.T) {
 	if err := s.Claim(t.Context(), 3, v.ID); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := notificationText(t, f.ops[len(f.ops)-1]), "Инженер Мария Петрова взял вашу заявку в работу\nВаша переписка продолжится прямо в этом чате:"; got != want {
+	if got, want := notificationText(t, f.ops[len(f.ops)-1]), fmt.Sprintf("Заявка №%d · В работе\nНа связи: Мария Петрова. Продолжайте переписку в этом чате.", v.ID); got != want {
 		t.Fatalf("claim notice = %q, want %q", got, want)
 	}
 	if f.ops[len(f.ops)-3].Kind != "create_topic" {

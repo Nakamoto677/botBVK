@@ -32,6 +32,7 @@ type ClientGroup struct {
 type Config struct {
 	Departments  map[domain.Department]Team
 	ClientGroups map[int64]ClientGroup
+	GroupReceipt bool
 	BotUsername  string
 	StartHour    int
 	EndHour      int
@@ -186,7 +187,17 @@ func pause(ctx context.Context, d time.Duration) bool {
 	}
 }
 func (a *Adapter) respondError(ctx context.Context, u Update, err error) {
-	text := "Действие недоступно: " + err.Error()
+	text := "Не удалось выполнить действие. Попробуйте ещё раз. Если ошибка повторится, сообщите администратору."
+	switch {
+	case errors.Is(err, domain.ErrConflict):
+		text = "Заявка или этот шаг уже изменились. Откройте актуальную карточку и повторите действие."
+	case errors.Is(err, domain.ErrForbidden):
+		text = "У вас нет доступа к этому действию. Проверьте заявку и свой отдел."
+	case errors.Is(err, domain.ErrNotFound):
+		text = "Заявка не найдена или больше недоступна. Откройте список заявок."
+	case errors.Is(err, domain.ErrInvalid):
+		text = "Не удалось выполнить действие. Проверьте введённые данные и попробуйте ещё раз."
+	}
 	var private *Message
 	var actor int64
 	if u.Callback != nil {
@@ -229,7 +240,12 @@ func (a *Adapter) say(ctx context.Context, m *Message, text string, buttons [][]
 }
 func (a *Adapter) Handle(ctx context.Context, u Update) error {
 	if u.Callback != nil {
-		return a.callback(ctx, u.Callback)
+		err := a.callback(ctx, u.Callback)
+		if err == nil && !a.answeredCallback {
+			_ = a.client.Answer(ctx, u.Callback.ID, "")
+			a.markCallbackAnswered()
+		}
+		return err
 	}
 	if u.MyChatMember != nil {
 		// Adding the bot to a group is the cheapest way to obtain the real chat
@@ -295,7 +311,7 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 		return err
 	}
 	if !user.Approved {
-		return a.say(ctx, m, "Доступ ожидает подтверждения администратора. Для выбора компании нажмите /start.", nil)
+		return a.say(ctx, m, "Доступ ещё не подтверждён. Ожидайте решения администратора — сообщим здесь.", nil)
 	}
 	if err = a.updateName(ctx, user, m.From); err != nil {
 		return err
@@ -356,23 +372,7 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 		return a.say(ctx, m, "Заявка завершена. Создайте новую заявку через меню.", nil)
 	}
 	if text == "/new" || text == "Новая заявка" {
-		if _, err := a.store.ActiveTicket(ctx, m.From.ID); err == nil {
-			return a.say(ctx, m, "У вас уже есть открытая заявка. Следующие сообщения добавляются к ней.", nil)
-		} else if !errors.Is(err, domain.ErrNotFound) {
-			return err
-		}
-		if d, exists, err := a.getDraft(ctx, m.From.ID); err != nil {
-			return err
-		} else if exists && d.Step != "submitted" {
-			return a.resumeDraft(ctx, m)
-		}
-		d := draft{Generation: a.formGeneration(m), Step: "department"}
-		if err := a.saveDraft(ctx, m.From.ID, d); err != nil {
-			return err
-		}
-		a.cleanupBestEffort(ctx, scope(m.From.ID, m), "client_home")
-		a.cleanupBestEffort(ctx, scope(m.From.ID, m), "draft")
-			return a.sayAux(ctx, m, m.From.ID, "draft", "Новая заявка · 1 из 3\nКакой отдел поможет с проблемой?", a.draftDepartments(d))
+		return a.beginClientDraft(ctx, m)
 	}
 	if strings.HasPrefix(text, "/") {
 		return a.help(ctx, m, user)
@@ -411,6 +411,26 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 		return err
 	}
 	return a.receive(ctx, m, t, false)
+}
+
+func (a *Adapter) beginClientDraft(ctx context.Context, m *Message) error {
+	if _, err := a.store.ActiveTicket(ctx, m.From.ID); err == nil {
+		return a.say(ctx, m, "У вас уже есть открытая заявка. Следующие сообщения добавляются к ней.", nil)
+	} else if !errors.Is(err, domain.ErrNotFound) {
+		return err
+	}
+	if d, exists, err := a.getDraft(ctx, m.From.ID); err != nil {
+		return err
+	} else if exists && d.Step != "submitted" {
+		return a.resumeDraft(ctx, m)
+	}
+	d := draft{Generation: a.formGeneration(m), Step: "department"}
+	if err := a.saveDraft(ctx, m.From.ID, d); err != nil {
+		return err
+	}
+	a.cleanupBestEffort(ctx, scope(m.From.ID, m), "client_home")
+	a.cleanupBestEffort(ctx, scope(m.From.ID, m), "draft")
+	return a.sayAux(ctx, m, m.From.ID, "draft", "Новая заявка · 1 из 3\nКакой отдел поможет с проблемой?", a.draftDepartments(d))
 }
 
 // departmentButtons builds the shared department picker, two per row, from the
@@ -488,6 +508,10 @@ func (a *Adapter) callback(ctx context.Context, c *Callback) error {
 		return a.callbackUrgency(ctx, c, parts)
 	case "changeurgency":
 		return a.callbackChangeUrgency(ctx, c, parts)
+	case "changedepartment":
+		return a.callbackChangeDepartment(ctx, c, parts)
+	case "changedescription":
+		return a.callbackChangeDescription(ctx, c, parts)
 	case "draftback":
 		return a.callbackDraftBack(ctx, c, parts)
 	case "draftreview":
@@ -511,10 +535,24 @@ func (a *Adapter) callback(ctx context.Context, c *Callback) error {
 		return domain.ErrConflict
 	case "close", "transfer":
 		err = a.beginStaffPrompt(ctx, c, id, action)
-	case "transferdept", "cancelconfirm", "promptcancel":
+	case "transferdept", "transferwithout", "cancelconfirm", "promptcancel":
 		err = a.promptCallback(ctx, c, action, id, parts)
 	case "tickets":
 		return a.callbackTickets(ctx, c, parts)
+	case "newdraft":
+		if c.Message == nil || c.Message.Chat.Type != "private" || c.Message.Chat.ID != c.From.ID {
+			return domain.ErrForbidden
+		}
+		user, e := a.store.User(ctx, c.From.ID)
+		if e != nil {
+			return e
+		}
+		if !user.Approved || user.Role != "client" {
+			return domain.ErrForbidden
+		}
+		message := *c.Message
+		message.From = c.From
+		return a.beginClientDraft(ctx, &message)
 	case "historyfile":
 		return a.callbackHistoryFile(ctx, c, id, parts)
 	case "ticket", "history":

@@ -11,7 +11,7 @@ func (a *Adapter) registrationCompanies(ctx context.Context, m *Message, actor i
 	if err != nil {
 		return err
 	}
-	text := "Выберите компанию. Доступ подтвердит администратор."
+	text := "BVK Support помогает обратиться в техподдержку.\n\nВыберите вашу компанию. Администратор подтвердит доступ, после этого вы сможете создать заявку."
 	if stale {
 		text = "Эта компания больше недоступна для регистрации. Выберите компанию из актуального списка."
 	}
@@ -20,7 +20,7 @@ func (a *Adapter) registrationCompanies(ctx context.Context, m *Message, actor i
 		buttons = append(buttons, []Button{{Text: c.Name, Data: fmt.Sprintf("company:%d", c.ID)}})
 	}
 	if len(companies) == 0 {
-		text = "Сейчас нет компаний, доступных для регистрации. Обратитесь к администратору и попробуйте /start позже."
+		text = "Сейчас нет компаний для регистрации. Обратитесь к администратору и попробуйте /start позже."
 	}
 	return a.sayAux(ctx, m, actor, "registration", text, buttons)
 }

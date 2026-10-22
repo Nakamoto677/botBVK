@@ -21,8 +21,12 @@ type prompt struct {
 }
 
 func scope(actor int64, m *Message) promptKey { return promptKey{actor, m.Chat.ID, m.ThreadID} }
-func (a *Adapter) promptText(ctx context.Context, m *Message, actor, ticket int64, text string) error {
-	return a.sayAux(ctx, m, actor, actionScenario(ticket), fmt.Sprintf("Заявка #%d: %s", ticket, text), [][]Button{{{Text: "Отменить", Data: fmt.Sprintf("promptcancel:%d", ticket)}}})
+func (a *Adapter) promptText(ctx context.Context, m *Message, actor, ticket int64, action, text string) error {
+	label := "Отменить завершение"
+	if action == "transfer" {
+		label = "Отменить передачу"
+	}
+	return a.sayAux(ctx, m, actor, actionScenario(ticket), fmt.Sprintf("Заявка №%d: %s", ticket, text), [][]Button{{{Text: label, Data: fmt.Sprintf("promptcancel:%d", ticket)}}})
 }
 func (a *Adapter) beginStaffPrompt(ctx context.Context, c *Callback, id int64, action string) error {
 	if c.Message == nil {
@@ -55,7 +59,7 @@ func (a *Adapter) beginStaffPrompt(ctx context.Context, c *Callback, id int64, a
 		if err = a.replacePrompt(ctx, key, p); err != nil {
 			return err
 		}
-		return a.promptText(ctx, c.Message, c.From.ID, id, "напишите итог решения следующим сообщением.")
+		return a.promptText(ctx, c.Message, c.From.ID, id, "close", "напишите итог решения следующим сообщением. Клиент увидит его в уведомлении. На ввод есть 15 минут.")
 	}
 	p.Phase = "department"
 	if err = a.replacePrompt(ctx, key, p); err != nil {
@@ -67,8 +71,8 @@ func (a *Adapter) beginStaffPrompt(ctx context.Context, c *Callback, id int64, a
 			buttons = append(buttons, []Button{{Text: departmentName(d), Data: fmt.Sprintf("transferdept:%d:%s", id, d)}})
 		}
 	}
-	buttons = append(buttons, []Button{{Text: "Отменить", Data: fmt.Sprintf("promptcancel:%d", id)}})
-	return a.sayAux(ctx, c.Message, c.From.ID, actionScenario(id), fmt.Sprintf("Заявка #%d: выберите отдел для передачи.", id), buttons)
+	buttons = append(buttons, []Button{{Text: "Отменить передачу", Data: fmt.Sprintf("promptcancel:%d", id)}})
+	return a.sayAux(ctx, c.Message, c.From.ID, actionScenario(id), fmt.Sprintf("Передача заявки №%d\nВыберите новый отдел.", id), buttons)
 }
 func (a *Adapter) beginCancel(ctx context.Context, actor int64, m *Message, id int64) error {
 	if m == nil || m.Chat.Type != "private" {
@@ -92,11 +96,8 @@ func (a *Adapter) beginCancel(ctx context.Context, actor int64, m *Message, id i
 	if err = a.replacePrompt(ctx, scope(actor, m), p); err != nil {
 		return err
 	}
-	question := "Вы уверены, что хотите завершить заявку?"
-	if u.Role == "client" {
-		question = "Точно проблема решена?"
-	}
-	return a.sayAux(ctx, m, actor, actionScenario(id), question, [][]Button{{{Text: "Да, завершить", Data: fmt.Sprintf("cancelconfirm:%d:%s", id, p.FlowID)}, {Text: "Нет, продолжить", Data: fmt.Sprintf("promptcancel:%d:%s", id, p.FlowID)}}})
+	question := fmt.Sprintf("Завершить заявку №%d?\nПереписка сохранится в истории. Если помощь ещё нужна, оставьте заявку открытой.", id)
+	return a.sayAux(ctx, m, actor, actionScenario(id), question, [][]Button{{{Text: "Завершить заявку", Data: fmt.Sprintf("cancelconfirm:%d:%s", id, p.FlowID)}, {Text: "Оставить открытой", Data: fmt.Sprintf("promptcancel:%d:%s", id, p.FlowID)}}})
 }
 func (a *Adapter) promptCallback(ctx context.Context, c *Callback, action string, id int64, parts []string) error {
 	if c.Message == nil {
@@ -142,6 +143,27 @@ func (a *Adapter) promptCallback(ctx context.Context, c *Callback, action string
 		a.finishPrompt(ctx, key, p)
 		return a.declineNotice(ctx, c, p)
 	}
+	if action == "transferwithout" {
+		if p.Action != "transfer" || p.Phase != "reason" {
+			return domain.ErrInvalid
+		}
+		t, e := a.store.Ticket(ctx, id)
+		if e != nil {
+			return e
+		}
+		u, e := a.store.User(ctx, c.From.ID)
+		if e != nil {
+			return e
+		}
+		if !staffAuthorized(u, t) || !t.Status.Active() || t.Department != p.SourceDepartment || t.RoutingGeneration != p.Generation {
+			return domain.ErrConflict
+		}
+		if e = a.service.Transfer(ctx, c.From.ID, id, p.Department, "-"); e != nil {
+			return e
+		}
+		a.finishPrompt(ctx, key, p)
+		return nil
+	}
 	if action == "transferdept" {
 		if p.Action != "transfer" || p.Phase != "department" || len(parts) != 3 || !a.departmentEnabled(domain.Department(parts[2])) || domain.Department(parts[2]) == p.SourceDepartment {
 			return domain.ErrInvalid
@@ -152,7 +174,7 @@ func (a *Adapter) promptCallback(ctx context.Context, c *Callback, action string
 			return err
 		}
 		a.cleanupBestEffort(ctx, key, actionScenario(id))
-		return a.sayAux(ctx, c.Message, c.From.ID, actionScenario(id), fmt.Sprintf("Передача заявки #%d\n\nОтдел: %s\n\nНапишите комментарий к передаче следующим сообщением.\nЕсли комментарий не нужен, отправьте прочерк «-».", id, departmentName(p.Department)), [][]Button{{{Text: "Отменить", Data: fmt.Sprintf("promptcancel:%d", id)}}})
+		return a.sayAux(ctx, c.Message, c.From.ID, actionScenario(id), fmt.Sprintf("Передача заявки №%d → %s\nНапишите причину передачи. Её увидят инженеры нового отдела. На ввод есть 15 минут.", id, departmentName(p.Department)), [][]Button{{{Text: "Без комментария", Data: fmt.Sprintf("transferwithout:%d", id)}}, {{Text: "Отменить передачу", Data: fmt.Sprintf("promptcancel:%d", id)}}})
 	}
 	if action == "cancelconfirm" {
 		if p.Action != "cancel" || p.Phase != "confirm" {
@@ -227,7 +249,7 @@ func (a *Adapter) consumePrompt(ctx context.Context, m *Message, u domain.User) 
 		return true, a.sayAux(ctx, m, m.From.ID, actionScenario(p.TicketID), "Сначала выберите отдел кнопкой в предыдущем вопросе.", nil)
 	}
 	if text == "" {
-		return true, a.promptText(ctx, m, m.From.ID, p.TicketID, "нужен текст; можно написать его в подписи к вложению.")
+		return true, a.promptText(ctx, m, m.From.ID, p.TicketID, p.Action, "нужен текст; можно написать его в подписи к вложению.")
 	}
 	t, err := a.store.Ticket(ctx, p.TicketID)
 	if err != nil {
@@ -249,7 +271,7 @@ func (a *Adapter) consumePrompt(ctx context.Context, m *Message, u domain.User) 
 			}); ok {
 				err = service.CloseWithMessage(ctx, u.ID, p.TicketID, text, attachment)
 			} else {
-				return true, a.promptText(ctx, m, m.From.ID, p.TicketID, "сначала отправьте вложение отдельным сообщением, затем напишите итог текстом.")
+				return true, a.promptText(ctx, m, m.From.ID, p.TicketID, p.Action, "сначала отправьте вложение отдельным сообщением, затем напишите итог текстом.")
 			}
 		case "transfer":
 			if service, ok := a.service.(interface {
@@ -257,7 +279,7 @@ func (a *Adapter) consumePrompt(ctx context.Context, m *Message, u domain.User) 
 			}); ok {
 				err = service.TransferWithMessage(ctx, u.ID, p.TicketID, p.Department, text, attachment)
 			} else {
-				return true, a.promptText(ctx, m, m.From.ID, p.TicketID, "сначала отправьте вложение отдельным сообщением, затем напишите причину текстом.")
+				return true, a.promptText(ctx, m, m.From.ID, p.TicketID, p.Action, "сначала отправьте вложение отдельным сообщением, затем напишите причину текстом.")
 			}
 		default:
 			err = domain.ErrInvalid

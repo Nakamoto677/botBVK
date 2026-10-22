@@ -26,8 +26,12 @@ func (a *Adapter) callbackCompany(ctx context.Context, c *Callback, id int64) er
 		return err
 	}
 	valid := false
+	selectedCompany := ""
 	for _, co := range companies {
 		valid = valid || co.ID == id
+		if co.ID == id {
+			selectedCompany = co.Name
+		}
 	}
 	if !valid {
 		return a.registrationCompanies(ctx, c.Message, c.From.ID, true)
@@ -60,6 +64,7 @@ func (a *Adapter) callbackCompany(ctx context.Context, c *Callback, id int64) er
 	}
 	if err == nil {
 		a.cleanupBestEffort(ctx, scope(c.From.ID, c.Message), "registration")
+		return a.sayAux(ctx, c.Message, c.From.ID, "registration_result", "Запрос на доступ к компании «"+selectedCompany+"» отправлен администратору. Сообщим здесь, когда он примет решение.", nil)
 	}
 	return err
 }
@@ -85,12 +90,48 @@ func (a *Adapter) callbackNewDraft(ctx context.Context, c *Callback, parts []str
 		return err
 	}
 	d.Department = domain.Department(parts[1])
+	returnToReview := d.Urgency.Valid() && d.Text != ""
+	d.Generation = a.formGeneration(c.Message)
 	d.Step = "urgency"
+	if returnToReview {
+		d.Step = "confirm"
+	}
 	if err = a.saveDraft(ctx, c.From.ID, d); err != nil {
 		return err
 	}
 	a.cleanupBestEffort(ctx, scope(c.From.ID, c.Message), "draft")
+	if returnToReview {
+		return a.confirmDraft(ctx, c.Message, d)
+	}
 	return a.sayAux(ctx, c.Message, c.From.ID, "draft", draftUrgencyText, draftUrgencyButtons(d))
+}
+
+func (a *Adapter) callbackChangeDepartment(ctx context.Context, c *Callback, parts []string) error {
+	d, valid, err := a.boundDraft(ctx, c, parts, "confirm")
+	if err != nil || !valid {
+		return err
+	}
+	d.Step = "department"
+	d.Generation = a.formGeneration(c.Message)
+	if err = a.saveDraft(ctx, c.From.ID, d); err != nil {
+		return err
+	}
+	a.cleanupBestEffort(ctx, scope(c.From.ID, c.Message), "draft")
+	return a.sayAux(ctx, c.Message, c.From.ID, "draft", "Изменить отдел\nКакой отдел поможет с проблемой?", a.draftDepartments(d))
+}
+
+func (a *Adapter) callbackChangeDescription(ctx context.Context, c *Callback, parts []string) error {
+	d, valid, err := a.boundDraft(ctx, c, parts, "confirm")
+	if err != nil || !valid {
+		return err
+	}
+	d.Step = "edit_description"
+	d.Generation = a.formGeneration(c.Message)
+	if err = a.saveDraft(ctx, c.From.ID, d); err != nil {
+		return err
+	}
+	a.cleanupBestEffort(ctx, scope(c.From.ID, c.Message), "draft")
+	return a.clientScreen(ctx, c.Message, "draft", draftEditDescriptionText, clientDraftKeyboard)
 }
 
 func (a *Adapter) callbackUrgency(ctx context.Context, c *Callback, parts []string) error {
@@ -149,7 +190,7 @@ func (a *Adapter) callbackDraftBack(ctx context.Context, c *Callback, parts []st
 		return err
 	}
 	a.cleanupBestEffort(ctx, scope(c.From.ID, c.Message), "draft")
-	return a.sayAux(ctx, c.Message, c.From.ID, "draft", "Выберите направление.", a.draftDepartments(d))
+	return a.sayAux(ctx, c.Message, c.From.ID, "draft", "Новая заявка · 1 из 3\nКакой отдел поможет с проблемой?", a.draftDepartments(d))
 }
 
 func (a *Adapter) callbackDraftReview(ctx context.Context, c *Callback, parts []string) error {
@@ -178,9 +219,13 @@ func (a *Adapter) callbackSubmitDraft(ctx context.Context, c *Callback, parts []
 		}
 		return a.sayAux(ctx, c.Message, c.From.ID, "draft", "Этот отдел больше недоступен. Выберите направление.", a.draftDepartments(d))
 	}
+	_ = a.client.Answer(ctx, c.ID, "Отправляем заявку…")
+	a.markCallbackAnswered()
 	err = a.submitDraft(ctx, c, d)
 	if err == nil {
 		a.cleanupBestEffort(ctx, scope(c.From.ID, c.Message), "draft")
+	} else {
+		_ = a.say(ctx, c.Message, "Не удалось отправить заявку. Черновик сохранён. Попробуйте ещё раз или откройте его через /form.", nil)
 	}
 	return err
 }

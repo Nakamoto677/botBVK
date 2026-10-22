@@ -30,6 +30,7 @@ type Config struct {
 	AdminID              int64                      `json:"admin_id"`
 	Companies            Companies                  `json:"companies"`
 	ClientGroups         []ClientGroup              `json:"client_groups,omitempty"`
+	GroupReceipt         bool                       `json:"group_receipt,omitempty"`
 	Staff                []Staff                    `json:"staff"`
 	Departments          map[domain.Department]Team `json:"departments"`
 	ArchiveDir           string                     `json:"archive_dir"`

@@ -85,7 +85,7 @@ func run() error {
 	if err = cfg.ValidateTelegram(); err != nil {
 		return err
 	}
-	tc := telegram.Config{Departments: map[domain.Department]telegram.Team{}, ClientGroups: clientGroups, AdminIDs: []int64{cfg.AdminID}, ArchiveDir: cfg.ArchiveDir, StartHour: cfg.StartHour, EndHour: cfg.EndHour}
+	tc := telegram.Config{Departments: map[domain.Department]telegram.Team{}, ClientGroups: clientGroups, GroupReceipt: cfg.GroupReceipt, AdminIDs: []int64{cfg.AdminID}, ArchiveDir: cfg.ArchiveDir, StartHour: cfg.StartHour, EndHour: cfg.EndHour}
 	for dept, t := range cfg.Departments {
 		tc.Departments[dept] = telegram.Team{ChatID: t.ChatID, QueueTopicID: t.QueueTopicID, Tags: t.Tags}
 	}
@@ -147,6 +147,7 @@ func run() error {
 	if !acquired {
 		return fmt.Errorf("another bot instance is active; pilot permits one instance%s", singletonHolder(ctx, lock, cfg.HealthAddress))
 	}
+	configureBotCommands(ctx, client, cfg)
 	calendar := tickets.DefaultCalendar()
 	calendar.StartHour = cfg.StartHour
 	calendar.EndHour = cfg.EndHour
@@ -205,6 +206,56 @@ func run() error {
 	_ = server.Shutdown(shutdown)
 	runners.Wait()
 	return err
+}
+
+// Commands are shortcuts to the visible UI. Private staff and department groups
+// get their own short lists; company chats receive no bot command menu.
+func configureBotCommands(ctx context.Context, client *telegram.Client, cfg config.Config) {
+	clientCommands := []map[string]string{
+		{"command": "start", "description": "Открыть поддержку"},
+		{"command": "menu", "description": "Открыть меню"},
+		{"command": "new", "description": "Создать заявку"},
+		{"command": "tickets", "description": "Посмотреть мои заявки"},
+		{"command": "current", "description": "Открыть активную заявку"},
+		{"command": "form", "description": "Продолжить черновик"},
+		{"command": "help", "description": "Как получить помощь"},
+	}
+	staffCommands := []map[string]string{
+		{"command": "menu", "description": "Открыть меню"},
+		{"command": "tickets", "description": "Посмотреть заявки"},
+		{"command": "history", "description": "Открыть историю текущей заявки"},
+		{"command": "help", "description": "Как работать с заявками"},
+	}
+	adminCommands := append(append([]map[string]string{}, staffCommands...),
+		map[string]string{"command": "requests", "description": "Проверить запросы доступа"},
+		map[string]string{"command": "report", "description": "Получить отчёт"})
+	set := func(scope map[string]any, commands []map[string]string) {
+		if err := client.Call(ctx, "setMyCommands", map[string]any{"commands": commands, "scope": scope}, nil); err != nil {
+			slog.Warn("could not configure Telegram commands", "scope", scope, "error", err)
+		}
+	}
+	set(map[string]any{"type": "all_private_chats"}, clientCommands)
+	seen := map[int64]bool{}
+	for _, staff := range cfg.Staff {
+		if staff.ID <= 0 || seen[staff.ID] {
+			continue
+		}
+		seen[staff.ID] = true
+		commands := staffCommands
+		if staff.Role == "admin" {
+			commands = adminCommands
+		}
+		set(map[string]any{"type": "chat", "chat_id": staff.ID}, commands)
+	}
+	if cfg.AdminID > 0 && !seen[cfg.AdminID] {
+		set(map[string]any{"type": "chat", "chat_id": cfg.AdminID}, adminCommands)
+	}
+	for _, department := range cfg.Departments {
+		if department.ChatID < 0 && !seen[department.ChatID] {
+			seen[department.ChatID] = true
+			set(map[string]any{"type": "chat", "chat_id": department.ChatID}, staffCommands)
+		}
+	}
 }
 
 // singletonHolder names where the running instance is, because "another bot

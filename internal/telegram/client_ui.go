@@ -41,7 +41,11 @@ func (a *Adapter) clientHome(ctx context.Context, m *Message, text string) error
 func (a *Adapter) clientMenu(ctx context.Context, m *Message, u domain.User) error {
 	t, err := a.store.ActiveTicket(ctx, u.ID)
 	if err == nil {
-		return a.clientScreen(ctx, m, clientTicketScenario(t.ID), fmt.Sprintf("Заявка №%d · %s\nНапишите дополнение здесь — оно попадёт специалисту.", t.ID, statusName(t.Status)), clientActiveKeyboard)
+		instruction := "Напишите дополнение здесь — оно попадёт специалисту."
+		if t.Status == domain.Waiting {
+			instruction = "Специалист ждёт вашего ответа. Напишите, удалось ли проверить решение."
+		}
+		return a.clientScreen(ctx, m, clientTicketScenario(t.ID), fmt.Sprintf("Заявка №%d · %s\n%s", t.ID, statusName(t.Status), instruction), clientActiveKeyboard)
 	}
 	if !errors.Is(err, domain.ErrNotFound) {
 		return err
@@ -55,7 +59,7 @@ func (a *Adapter) clientMenu(ctx context.Context, m *Message, u domain.User) err
 }
 func (a *Adapter) cancelClientDraft(ctx context.Context, m *Message) error {
 	if _, err := a.store.ActiveTicket(ctx, m.Chat.ID); err == nil {
-		return a.say(ctx, m, "Заявка уже принята. Для её завершения нажмите «Отменить заявку»", nil)
+		return a.say(ctx, m, "Заявка уже принята. Для её завершения нажмите «Завершить заявку».", nil)
 	} else if !errors.Is(err, domain.ErrNotFound) {
 		return err
 	}
@@ -91,9 +95,6 @@ func (w *Worker) clientNotification(ctx context.Context, t domain.Ticket, text s
 		if t.Urgency.Valid() {
 			level := urgencyLabel(t.Urgency)
 			text = fmt.Sprintf("Заявка №%d принята\nОтдел: %s · Срочность: %s\nСпециалист ответит в этом чате.", t.ID, t.Department.Name(), level)
-			if t.Urgency == domain.Urgent {
-				text = fmt.Sprintf("Заявка №%d принята\nОтдел: %s · Срочность: %s\nСпециалист ответит в этом чате.", t.ID, t.Department.Name(), level)
-			}
 			calendar := tickets.DefaultCalendar()
 			if w.cfg.EndHour > w.cfg.StartHour {
 				calendar.StartHour, calendar.EndHour = w.cfg.StartHour, w.cfg.EndHour
@@ -106,7 +107,7 @@ func (w *Worker) clientNotification(ctx context.Context, t domain.Ticket, text s
 	if !t.Status.Active() {
 		keyboard = clientKeyboard
 		if cancelled {
-			text = clientFinishedText
+			text = fmt.Sprintf("Заявка №%d завершена по вашему запросу. Если помощь снова понадобится, создайте новую заявку.", t.ID)
 		}
 		if store, ok := w.store.(domain.WorkflowStore); ok {
 			for _, old := range []string{scenario, "draft", "client_home", actionScenario(t.ID)} {
@@ -134,15 +135,15 @@ func (w *Worker) clientNotification(ctx context.Context, t domain.Ticket, text s
 func clientErrorText(err error) string {
 	switch {
 	case errors.Is(err, domain.ErrConflict):
-		return "Эта кнопка устарела. Откройте текущую форму через /form или проверьте заявку через /current."
+		return "Данные изменились. Откройте «Мои заявки» или продолжите черновик через /form."
 	case errors.Is(err, domain.ErrForbidden):
-		return "Это действие недоступно для вашего аккаунта"
+		return "Это действие недоступно для вашего аккаунта."
 	case errors.Is(err, domain.ErrNotFound):
-		return "Заявка или этот шаг больше недоступны. Посмотрите список через /tickets."
+		return "Заявка или этот шаг больше недоступны. Откройте «Мои заявки»."
 	case errors.Is(err, domain.ErrInvalid):
-		return "Не удалось выполнить действие. Проверьте ввод и попробуйте ещё раз"
+		return "Не удалось выполнить действие. Проверьте ввод и попробуйте ещё раз."
 	default:
-		return "Не удалось выполнить действие. Попробуйте ещё раз"
+		return "Не удалось выполнить действие. Попробуйте ещё раз."
 	}
 }
 
@@ -180,6 +181,9 @@ func clientAuxScenario(m *Message, scenario, text string) string {
 	}
 	if (strings.HasPrefix(text, "Ваше обращение передали в отдел ") && strings.HasSuffix(text, "\nИнженеры увидели вашу заявку, скоро возьмут в работу!")) ||
 		(strings.HasPrefix(text, "Заявка #") && strings.Contains(text, " принята.\n\nСрочность:")) ||
+		(strings.HasPrefix(text, "Заявка №") && strings.Contains(text, " принята\nОтдел:")) ||
+		(strings.HasPrefix(text, "Заявка №") && strings.Contains(text, " передана в отдел ")) ||
+		(strings.HasPrefix(text, "Заявка №") && strings.Contains(text, " · В работе\n")) ||
 		(strings.HasPrefix(text, "Инженер ") && strings.HasSuffix(text, "\nВаша переписка продолжится прямо в этом чате:")) {
 		return "client_kept"
 	}

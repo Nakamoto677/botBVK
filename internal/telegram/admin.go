@@ -26,13 +26,27 @@ func (a *Adapter) admin(ctx context.Context, m *Message, u domain.User) error {
 		if err != nil {
 			return err
 		}
+		pending := 0
 		for _, r := range requests {
 			if r.Status != "pending" {
 				continue
 			}
-			if err = a.say(ctx, m, fmt.Sprintf("Запрос #%d · аккаунт %d · компания %d", r.ID, r.UserID, r.CompanyID), [][]Button{{{Text: "Одобрить", Data: fmt.Sprintf("approve:%d", r.ID)}, {Text: "Отклонить", Data: fmt.Sprintf("reject:%d", r.ID)}}}); err != nil {
+			pending++
+			company, e := companyName(ctx, a.store, r.CompanyID)
+			if e != nil {
+				return e
+			}
+			name, e := displayName(ctx, a.store, r.UserID, "Пользователь")
+			if e != nil {
+				return e
+			}
+			body := fmt.Sprintf("Запрос доступа №%d\nПользователь: %s · ID %d\nКомпания: %s\nПроверьте принадлежность пользователя перед решением.", r.ID, name, r.UserID, company)
+			if err = a.say(ctx, m, body, [][]Button{{{Text: "Одобрить доступ", Data: fmt.Sprintf("approve:%d", r.ID)}, {Text: "Отклонить доступ", Data: fmt.Sprintf("reject:%d", r.ID)}}}); err != nil {
 				return err
 			}
+		}
+		if pending == 0 {
+			return a.say(ctx, m, "Запросов на доступ нет.", nil)
 		}
 		return nil
 	case "/retry":
