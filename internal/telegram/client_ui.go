@@ -11,13 +11,14 @@ import (
 	"bot-bvk/internal/tickets"
 )
 
-const clientAcceptedText = "Заявка принята!\nВ ближайшее время в этот чат вам ответит специалист)"
-const clientFinishedText = "Рады, что ваша проблема решилась)\nОбращайтесь в любое время, мы всегда рады помочь!"
+const clientAcceptedText = "Заявка принята. Специалист ответит в этом чате."
+const clientFinishedText = "Заявка завершена по вашему запросу. Если помощь снова понадобится, создайте новую заявку."
 const clientCancelDeclinedText = "Заявка #%d остаётся открытой.\nПродолжайте переписку — ваша заявка и её переписка актуальны в этом чате."
 const clientCancelDraftLabel = "Отменить подачу заявки"
 
 var clientDraftKeyboard = [][]string{{clientCancelDraftLabel}}
-var clientActiveKeyboard = [][]string{{"Отменить заявку"}}
+var clientActiveKeyboard = [][]string{{"Мои заявки"}, {"Завершить заявку"}}
+var clientDraftMenuKeyboard = [][]string{{"Продолжить заявку"}, {"Удалить черновик"}}
 
 // Client menus are contextual; the staff keyboard builders are independent.
 // The markup shape itself is shared with SendKeyboard through replyKeyboard.
@@ -40,7 +41,7 @@ func (a *Adapter) clientHome(ctx context.Context, m *Message, text string) error
 func (a *Adapter) clientMenu(ctx context.Context, m *Message, u domain.User) error {
 	t, err := a.store.ActiveTicket(ctx, u.ID)
 	if err == nil {
-		return a.clientScreen(ctx, m, clientTicketScenario(t.ID), "Напишите сообщение — специалист ответит прямо в этом чате", clientActiveKeyboard)
+		return a.clientScreen(ctx, m, clientTicketScenario(t.ID), fmt.Sprintf("Заявка №%d · %s\nНапишите дополнение здесь — оно попадёт специалисту.", t.ID, statusName(t.Status)), clientActiveKeyboard)
 	}
 	if !errors.Is(err, domain.ErrNotFound) {
 		return err
@@ -48,9 +49,9 @@ func (a *Adapter) clientMenu(ctx context.Context, m *Message, u domain.User) err
 	if d, exists, err := a.getDraft(ctx, u.ID); err != nil {
 		return err
 	} else if exists && d.Step != "submitted" {
-		return a.resumeDraft(ctx, m)
+		return a.clientScreen(ctx, m, "client_home", "У вас есть незавершённая заявка. Продолжить заполнение или удалить черновик?", clientDraftMenuKeyboard)
 	}
-	return a.clientHome(ctx, m, "Чем можем помочь?")
+	return a.clientHome(ctx, m, "Поддержка BVK\nВыберите действие.")
 }
 func (a *Adapter) cancelClientDraft(ctx context.Context, m *Message) error {
 	if _, err := a.store.ActiveTicket(ctx, m.Chat.ID); err == nil {
@@ -62,7 +63,7 @@ func (a *Adapter) cancelClientDraft(ctx context.Context, m *Message) error {
 		return err
 	}
 	a.cleanupBestEffort(ctx, scope(m.Chat.ID, m), "draft")
-	return a.clientHome(ctx, m, "Подача заявки отменена. Вы можете создать новую!")
+	return a.clientHome(ctx, m, "Черновик удалён. Вы можете создать новую заявку.")
 }
 func (w *Worker) clientNotification(ctx context.Context, t domain.Ticket, text string) error {
 	if t.IsGroup() {
@@ -89,16 +90,16 @@ func (w *Worker) clientNotification(ctx context.Context, t domain.Ticket, text s
 		text = clientAcceptedText
 		if t.Urgency.Valid() {
 			level := urgencyLabel(t.Urgency)
-			text = fmt.Sprintf("Заявка #%d принята.\n\nСрочность: %s.\nСпециалист ответит в этом чате.", t.ID, level)
+			text = fmt.Sprintf("Заявка №%d принята\nОтдел: %s · Срочность: %s\nСпециалист ответит в этом чате.", t.ID, t.Department.Name(), level)
 			if t.Urgency == domain.Urgent {
-				text = fmt.Sprintf("Заявка #%d принята.\n\nСрочность: %s.\nОтдел %s уведомлён. Специалист ответит в этом чате.", t.ID, level, t.Department.Name())
+				text = fmt.Sprintf("Заявка №%d принята\nОтдел: %s · Срочность: %s\nСпециалист ответит в этом чате.", t.ID, t.Department.Name(), level)
 			}
 			calendar := tickets.DefaultCalendar()
 			if w.cfg.EndHour > w.cfg.StartHour {
 				calendar.StartHour, calendar.EndHour = w.cfg.StartHour, w.cfg.EndHour
 			}
 			if !calendar.IsWorking(t.CreatedAt) {
-				text += fmt.Sprintf("\n\nПоддержка работает по будням с %02d:00 до %02d:00 по иркутскому времени. Заявка зарегистрирована; её обработка начнётся в рабочее время.", calendar.StartHour, calendar.EndHour)
+				text += fmt.Sprintf("\n\nСейчас нерабочее время. Поддержка начнёт обработку в будни с %02d:00 до %02d:00 (Иркутск).", calendar.StartHour, calendar.EndHour)
 			}
 		}
 	}
@@ -133,11 +134,11 @@ func (w *Worker) clientNotification(ctx context.Context, t domain.Ticket, text s
 func clientErrorText(err error) string {
 	switch {
 	case errors.Is(err, domain.ErrConflict):
-		return "Этот шаг уже завершён или заявка изменилась. Откройте меню заново: /menu."
+		return "Эта кнопка устарела. Откройте текущую форму через /form или проверьте заявку через /current."
 	case errors.Is(err, domain.ErrForbidden):
 		return "Это действие недоступно для вашего аккаунта"
 	case errors.Is(err, domain.ErrNotFound):
-		return "Заявка или этот шаг больше не доступны. Откройте меню: /menu."
+		return "Заявка или этот шаг больше недоступны. Посмотрите список через /tickets."
 	case errors.Is(err, domain.ErrInvalid):
 		return "Не удалось выполнить действие. Проверьте ввод и попробуйте ещё раз"
 	default:

@@ -72,17 +72,17 @@ func statusName(s domain.Status) string {
 }
 func clientTicketButtons(t domain.Ticket) [][]Button {
 	id := fmt.Sprint(t.ID)
-	buttons := [][]Button{{{Text: "История", Data: "history:" + id}}}
+	buttons := [][]Button{{{Text: "История заявки", Data: "history:" + id}}}
 	if t.Status.Active() {
-		buttons = append(buttons, []Button{{Text: "Отменить заявку", Data: "cancel:" + id}})
+		buttons = append(buttons, []Button{{Text: "Завершить заявку", Data: "cancel:" + id}})
 	}
 	return buttons
 }
 
-var menuAliases = map[string]string{"Создать заявку": "/new", "Помощь": "/help", "Отменить заявку": "/cancel_current", "Отменить подачу заявки": "/cancel_draft", "📝 Новая заявка": "/new", "📋 Мои заявки": "/tickets", "💬 Текущая заявка": "/current", "❌ Отменить заявку": "/cancel_current", "ℹ️ Помощь": "/help", "📊 Отчёт": "/report"}
+var menuAliases = map[string]string{"Создать заявку": "/new", "Мои заявки": "/tickets", "Помощь": "/help", "Продолжить заявку": "/form", "Удалить черновик": "/cancel_draft", "Завершить заявку": "/cancel_current", "Отменить заявку": "/cancel_current", "Отменить подачу заявки": "/cancel_draft", "📝 Новая заявка": "/new", "📋 Мои заявки": "/tickets", "💬 Текущая заявка": "/current", "❌ Отменить заявку": "/cancel_current", "ℹ️ Помощь": "/help", "📊 Отчёт": "/report"}
 var staffKeyboard = [][]string{{"📋 Мои заявки", "📊 Отчёт"}, {"ℹ️ Помощь"}}
 var engineerKeyboard = [][]string{{"📋 Мои заявки"}, {"ℹ️ Помощь"}}
-var clientKeyboard = [][]string{{"Создать заявку", "Помощь"}}
+var clientKeyboard = [][]string{{"Создать заявку"}, {"Мои заявки", "Помощь"}}
 
 func (a *Adapter) menu(ctx context.Context, m *Message, u domain.User) error {
 	if u.Role == "engineer" {
@@ -97,8 +97,8 @@ func (a *Adapter) menu(ctx context.Context, m *Message, u domain.User) error {
 // Help answers are retained. They are not a transient step of a flow: a person taps
 // Помощь to read something, and a screen registered under the disposable home
 // scenario was wiped by the next cleanup, which is why the button looked dead.
-const clientHelpText = "Чтобы обратиться в поддержку, нажмите «Создать заявку», выберите отдел, срочность и опишите проблему. Специалист ответит прямо здесь.\n\nКарточка по номеру: /ticket ID. Список: /tickets. Переписка: /history ID. Продолжить форму: /form. После завершения создайте новую заявку."
-const staffHelpText = "В группе отдела: возьмите заявку кнопкой. Обычные сообщения и вложения инженеров текущего отдела в актуальном топике автоматически уходят клиенту. Служебный ввод для закрытия и передачи не пересылается. В очереди нажмите Закрыть задачу, в топике — Закрыть тикет; Передать предложит выбрать отдел и причину. /ticket ID — карточка, /history ID — переписка, /tickets — список, /report — отчёт для администратора. Для отмены ввода нажмите Отменить."
+const clientHelpText = "Как получить помощь\n\n1. Нажмите «Создать заявку».\n2. Выберите отдел и срочность, опишите проблему.\n3. Ответ специалиста придёт в этот чат.\n\nПрошлые обращения — «Мои заявки». Незавершённую форму откройте командой /form.\n\nДополнительные команды: /ticket ID — карточка, /history ID — переписка."
+const staffHelpText = "Работа с заявкой\n\nВ очереди нажмите «Взять в работу». Пишите клиенту в актуальном топике: обычные сообщения и вложения доставляются автоматически.\n\n«Передать» предложит другой отдел и комментарий. «Завершить заявку» запросит итог для клиента. Служебный ввод не пересылается.\n\n/tickets — список, /history ID — переписка, /report — отчёт администратора."
 
 func (a *Adapter) help(ctx context.Context, m *Message, u domain.User) error {
 	if u.Role != "client" {

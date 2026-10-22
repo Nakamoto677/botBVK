@@ -284,10 +284,6 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 			} else if ok {
 				a.finishPrompt(ctx, key, p)
 			}
-			if e := a.deleteDraft(ctx, m.From.ID); e != nil {
-				return e
-			}
-			a.cleanupBestEffort(ctx, key, "draft")
 			return a.menu(ctx, m, user)
 		} else if e != nil && !errors.Is(e, domain.ErrNotFound) {
 			return e
@@ -311,12 +307,6 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 		} else if exists {
 			a.finishPrompt(ctx, key, p)
 		}
-		if m.Chat.Type == "private" {
-			if e := a.deleteDraft(ctx, m.From.ID); e != nil {
-				return e
-			}
-			a.cleanupBestEffort(ctx, key, "draft")
-		}
 		return a.menu(ctx, m, user)
 	}
 	if text == "/form" {
@@ -334,7 +324,7 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 	if text == "/current" || text == "/cancel_current" {
 		t, e := a.store.ActiveTicket(ctx, m.From.ID)
 		if errors.Is(e, domain.ErrNotFound) {
-			return a.say(ctx, m, "Активной заявки нет. Нажмите Новая заявка.", nil)
+			return a.say(ctx, m, "Активной заявки нет. Нажмите «Создать заявку».", nil)
 		}
 		if e != nil {
 			return e
@@ -382,10 +372,7 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 		}
 		a.cleanupBestEffort(ctx, scope(m.From.ID, m), "client_home")
 		a.cleanupBestEffort(ctx, scope(m.From.ID, m), "draft")
-		if err := a.clientScreen(ctx, m, "draft", "Создание заявки.", clientDraftKeyboard); err != nil {
-			return err
-		}
-		return a.sayAux(ctx, m, m.From.ID, "draft", "Выберите направление.", a.draftDepartments(d))
+			return a.sayAux(ctx, m, m.From.ID, "draft", "Новая заявка · 1 из 3\nКакой отдел поможет с проблемой?", a.draftDepartments(d))
 	}
 	if strings.HasPrefix(text, "/") {
 		return a.help(ctx, m, user)
