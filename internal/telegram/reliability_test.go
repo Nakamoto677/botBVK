@@ -472,6 +472,10 @@ func TestDraftFileReplacementRestartSubmitAndStaleScreens(t *testing.T) {
 	}
 	callback("new:it:" + d.Generation)
 	// The form asks for urgency before it accepts the description.
+	d, err = store.LoadDraft(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
 	callback("urgency:routine:" + d.Generation)
 	m.ID = 2
 	m.Text = ""

@@ -15,7 +15,7 @@ import (
 )
 
 func businessError(err error) bool {
-	return errors.Is(err, domain.ErrInvalid) || errors.Is(err, domain.ErrForbidden) || errors.Is(err, domain.ErrConflict) || errors.Is(err, domain.ErrNotFound)
+	return errors.Is(err, domain.ErrInvalid) || errors.Is(err, domain.ErrForbidden) || errors.Is(err, domain.ErrConflict) || errors.Is(err, domain.ErrNotFound) || errors.Is(err, domain.ErrRateLimited)
 }
 func (a *Adapter) processUpdate(ctx context.Context, entry domain.StoredUpdate) error {
 	var u Update
@@ -25,6 +25,7 @@ func (a *Adapter) processUpdate(ctx context.Context, entry domain.StoredUpdate) 
 		a.activeUpdate = entry.ID
 		a.activeActor = 0
 		a.answeredCallback = false
+		a.sensitiveUpdate = false
 		if u.Callback != nil {
 			a.activeActor = u.Callback.From.ID
 		} else if u.Message != nil {
@@ -49,6 +50,13 @@ func (a *Adapter) processUpdate(ctx context.Context, entry domain.StoredUpdate) 
 	if err == nil || businessError(err) {
 		if err != nil {
 			a.respondError(ctx, u, err)
+		}
+		if a.sensitiveUpdate {
+			if sensitive, ok := a.store.(interface {
+				FinishSensitiveUpdate(context.Context, int64) error
+			}); ok {
+				return sensitive.FinishSensitiveUpdate(ctx, entry.ID)
+			}
 		}
 		return a.store.FinishUpdate(ctx, entry.ID)
 	}

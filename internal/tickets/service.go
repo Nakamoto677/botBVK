@@ -2,6 +2,7 @@ package tickets
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,8 +14,9 @@ import (
 )
 
 type Service struct {
-	store domain.Store
-	now   func() time.Time
+	store        domain.Store
+	now          func() time.Time
+	companyCodes map[string]int64
 }
 
 func urgencyText(u domain.Urgency) string {
@@ -30,6 +32,108 @@ func urgencyText(u domain.Urgency) string {
 
 func New(store domain.Store) *Service {
 	return &Service{store: store, now: func() time.Time { return time.Now().UTC() }}
+}
+
+func NewWithCompanyCodes(store domain.Store, codes map[string]int64) *Service {
+	s := New(store)
+	s.companyCodes = codes
+	return s
+}
+
+// CompanyCodeVersion lets a pending confirmation expire when the configured
+// credential changes. Only its digest is stored with the workflow.
+func (s *Service) CompanyCodeVersion(companyID int64) string {
+	for code, id := range s.companyCodes {
+		if id == companyID {
+			return fmt.Sprintf("%x", sha256.Sum256([]byte(code)))
+		}
+	}
+	return ""
+}
+
+// CompanyForCode checks an invitation against the active company catalog and
+// records failed attempts without storing the credential.
+func (s *Service) CompanyForCode(ctx context.Context, userID int64, input string) (domain.Company, error) {
+	var company domain.Company
+	if userID <= 0 {
+		return company, domain.ErrForbidden
+	}
+	code, err := domain.NormalizeCompanyCode(input)
+	companyID := s.companyCodes[code]
+	valid := err == nil && companyID > 0
+	if valid {
+		companies, listErr := s.store.Companies(ctx)
+		if listErr != nil {
+			return company, listErr
+		}
+		valid = false
+		for _, candidate := range companies {
+			if candidate.ID == companyID {
+				company, valid = candidate, true
+				break
+			}
+		}
+	}
+	limiter, ok := s.store.(interface {
+		RecordCompanyCodeAttempt(context.Context, int64, bool) (bool, error)
+	})
+	if !ok {
+		return domain.Company{}, domain.ErrInvalid
+	}
+	blocked, err := limiter.RecordCompanyCodeAttempt(ctx, userID, valid)
+	if err != nil {
+		return domain.Company{}, err
+	}
+	if blocked {
+		return domain.Company{}, domain.ErrRateLimited
+	}
+	if !valid {
+		return domain.Company{}, domain.ErrInvalid
+	}
+	return company, nil
+}
+
+// BindCompany is the only user-facing way to authorize or change a client's
+// company. The caller must first prove possession of its current code.
+func (s *Service) BindCompany(ctx context.Context, id int64, name string, companyID int64) error {
+	if id <= 0 || companyID <= 0 {
+		return domain.ErrInvalid
+	}
+	return s.store.Transact(ctx, func(tx domain.Tx) error {
+		u, err := tx.GetUser(ctx, id)
+		if err != nil && !errors.Is(err, domain.ErrNotFound) {
+			return err
+		}
+		if err == nil && u.Role != "client" {
+			return domain.ErrForbidden
+		}
+		if err == nil && u.Approved && u.CompanyID == companyID {
+			return nil
+		}
+		if _, err = tx.ActiveTicket(ctx, id); err == nil {
+			return domain.ErrConflict
+		} else if !errors.Is(err, domain.ErrNotFound) {
+			return err
+		}
+		previousCompanyID := int64(0)
+		if u.Approved {
+			previousCompanyID = u.CompanyID
+		}
+		u.ID, u.CompanyID, u.Role, u.Approved = id, companyID, "client", true
+		if name = strings.TrimSpace(name); name != "" {
+			u.Name = name
+		}
+		if err = tx.SaveUser(ctx, u); err != nil {
+			return err
+		}
+		binding, ok := tx.(interface {
+			CompleteCompanyBinding(context.Context, int64, int64, int64) error
+		})
+		if !ok {
+			return domain.ErrInvalid
+		}
+		return binding.CompleteCompanyBinding(ctx, id, previousCompanyID, companyID)
+	})
 }
 func staff(u domain.User) bool {
 	return u.Approved && (u.Role == "engineer" || u.Role == "dispatcher" || u.Role == "admin")

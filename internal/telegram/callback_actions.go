@@ -2,11 +2,8 @@ package telegram
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"strconv"
-	"strings"
-	"time"
 
 	"bot-bvk/internal/domain"
 )
@@ -14,60 +11,6 @@ import (
 // Registered-callback actions live here so that callback stays a dispatcher.
 // Every method receives the parsed callback and the raw token parts, returns the
 // business error, and leaves acknowledgement to the caller.
-
-func (a *Adapter) callbackCompany(ctx context.Context, c *Callback, id int64) error {
-	if c.Message == nil || c.Message.Chat.Type != "private" {
-		return domain.ErrForbidden
-	}
-	_ = a.client.Answer(ctx, c.ID, "")
-	a.markCallbackAnswered()
-	companies, err := a.store.Companies(ctx)
-	if err != nil {
-		return err
-	}
-	valid := false
-	selectedCompany := ""
-	for _, co := range companies {
-		valid = valid || co.ID == id
-		if co.ID == id {
-			selectedCompany = co.Name
-		}
-	}
-	if !valid {
-		return a.registrationCompanies(ctx, c.Message, c.From.ID, true)
-	}
-	err = a.service.Register(ctx, c.From.ID, strings.TrimSpace(c.From.FirstName+" "+c.From.LastName), id)
-	if errors.Is(err, domain.ErrInvalid) {
-		return a.registrationCompanies(ctx, c.Message, c.From.ID, true)
-	}
-	if err == nil {
-		registered, e := a.store.User(ctx, c.From.ID)
-		if e != nil {
-			return e
-		}
-		err = a.updateName(ctx, registered, c.From)
-	}
-	if err == nil {
-		requests, e := a.store.AccessRequests(ctx)
-		if e != nil {
-			return e
-		}
-		for _, request := range requests {
-			if request.UserID == c.From.ID && request.Status == "pending" {
-				data, _ := json.Marshal(map[string]any{"request_id": request.ID, "user_id": request.UserID, "company_id": request.CompanyID})
-				err = a.store.Transact(ctx, func(tx domain.Tx) error {
-					return tx.Enqueue(ctx, domain.Operation{Kind: "access_request_notification", Payload: data, AvailableAt: time.Now().UTC(), State: "pending"})
-				})
-				break
-			}
-		}
-	}
-	if err == nil {
-		a.cleanupBestEffort(ctx, scope(c.From.ID, c.Message), "registration")
-		return a.sayAux(ctx, c.Message, c.From.ID, "registration_result", "Запрос на доступ к компании «"+selectedCompany+"» отправлен администратору. Сообщим здесь, когда он примет решение.", nil)
-	}
-	return err
-}
 
 func (a *Adapter) callbackNewDraft(ctx context.Context, c *Callback, parts []string) error {
 	d, valid, err := a.boundDraft(ctx, c, parts, "department")

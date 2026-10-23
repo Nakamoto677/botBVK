@@ -22,33 +22,7 @@ func (a *Adapter) admin(ctx context.Context, m *Message, u domain.User) error {
 	}
 	switch fields[0] {
 	case "/requests":
-		requests, err := a.store.AccessRequests(ctx)
-		if err != nil {
-			return err
-		}
-		pending := 0
-		for _, r := range requests {
-			if r.Status != "pending" {
-				continue
-			}
-			pending++
-			company, e := companyName(ctx, a.store, r.CompanyID)
-			if e != nil {
-				return e
-			}
-			name, e := displayName(ctx, a.store, r.UserID, "Пользователь")
-			if e != nil {
-				return e
-			}
-			body := fmt.Sprintf("Запрос доступа №%d\nПользователь: %s · ID %d\nКомпания: %s\nПроверьте принадлежность пользователя перед решением.", r.ID, name, r.UserID, company)
-			if err = a.say(ctx, m, body, [][]Button{{{Text: "Одобрить доступ", Data: fmt.Sprintf("approve:%d", r.ID)}, {Text: "Отклонить доступ", Data: fmt.Sprintf("reject:%d", r.ID)}}}); err != nil {
-				return err
-			}
-		}
-		if pending == 0 {
-			return a.say(ctx, m, "Запросов на доступ нет.", nil)
-		}
-		return nil
+		return a.say(ctx, m, "Ручное подтверждение больше не требуется. Сотрудник подключается по коду своей компании.", nil)
 	case "/retry":
 		if len(fields) != 2 {
 			return domain.ErrInvalid

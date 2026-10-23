@@ -12,6 +12,7 @@ type CompanyDefinition struct {
 	Key        string `json:"id"`
 	Name       string `json:"name"`
 	LegacyName string `json:"legacy_name,omitempty"`
+	AccessCode string `json:"access_code,omitempty"`
 }
 
 func LegacyCompany(name string) CompanyDefinition {

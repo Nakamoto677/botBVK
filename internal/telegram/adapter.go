@@ -72,6 +72,7 @@ type Adapter struct {
 	// query, so an error path must not answer again and replace the text the user
 	// just received. Only the single inbox goroutine writes it.
 	answeredCallback bool
+	sensitiveUpdate  bool
 
 	client    *Client
 	store     domain.Store
@@ -289,6 +290,9 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 	if command, ok := menuAliases[text]; ok {
 		text = command
 	}
+	if strings.HasPrefix(text, "/start join_") {
+		return a.handleCompanyCode(ctx, m, strings.TrimPrefix(text, "/start join_"))
+	}
 	if text == "/start" {
 		if user, e := a.store.User(ctx, m.From.ID); e == nil && user.Approved {
 			if e = a.updateName(ctx, user, m.From); e != nil {
@@ -304,14 +308,29 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 		} else if e != nil && !errors.Is(e, domain.ErrNotFound) {
 			return e
 		}
-		return a.registrationCompanies(ctx, m, m.From.ID, false)
+		return a.registrationIntro(ctx, m, m.From.ID)
 	}
 	user, err := a.store.User(ctx, m.From.ID)
 	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			if !strings.HasPrefix(text, "/") {
+				p, exists, e := a.loadPrompt(ctx, scope(m.From.ID, m))
+				if e != nil {
+					return e
+				}
+				if exists && p.Action == "company_code" {
+					return a.handleCompanyCode(ctx, m, text)
+				}
+			}
+			return a.registrationIntro(ctx, m, m.From.ID)
+		}
 		return err
 	}
 	if !user.Approved {
-		return a.say(ctx, m, "Доступ ещё не подтверждён. Ожидайте решения администратора — сообщим здесь.", nil)
+		if !strings.HasPrefix(text, "/") {
+			return a.handleCompanyCode(ctx, m, text)
+		}
+		return a.registrationIntro(ctx, m, m.From.ID)
 	}
 	if err = a.updateName(ctx, user, m.From); err != nil {
 		return err
@@ -324,6 +343,9 @@ func (a *Adapter) Handle(ctx context.Context, u Update) error {
 			a.finishPrompt(ctx, key, p)
 		}
 		return a.menu(ctx, m, user)
+	}
+	if text == "/company" {
+		return a.companyScreen(ctx, m, user)
 	}
 	if text == "/form" {
 		return a.resumeDraft(ctx, m)
@@ -499,9 +521,20 @@ func (a *Adapter) callback(ctx context.Context, c *Callback) error {
 	var err error
 	switch action {
 	case "company":
-		err = a.callbackCompany(ctx, c, id)
+		_ = a.client.Answer(ctx, c.ID, "Код компании вводится в личном чате.")
+		a.markCallbackAnswered()
+		if c.Message == nil || c.Message.Chat.Type != "private" || c.Message.Chat.ID != c.From.ID {
+			return domain.ErrForbidden
+		}
+		message := *c.Message
+		message.From = c.From
+		return a.registrationIntro(ctx, &message, c.From.ID)
 	case "approve", "reject":
-		err = a.service.ApproveAccess(ctx, c.From.ID, id, action == "approve")
+		_ = a.client.Answer(ctx, c.ID, "Этот запрос устарел. Доступ теперь открывается по коду компании.")
+		a.markCallbackAnswered()
+		return nil
+	case "companychange", "bindcompany", "cancelcompany":
+		return a.callbackCompanyAccess(ctx, c, action, id, parts)
 	case "new":
 		return a.callbackNewDraft(ctx, c, parts)
 	case "urgency":
@@ -951,7 +984,8 @@ func (a *Adapter) groupTags() map[domain.Department][]string {
 	return tags
 }
 func historyAuthorized(u domain.User, t domain.Ticket) bool {
-	return u.Approved && ((u.Role == "client" && u.ID == t.ClientID && u.CompanyID == t.CompanyID) || staffAuthorized(u, t))
+	finished := t.Status == domain.Closed || t.Status == domain.Cancelled
+	return u.Approved && ((u.Role == "client" && u.ID == t.ClientID && (u.CompanyID == t.CompanyID || finished)) || staffAuthorized(u, t))
 }
 func (a *Adapter) historyDestination(m *Message, u domain.User, t domain.Ticket) bool {
 	if m.Chat.Type == "private" {

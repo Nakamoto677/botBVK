@@ -45,6 +45,9 @@ var persistentTopicsMigration string
 //go:embed index_cleanup.sql
 var indexCleanupMigration string
 
+//go:embed company_code_access.sql
+var companyCodeAccessMigration string
+
 type Store struct{ pool *pgxpool.Pool }
 type transaction struct{ tx pgx.Tx }
 
@@ -155,6 +158,16 @@ func (s *Store) Migrate(ctx context.Context) error {
 		}
 		if marker.RowsAffected() != 0 {
 			_, err = tx.Exec(ctx, indexCleanupMigration)
+		}
+		if err != nil {
+			return err
+		}
+		marker, err = tx.Exec(ctx, "INSERT INTO bvk_migrations(version) VALUES('011_company_code_access') ON CONFLICT DO NOTHING")
+		if err != nil {
+			return err
+		}
+		if marker.RowsAffected() != 0 {
+			_, err = tx.Exec(ctx, companyCodeAccessMigration)
 		}
 		return err
 	})

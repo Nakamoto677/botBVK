@@ -86,10 +86,10 @@ func clientTicketButtons(t domain.Ticket) [][]Button {
 	return buttons
 }
 
-var menuAliases = map[string]string{"Создать заявку": "/new", "Мои заявки": "/tickets", "Помощь": "/help", "Продолжить заявку": "/form", "Удалить черновик": "/cancel_draft", "Завершить заявку": "/cancel_current", "Отменить заявку": "/cancel_current", "Отменить подачу заявки": "/cancel_draft", "📝 Новая заявка": "/new", "📋 Мои заявки": "/tickets", "💬 Текущая заявка": "/current", "❌ Отменить заявку": "/cancel_current", "ℹ️ Помощь": "/help", "📊 Отчёт": "/report"}
+var menuAliases = map[string]string{"Создать заявку": "/new", "Мои заявки": "/tickets", "Помощь": "/help", "Компания": "/company", "Продолжить заявку": "/form", "Удалить черновик": "/cancel_draft", "Завершить заявку": "/cancel_current", "Отменить заявку": "/cancel_current", "Отменить подачу заявки": "/cancel_draft", "📝 Новая заявка": "/new", "📋 Мои заявки": "/tickets", "💬 Текущая заявка": "/current", "❌ Отменить заявку": "/cancel_current", "ℹ️ Помощь": "/help", "📊 Отчёт": "/report"}
 var staffKeyboard = [][]string{{"📋 Мои заявки", "📊 Отчёт"}, {"ℹ️ Помощь"}}
 var engineerKeyboard = [][]string{{"📋 Мои заявки"}, {"ℹ️ Помощь"}}
-var clientKeyboard = [][]string{{"Создать заявку"}, {"Мои заявки", "Помощь"}}
+var clientKeyboard = [][]string{{"Создать заявку"}, {"Мои заявки", "Компания"}, {"Помощь"}}
 
 func (a *Adapter) menu(ctx context.Context, m *Message, u domain.User) error {
 	if u.Role == "engineer" {
@@ -104,7 +104,7 @@ func (a *Adapter) menu(ctx context.Context, m *Message, u domain.User) error {
 // Help answers are retained. They are not a transient step of a flow: a person taps
 // Помощь to read something, and a screen registered under the disposable home
 // scenario was wiped by the next cleanup, which is why the button looked dead.
-const clientHelpText = "Как получить помощь\n\n1. Нажмите «Создать заявку».\n2. Выберите отдел и срочность, опишите проблему.\n3. Ответ специалиста придёт в этот чат.\n\nПрошлые обращения — «Мои заявки». Незавершённую форму откройте командой /form.\n\nДополнительные команды: /ticket ID — карточка, /history ID — переписка."
+const clientHelpText = "Как получить помощь\n\n1. Нажмите «Создать заявку».\n2. Выберите отдел и срочность, опишите проблему.\n3. Ответ специалиста придёт в этот чат.\n\nПрошлые обращения — «Мои заявки». Сменить компанию можно через «Компания». Незавершённую форму откройте командой /form.\n\nДополнительные команды: /ticket ID — карточка, /history ID — переписка."
 const staffHelpText = "Работа с заявкой\n\nВ очереди нажмите «Взять в работу». Пишите клиенту в актуальном топике: обычные сообщения и вложения доставляются автоматически.\n\n«Передать» предложит другой отдел и комментарий. «Завершить заявку» запросит итог для клиента. Служебный ввод не пересылается.\n\n/tickets — список, /history ID — переписка, /report — отчёт администратора."
 
 func (a *Adapter) help(ctx context.Context, m *Message, u domain.User) error {

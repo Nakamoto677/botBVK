@@ -286,6 +286,12 @@ func (a *Adapter) consumePrompt(ctx context.Context, m *Message, u domain.User) 
 		a.finishPrompt(ctx, key, p)
 		return true, a.say(ctx, m, "Время служебного ввода истекло. Нажмите кнопку нужного действия заново.", nil)
 	}
+	if p.Action == "company_code" {
+		return true, a.handleCompanyCode(ctx, m, text)
+	}
+	if p.Action == "company_confirm" {
+		return true, a.sayAux(ctx, m, m.From.ID, companyAccessScenario, "Подтвердите переход кнопкой в предыдущем сообщении или начните заново через /company.", nil)
+	}
 	if p.Phase != "reason" {
 		return true, a.sayAux(ctx, m, m.From.ID, actionScenario(p.TicketID), "Сначала выберите отдел кнопкой в предыдущем вопросе.", nil)
 	}

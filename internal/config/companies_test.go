@@ -45,3 +45,19 @@ func TestCompanyFormatsAndValidation(t *testing.T) {
 		t.Fatal("missing catalog accepted")
 	}
 }
+
+func TestCompanyAccessCodesAreRequiredAndUniqueForBot(t *testing.T) {
+	companies := Companies{{Key: "a", Name: "A", AccessCode: "00000-00000-00000-00000-000000"}, {Key: "b", Name: "B", AccessCode: "11111-11111-11111-11111-111111"}}
+	codes, err := companies.AccessCodes()
+	if err != nil || len(codes) != 2 {
+		t.Fatalf("valid codes rejected: %v", err)
+	}
+	companies[1].AccessCode = companies[0].AccessCode
+	if _, err := companies.AccessCodes(); err == nil {
+		t.Fatal("duplicate code accepted")
+	}
+	companies[1].AccessCode = ""
+	if _, err := companies.AccessCodes(); err == nil {
+		t.Fatal("missing code accepted")
+	}
+}

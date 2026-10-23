@@ -31,7 +31,7 @@ func TestClientHelpButtonAnswersAndKeepsTheAnswer(t *testing.T) {
 		t.Fatalf("help answer does not describe the client flow: %q", delivered[0])
 	}
 	// The answer must carry the client menu, otherwise the person is left without a way on.
-	assertReplyLabels(t, (*requests)[len(*requests)-1], "Создать заявку", "Мои заявки", "Помощь")
+	assertReplyLabels(t, (*requests)[len(*requests)-1], "Создать заявку", "Мои заявки", "Компания", "Помощь")
 
 	// And it must be retained, not queued for deletion.
 	kept := store.aux[auxKey{1, 1, 0, "client_kept"}]

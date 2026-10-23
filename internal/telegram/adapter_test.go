@@ -166,6 +166,14 @@ func TestHistoryRequiresOwnAccountAndCompany(t *testing.T) {
 			t.Errorf("%#v: %v", tc.u, got)
 		}
 	}
+	ticket.Status = domain.Closed
+	if !historyAuthorized(domain.User{ID: 1, CompanyID: 11, Role: "client", Approved: true}, ticket) {
+		t.Fatal("owner lost completed history after company change")
+	}
+	ticket.Status = domain.New
+	if historyAuthorized(domain.User{ID: 1, CompanyID: 11, Role: "client", Approved: true}, ticket) {
+		t.Fatal("old active company became accessible")
+	}
 }
 func TestHistoryShowsInitialDescriptionAndRevisionsWithoutInternalNotes(t *testing.T) {
 	store := &adapterStore{user: domain.User{ID: 1, CompanyID: 10, Role: "client", Approved: true}, ticket: domain.Ticket{ID: 7, ClientID: 1, CompanyID: 10, Department: domain.IT, Description: "Initial problem"}, storedMessages: []domain.Message{{AuthorID: 1, Direction: "inbound", Text: "Updated detail", Revisions: []domain.MessageRevision{{Text: "Original detail"}}}, {Direction: "internal", Text: "SECRET NOTE"}}}

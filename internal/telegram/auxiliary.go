@@ -102,7 +102,11 @@ func (a *Adapter) loadPrompt(ctx context.Context, key promptKey) (prompt, bool, 
 	return p, ok, nil
 }
 func (a *Adapter) finishPrompt(ctx context.Context, key promptKey, p prompt) {
-	if err := a.cleanupAux(ctx, key, actionScenario(p.TicketID)); err != nil {
+	scenario := actionScenario(p.TicketID)
+	if p.Action == "company_code" || p.Action == "company_confirm" {
+		scenario = companyAccessScenario
+	}
+	if err := a.cleanupAux(ctx, key, scenario); err != nil {
 		log.Printf("action UI cleanup deferred: %v", err)
 		return
 	}

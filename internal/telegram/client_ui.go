@@ -17,8 +17,8 @@ const clientCancelDeclinedText = "Заявка #%d остаётся открыт
 const clientCancelDraftLabel = "Отменить подачу заявки"
 
 var clientDraftKeyboard = [][]string{{clientCancelDraftLabel}}
-var clientActiveKeyboard = [][]string{{"Мои заявки"}, {"Завершить заявку"}}
-var clientDraftMenuKeyboard = [][]string{{"Продолжить заявку"}, {"Удалить черновик"}}
+var clientActiveKeyboard = [][]string{{"Мои заявки"}, {"Компания"}, {"Завершить заявку"}}
+var clientDraftMenuKeyboard = [][]string{{"Продолжить заявку"}, {"Удалить черновик"}, {"Компания"}}
 
 // Client menus are contextual; the staff keyboard builders are independent.
 // The markup shape itself is shared with SendKeyboard through replyKeyboard.

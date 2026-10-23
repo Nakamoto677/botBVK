@@ -31,6 +31,7 @@ export TELEGRAM_BOT_TOKEN='…'
 
 ```sh
 cp config.example.json config.json      # заполнить admin_id, staff, отделы, компании
+go run ./cmd/bvk-code -bot ИМЯ_БОТА    # выпустить код и ссылку для каждой компании
 export DATABASE_URL='postgres://…'
 export TELEGRAM_BOT_TOKEN='…'
 

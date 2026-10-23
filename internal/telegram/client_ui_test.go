@@ -63,7 +63,7 @@ func TestMinimalClientFlowDraftCancelAcceptedAndFinished(t *testing.T) {
 		}
 	}
 	send("/start")
-	assertReplyLabels(t, (*requests)[len(*requests)-1], "Создать заявку", "Мои заявки", "Помощь")
+	assertReplyLabels(t, (*requests)[len(*requests)-1], "Создать заявку", "Мои заявки", "Компания", "Помощь")
 	send("Создать заявку")
 	raw, _ := json.Marshal((*requests)[len(*requests)-1]["reply_markup"])
 	var options Markup
@@ -72,7 +72,7 @@ func TestMinimalClientFlowDraftCancelAcceptedAndFinished(t *testing.T) {
 		t.Fatal(string(raw))
 	}
 	callback("cancel:" + a.drafts[1].Generation)
-	assertReplyLabels(t, (*requests)[len(*requests)-1], "Создать заявку", "Мои заявки", "Помощь")
+	assertReplyLabels(t, (*requests)[len(*requests)-1], "Создать заявку", "Мои заявки", "Компания", "Помощь")
 	if svc.createCalls != 0 || len(a.drafts) != 0 {
 		t.Fatal("draft cancellation created ticket")
 	}
@@ -139,7 +139,7 @@ func TestMinimalClientFlowDraftCancelAcceptedAndFinished(t *testing.T) {
 	if last["text"] != clientAcceptedText {
 		t.Fatal(last)
 	}
-	assertReplyLabels(t, last, "Мои заявки", "Завершить заявку")
+	assertReplyLabels(t, last, "Мои заявки", "Компания", "Завершить заявку")
 	send("Завершить заявку")
 	if (*requests)[len(*requests)-1]["text"] != "Завершить заявку №7?\nПереписка сохранится в истории. Если помощь ещё нужна, оставьте заявку открытой." {
 		t.Fatal("wrong confirmation")
@@ -155,7 +155,7 @@ func TestMinimalClientFlowDraftCancelAcceptedAndFinished(t *testing.T) {
 	if last["text"] != "Заявка №7 завершена по вашему запросу. Если помощь снова понадобится, создайте новую заявку." {
 		t.Fatal(last)
 	}
-	assertReplyLabels(t, last, "Создать заявку", "Мои заявки", "Помощь")
+	assertReplyLabels(t, last, "Создать заявку", "Мои заявки", "Компания", "Помощь")
 	if len(s.aux[auxKey{1, 1, 0, "client_home"}]) != 1 {
 		t.Fatalf("auxiliary UI retained: %v", s.aux)
 	}
@@ -180,7 +180,7 @@ func TestMenuAndStartPreserveDraft(t *testing.T) {
 		if a.drafts[1].Generation != original.Generation || a.drafts[1].Step != "department" {
 			t.Fatalf("%s removed draft", command)
 		}
-		assertReplyLabels(t, (*requests)[len(*requests)-1], "Продолжить заявку", "Удалить черновик")
+		assertReplyLabels(t, (*requests)[len(*requests)-1], "Продолжить заявку", "Удалить черновик", "Компания")
 	}
 }
 func TestStaleDraftCancelAndDepartmentCannotAffectActiveTicket(t *testing.T) {
@@ -220,7 +220,7 @@ func TestLateApprovalPreservesActiveMenuAndRegistersTemporaryMessage(t *testing.
 	if err := w.clientAccessNotification(context.Background(), 1, "Доступ одобрен"); err != nil {
 		t.Fatal(err)
 	}
-	assertReplyLabels(t, (*requests)[len(*requests)-1], "Мои заявки", "Завершить заявку")
+	assertReplyLabels(t, (*requests)[len(*requests)-1], "Мои заявки", "Компания", "Завершить заявку")
 	if len(s.aux[auxKey{1, 1, 0, clientTicketScenario(7)}]) != 1 {
 		t.Fatal("approval notification not tracked")
 	}

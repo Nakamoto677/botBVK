@@ -47,6 +47,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	var configuredCodes map[string]string
+	if !*migrate && !*backup {
+		configuredCodes, err = cfg.Companies.AccessCodes()
+		if err != nil {
+			return err
+		}
+	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	store, err := postgres.New(ctx, cfg.DatabaseURL)
@@ -81,6 +88,14 @@ func run() error {
 	}
 	if *migrate {
 		return nil
+	}
+	companyCodes := make(map[string]int64, len(configuredCodes))
+	for code, key := range configuredCodes {
+		id, e := store.CompanyIDByIdentifier(ctx, key)
+		if e != nil {
+			return fmt.Errorf("company %q: %w", key, e)
+		}
+		companyCodes[code] = id
 	}
 	if err = cfg.ValidateTelegram(); err != nil {
 		return err
@@ -155,7 +170,7 @@ func run() error {
 	for _, day := range cfg.Holidays {
 		calendar.Holidays[day] = true
 	}
-	service := tickets.New(store)
+	service := tickets.NewWithCompanyCodes(store, companyCodes)
 	scheduler := &monitor.Scheduler{Store: store, Config: cfg, Calendar: calendar}
 	tc.ReportCSV = func(ctx context.Context) (string, error) { return report.CSV(ctx, store, calendar) }
 	adapter := telegram.NewAdapter(client, store, service, tc)
@@ -214,6 +229,7 @@ func configureBotCommands(ctx context.Context, client *telegram.Client, cfg conf
 	clientCommands := []map[string]string{
 		{"command": "start", "description": "Открыть поддержку"},
 		{"command": "menu", "description": "Открыть меню"},
+		{"command": "company", "description": "Посмотреть или сменить компанию"},
 		{"command": "new", "description": "Создать заявку"},
 		{"command": "tickets", "description": "Посмотреть мои заявки"},
 		{"command": "current", "description": "Открыть активную заявку"},
@@ -227,7 +243,6 @@ func configureBotCommands(ctx context.Context, client *telegram.Client, cfg conf
 		{"command": "help", "description": "Как работать с заявками"},
 	}
 	adminCommands := append(append([]map[string]string{}, staffCommands...),
-		map[string]string{"command": "requests", "description": "Проверить запросы доступа"},
 		map[string]string{"command": "report", "description": "Получить отчёт"})
 	set := func(scope map[string]any, commands []map[string]string) {
 		if err := client.Call(ctx, "setMyCommands", map[string]any{"commands": commands, "scope": scope}, nil); err != nil {

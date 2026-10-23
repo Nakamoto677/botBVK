@@ -169,7 +169,7 @@ func TestApprovalNotificationShowsPersistentClientMenu(t *testing.T) {
 			} `json:"reply_markup"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&p)
-		if !p.Markup.Persistent || !p.Markup.Resize || len(p.Markup.Keyboard) != 2 || len(p.Markup.Keyboard[0]) != 1 || len(p.Markup.Keyboard[1]) != 2 || p.Markup.Keyboard[0][0].Text != "Создать заявку" {
+		if !p.Markup.Persistent || !p.Markup.Resize || len(p.Markup.Keyboard) != 3 || len(p.Markup.Keyboard[0]) != 1 || len(p.Markup.Keyboard[1]) != 2 || p.Markup.Keyboard[0][0].Text != "Создать заявку" || p.Markup.Keyboard[1][1].Text != "Компания" {
 			t.Fatal("persistent client menu missing", p)
 		}
 		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1}}`))
