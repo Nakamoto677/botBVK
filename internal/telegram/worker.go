@@ -313,12 +313,20 @@ func (w *Worker) refresh(ctx context.Context, t domain.Ticket) error {
 		if err = w.rate(ctx, t.TopicChatID, "editMessageText"); err != nil {
 			return err
 		}
-		if err = messageEditError(w.client.Call(ctx, "editMessageText", map[string]any{"chat_id": t.TopicChatID, "message_id": t.TopicMessageID, "text": text, "parse_mode": "HTML", "reply_markup": Markup{Buttons: buttons}}, nil)); err != nil {
-			return err
+		err = w.client.Call(ctx, "editMessageText", map[string]any{"chat_id": t.TopicChatID, "message_id": t.TopicMessageID, "text": text, "parse_mode": "HTML", "reply_markup": Markup{Buttons: buttons}}, nil)
+		if topicCardNotEditable(err) {
+			t, err = w.replaceTopicCard(ctx, t, text, buttons)
+			if err == nil {
+				// A confirmed replacement may predate a failed DB write and a
+				// subsequent status change. Bring that same message up to date.
+				if err = w.rate(ctx, t.TopicChatID, "editMessageText"); err == nil {
+					err = messageEditError(w.client.Call(ctx, "editMessageText", map[string]any{"chat_id": t.TopicChatID, "message_id": t.TopicMessageID, "text": text, "parse_mode": "HTML", "reply_markup": Markup{Buttons: buttons}}, nil))
+				}
+			}
+		} else {
+			err = messageEditError(err)
 		}
-	}
-	if !t.IsGroup() && t.TopicID != 0 && provisioningStatus(t.Status) {
-		if err = w.ensureEngineerKeyboard(ctx, t); err != nil {
+		if err != nil {
 			return err
 		}
 	}
@@ -495,7 +503,7 @@ func (w *Worker) ensureTopicCard(ctx context.Context, t domain.Ticket) (domain.T
 		if err := w.ensureTransferContext(ctx, t); err != nil {
 			return t, err
 		}
-		return t, w.ensureEngineerKeyboard(ctx, t)
+		return t, nil
 	}
 	if t.TopicID == 0 {
 		return t, domain.ErrConflict
@@ -504,6 +512,8 @@ func (w *Worker) ensureTopicCard(ctx context.Context, t domain.Ticket) (domain.T
 	if err != nil {
 		return t, err
 	}
+	// A card must remain editable. ReplyKeyboardRemove makes a Telegram message
+	// uneditable; keyboard cleanup belongs only on non-editable service notices.
 	sent, err := w.sendEngineerCard(ctx, t.TopicChatID, t.TopicID, text, engineerTopicButtons(t))
 	if err != nil {
 		return t, err
@@ -528,10 +538,6 @@ func (w *Worker) ensureTopicCard(ctx context.Context, t domain.Ticket) (domain.T
 		return nil
 	})
 	if err == nil {
-		// The engineer keyboard is deliberately not installed here. Every caller runs
-		// replayDeferred and finishProvision right after this, and refresh at the end
-		// installs it. Doing it here as well sent the keyboard notice ahead of the
-		// messages that were waiting for the topic, and paid a second events query.
 		err = w.ensureTransferContext(ctx, t)
 	}
 	return t, err
@@ -549,11 +555,19 @@ func (w *Worker) notifyAdmins(ctx context.Context, text string) error {
 	})
 }
 func (w *Worker) card(ctx context.Context, t domain.Ticket) (string, error) {
+	return w.cardWithStatus(ctx, t, statusName(t.Status))
+}
+
+// cardWithStatus renders the text card with an explicit status line. The queue
+// card retired from the department a ticket was transferred out of passes
+// transferredStatusName: the ticket's own status already belongs to the
+// receiving department by then.
+func (w *Worker) cardWithStatus(ctx context.Context, t domain.Ticket, status string) (string, error) {
 	name, company, assignee, extras, err := w.cardParts(ctx, t, 0)
 	if err != nil {
 		return "", err
 	}
-	return engineerCardText(t, name, company, assignee) + extras, nil
+	return engineerCardTextLimit(t, status, name, company, assignee, engineerDescriptionLimit) + extras, nil
 }
 
 // cardCaption renders the same card for a media caption. Telegram caps a caption
@@ -562,11 +576,15 @@ func (w *Worker) card(ctx context.Context, t domain.Ticket) (string, error) {
 // escaping, so no HTML tag is ever cut. Extras are dropped if they would leave no
 // room for the description at all.
 func (w *Worker) cardCaption(ctx context.Context, t domain.Ticket, mediaID int64) (string, error) {
+	return w.cardCaptionWithStatus(ctx, t, mediaID, statusName(t.Status))
+}
+
+func (w *Worker) cardCaptionWithStatus(ctx context.Context, t domain.Ticket, mediaID int64, status string) (string, error) {
 	name, company, assignee, extras, err := w.cardParts(ctx, t, mediaID)
 	if err != nil {
 		return "", err
 	}
-	prefix := engineerCardPrefix(t, name, company, assignee)
+	prefix := engineerCardPrefix(t, status, name, company, assignee)
 	suffix := engineerCardSuffix(t)
 	fixed := visibleTextLength(prefix) + visibleTextLength(suffix) + visibleTextLength(extras)
 	budget := captionLimit - queueCaptionReserve - fixed
@@ -578,7 +596,7 @@ func (w *Worker) cardCaption(ctx context.Context, t domain.Ticket, mediaID int64
 	if budget < 1 {
 		budget = 1
 	}
-	return engineerCardTextLimit(t, name, company, assignee, budget) + extras, nil
+	return engineerCardTextLimit(t, status, name, company, assignee, budget) + extras, nil
 }
 
 func (w *Worker) cardParts(ctx context.Context, t domain.Ticket, mediaID int64) (name, company, assignee, extras string, err error) {
@@ -836,7 +854,18 @@ func (w *Worker) topicClosingNotice(ctx context.Context, op domain.Operation, ch
 			return nil
 		}
 	}
-	sent, err := w.send(ctx, chat, topic, text, nil)
+	// The closing notice is the last bot message in this client topic. Remove
+	// its persistent reply keyboard on that message before closing the topic.
+	// Queue topics never receive a reply keyboard removal here.
+	var markup any = map[string]any{"remove_keyboard": true}
+	for _, team := range w.cfg.Departments {
+		if team.ChatID == chat && team.QueueTopicID == topic {
+			markup = nil
+			break
+		}
+	}
+	key := fmt.Sprintf("topic-closing:%d:%d:%d:%x", op.ID, chat, topic, sha256.Sum256([]byte(text)))
+	sent, err := w.textParts(ctx, key, chat, topic, text, markup)
 	if err != nil {
 		return err
 	}

@@ -14,8 +14,9 @@ import (
 // `field "inline_keyboard" must be of type Array` and the screen was lost for good.
 func TestQueuedScreenSendsItsKeyboardAsAnObject(t *testing.T) {
 	for name, markup := range map[string]string{
-		"inline keyboard": `{"inline_keyboard":[[{"text":"Открыть общую","url":"https://t.me/c/1/2"}]]}`,
-		"reply keyboard":  `{"keyboard":[[{"text":"Создать заявку"},{"text":"Помощь"}]],"resize_keyboard":true}`,
+		"inline keyboard":  `{"inline_keyboard":[[{"text":"Открыть общую","url":"https://t.me/c/1/2"}]]}`,
+		"reply keyboard":   `{"keyboard":[[{"text":"Создать заявку"},{"text":"Помощь"}]],"resize_keyboard":true}`,
+		"keyboard removal": `{"remove_keyboard":true}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			client, capture := capturedClient()

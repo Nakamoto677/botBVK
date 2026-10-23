@@ -211,7 +211,10 @@ func TestQueueCardEditsCaptionAndRetireNoteAfterTransfer(t *testing.T) {
 	*calls = nil
 	transferred := ticket
 	transferred.Department = domain.OneC
-	transferred.Status = domain.New
+	// The retirement edit may be retried or delivered after a restart, so it can
+	// run when the receiving department has already closed the ticket. The card
+	// must still say «Передана», not inherit that live status.
+	transferred.Status = domain.Closed
 	transferred.QueueMessageID = 0
 	transferred.QueueMediaType = ""
 	transferred.TopicID = 0
@@ -228,13 +231,59 @@ func TestQueueCardEditsCaptionAndRetireNoteAfterTransfer(t *testing.T) {
 		t.Fatalf("retired media card was not edited as a caption: %+v", *calls)
 	}
 	caption, _ := (*calls)[0].body["caption"].(string)
-	// The photo card caption is built for the *new* department after transfer;
-	// it must keep its description and gain the transfer note.
+	// The card stays in the source queue: it must describe that department and
+	// gain the transfer note, not show the receiving department or its status.
+	if !strings.Contains(caption, "Заявка #7 · Передана") || strings.Contains(caption, "Закрыта") {
+		t.Fatalf("retired card kept the live status: %q", caption)
+	}
+	if !strings.Contains(caption, "<b>Отдел:</b> IT") || strings.Contains(caption, "<b>Отдел:</b> 1С") {
+		t.Fatalf("retired card shows the receiving department: %q", caption)
+	}
 	if !strings.Contains(caption, "Не открывается 1С") || !strings.Contains(caption, "Передано в отдел: 1С") {
 		t.Fatalf("retire note lost content: %q", caption)
 	}
 	if markup, ok := (*calls)[0].body["reply_markup"].(map[string]any); ok && len(markup) != 0 {
 		t.Fatalf("retired card kept its keyboard: %+v", (*calls)[0].body)
+	}
+}
+
+// The text queue card follows the same retirement rule as the media caption:
+// the source department keeps a card that says «Передана» both right after the
+// transfer (status `new`) and when a retried edit lands after the receiving
+// department has already closed the ticket.
+func TestRetiredTextCardSaysTransferredAndKeepsSourceDepartment(t *testing.T) {
+	for _, status := range []domain.Status{domain.New, domain.Closed} {
+		t.Run(string(status), func(t *testing.T) {
+			client, calls := queueMediaServer(t, okMediaResponse)
+			ticket, _ := photoTicket()
+			ticket.Status = status
+			ticket.QueueMessageID = 77
+			store := &workerStore{ticket: ticket, current: ticket}
+			worker := queueWorker(client, store)
+			payload, _ := json.Marshal(map[string]any{
+				"chat_id": -100, "message_id": 77,
+				"from_department": "it", "to_department": "1c",
+			})
+			if err := worker.Handle(context.Background(), domain.Operation{ID: 10, Kind: "retire_queue_card", TicketID: ticket.ID, Payload: payload}); err != nil {
+				t.Fatal(err)
+			}
+			if len(*calls) != 1 || (*calls)[0].method != "editMessageText" {
+				t.Fatalf("retired text card was not edited in place: %+v", *calls)
+			}
+			text, _ := (*calls)[0].body["text"].(string)
+			if !strings.Contains(text, "Заявка #7 · Передана") || strings.Contains(text, "Закрыта") || strings.Contains(text, "· Новая") {
+				t.Fatalf("retired card kept the live status: %q", text)
+			}
+			if !strings.Contains(text, "<b>Отдел:</b> IT") || strings.Contains(text, "<b>Отдел:</b> 1С") {
+				t.Fatalf("retired card shows the receiving department: %q", text)
+			}
+			if !strings.Contains(text, "Не открывается 1С") || !strings.Contains(text, "Передано в отдел: 1С") {
+				t.Fatalf("retired card lost content: %q", text)
+			}
+			if markup, ok := (*calls)[0].body["reply_markup"].(map[string]any); ok && len(markup) != 0 {
+				t.Fatalf("retired card kept its keyboard: %+v", (*calls)[0].body)
+			}
+		})
 	}
 }
 

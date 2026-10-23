@@ -55,6 +55,13 @@ func companyName(ctx context.Context, store domain.Store, id int64) (string, err
 func departmentName(d domain.Department) string {
 	return d.Name()
 }
+
+// transferredStatusName is the card label for a queue card left behind in the
+// department a ticket was transferred out of. It is deliberately not a
+// domain.Status: the ticket itself is already `new` in the receiving department,
+// and its live status must not leak into the queue it has just left.
+const transferredStatusName = "Передана"
+
 func statusName(s domain.Status) string {
 	switch s {
 	case domain.New:

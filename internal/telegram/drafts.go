@@ -91,7 +91,7 @@ func draftGeneration() string {
 	return hex.EncodeToString(b[:])
 }
 func draftButtons(d draft) [][]Button {
-	return [][]Button{{{Text: "Отправить заявку", Data: "submit:" + d.Generation}}, {{Text: "Изменить описание", Data: "changedescription:" + d.Generation}}, {{Text: "Изменить срочность", Data: "changeurgency:" + d.Generation}}, {{Text: "Изменить отдел", Data: "changedepartment:" + d.Generation}}, {{Text: clientCancelDraftLabel, Data: "cancel:" + d.Generation}}}
+	return [][]Button{{{Text: "✅ Отправить заявку", Data: "submit:" + d.Generation}}, {{Text: "Изменить описание", Data: "changedescription:" + d.Generation}}, {{Text: "Изменить срочность", Data: "changeurgency:" + d.Generation}}, {{Text: "Изменить отдел", Data: "changedepartment:" + d.Generation}}, {{Text: clientCancelDraftLabel, Data: "cancel:" + d.Generation}}}
 }
 func (a *Adapter) draftDepartments(d draft) [][]Button {
 	buttons := a.departmentButtons("new")

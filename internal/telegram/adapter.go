@@ -535,7 +535,7 @@ func (a *Adapter) callback(ctx context.Context, c *Callback) error {
 		return domain.ErrConflict
 	case "close", "transfer":
 		err = a.beginStaffPrompt(ctx, c, id, action)
-	case "transferdept", "transferwithout", "cancelconfirm", "promptcancel":
+	case "transferdept", "transferwithout", "closewithout", "cancelconfirm", "promptcancel":
 		err = a.promptCallback(ctx, c, action, id, parts)
 	case "tickets":
 		return a.callbackTickets(ctx, c, parts)
@@ -594,7 +594,7 @@ func (a *Adapter) staff(ctx context.Context, m *Message) error {
 	if err != nil {
 		return err
 	}
-	if consumed, e := a.engineerKeyboardAction(ctx, m); consumed {
+	if consumed, e := a.engineerKeyboardAction(ctx, m, user); consumed {
 		return e
 	}
 	text := strings.TrimSpace(m.Text)

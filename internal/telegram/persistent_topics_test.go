@@ -172,6 +172,13 @@ func TestClosingNoticeNamesTicketResolutionAuthorAndTime(t *testing.T) {
 	if len(texts) != 1 || texts[0] != want {
 		t.Fatalf("closing notice = %q, want %q", texts, want)
 	}
+	if len(record.sends) != 1 {
+		t.Fatalf("closing notice sends = %v", record.sends)
+	}
+	markup, ok := record.sends[0]["reply_markup"].(map[string]any)
+	if !ok || markup["remove_keyboard"] != true || record.sends[0]["message_thread_id"] != float64(10) {
+		t.Fatalf("closing notice did not remove the client-topic keyboard: %v", record.sends[0])
+	}
 }
 
 func TestCloseOnDeletedTopicDoesNotBecomePermanentFailure(t *testing.T) {

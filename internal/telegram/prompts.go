@@ -21,12 +21,26 @@ type prompt struct {
 }
 
 func scope(actor int64, m *Message) promptKey { return promptKey{actor, m.Chat.ID, m.ThreadID} }
+func (a *Adapter) clientTopic(m *Message, t domain.Ticket) bool {
+	team := a.cfg.Departments[t.Department]
+	return !t.IsGroup() && t.TopicID != 0 && m.Chat.ID == t.TopicChatID && m.ThreadID == t.TopicID && m.ThreadID != team.QueueTopicID
+}
 func (a *Adapter) promptText(ctx context.Context, m *Message, actor, ticket int64, action, text string) error {
 	label := "Отменить завершение"
+	buttons := [][]Button{}
 	if action == "transfer" {
 		label = "Отменить передачу"
+	} else if action == "close" {
+		t, err := a.store.Ticket(ctx, ticket)
+		if err != nil {
+			return err
+		}
+		if a.clientTopic(m, t) {
+			buttons = append(buttons, []Button{{Text: "Без комментария", Data: fmt.Sprintf("closewithout:%d", ticket)}})
+		}
 	}
-	return a.sayAux(ctx, m, actor, actionScenario(ticket), fmt.Sprintf("Заявка №%d: %s", ticket, text), [][]Button{{{Text: label, Data: fmt.Sprintf("promptcancel:%d", ticket)}}})
+	buttons = append(buttons, []Button{{Text: label, Data: fmt.Sprintf("promptcancel:%d", ticket)}})
+	return a.sayAux(ctx, m, actor, actionScenario(ticket), fmt.Sprintf("Заявка №%d: %s", ticket, text), buttons)
 }
 func (a *Adapter) beginStaffPrompt(ctx context.Context, c *Callback, id int64, action string) error {
 	if c.Message == nil {
@@ -142,6 +156,33 @@ func (a *Adapter) promptCallback(ctx context.Context, c *Callback, action string
 	if action == "promptcancel" {
 		a.finishPrompt(ctx, key, p)
 		return a.declineNotice(ctx, c, p)
+	}
+	if action == "closewithout" {
+		if p.Action != "close" || p.Phase != "reason" {
+			return domain.ErrInvalid
+		}
+		t, e := a.store.Ticket(ctx, id)
+		if e != nil {
+			return e
+		}
+		if !a.clientTopic(c.Message, t) {
+			return domain.ErrConflict
+		}
+		u, e := a.store.User(ctx, c.From.ID)
+		if e != nil {
+			return e
+		}
+		if !staffAuthorized(u, t) || !t.Status.Active() || t.Department != p.SourceDepartment || t.RoutingGeneration != p.Generation || t.RoutingPending {
+			return domain.ErrConflict
+		}
+		if u.Role != "admin" && u.Role != "dispatcher" && t.AssigneeID != u.ID {
+			return domain.ErrForbidden
+		}
+		if e = a.service.Close(ctx, c.From.ID, id, "Без комментария"); e != nil {
+			return e
+		}
+		a.finishPrompt(ctx, key, p)
+		return nil
 	}
 	if action == "transferwithout" {
 		if p.Action != "transfer" || p.Phase != "reason" {

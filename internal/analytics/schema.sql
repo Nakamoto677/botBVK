@@ -29,8 +29,11 @@ CREATE TABLE IF NOT EXISTS analytics.state_intervals (
 ALTER TABLE analytics.tickets ADD COLUMN IF NOT EXISTS response_waiting_work_seconds double precision;
 ALTER TABLE analytics.cycles ADD COLUMN IF NOT EXISTS first_response_department text;
 CREATE INDEX IF NOT EXISTS analytics_events_period ON analytics.events(kind,occurred_at,ticket_id);
-CREATE INDEX IF NOT EXISTS analytics_cycles_end ON analytics.cycles(ended_at,ticket_id);
 CREATE INDEX IF NOT EXISTS analytics_intervals_time ON analytics.state_intervals(started_at,ended_at);
+-- Index audit 2026-10-22: no report filters cycles by ended_at; every query joins
+-- cycles by (ticket_id,number) or reads one ticket's cycles. The index only added
+-- work to the minute-by-minute snapshot publish, so old databases drop it here.
+DROP INDEX IF EXISTS analytics.analytics_cycles_end;
 CREATE TABLE IF NOT EXISTS analytics.employees (id bigint PRIMARY KEY, name text NOT NULL, role text NOT NULL, departments text[] NOT NULL);
 CREATE TABLE IF NOT EXISTS analytics.companies (id bigint PRIMARY KEY, name text NOT NULL);
 CREATE TABLE IF NOT EXISTS analytics.departments (code text PRIMARY KEY, name text NOT NULL);

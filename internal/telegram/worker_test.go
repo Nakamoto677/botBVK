@@ -260,12 +260,11 @@ func TestInitialTopicCardSupportsPublicReplyAndRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// One card delivery is recorded here. The engineer keyboard notice is installed
-	// by refresh after provisioning finishes, so it is not part of this step.
+	// A retry must not send either another card or a group-wide reply keyboard.
 	if bound.TopicMessageID != 99 || len(store.events) != 1 || store.events[0].Kind != "message_delivered" {
 		t.Fatal("initial card not persisted", bound, store.events)
 	}
-	if _, err = worker.ensureTopicCard(context.Background(), bound); err != nil || calls != 2 {
+	if _, err = worker.ensureTopicCard(context.Background(), bound); err != nil || calls != 1 {
 		t.Fatalf("retry duplicated card: %v calls %d", err, calls)
 	}
 	adapterStore := &adapterStore{user: domain.User{ID: 2, Role: "engineer", Approved: true, Departments: []domain.Department{domain.IT}}, ticket: bound, events: store.events}
@@ -416,6 +415,10 @@ func TestClosingNoticeTargetsOldTopicAndSurvivesCloseRetry(t *testing.T) {
 					sends++
 					if p["text"] != tc.want {
 						t.Error(p)
+					}
+					markup, ok := p["reply_markup"].(map[string]any)
+					if !ok || markup["remove_keyboard"] != true {
+						t.Error("closed topic kept its reply keyboard", p)
 					}
 				} else {
 					closes++

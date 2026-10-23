@@ -2,12 +2,10 @@ package telegram
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
 	"strings"
-	"time"
 
 	"bot-bvk/internal/domain"
 )
@@ -38,31 +36,34 @@ func engineerField(text string, limit int) string {
 const engineerDescriptionLimit = 2400
 
 func engineerCardText(t domain.Ticket, client, company, assignee string) string {
-	return engineerCardTextLimit(t, client, company, assignee, engineerDescriptionLimit)
+	return engineerCardTextLimit(t, statusName(t.Status), client, company, assignee, engineerDescriptionLimit)
 }
 
-// engineerCardTextLimit renders the whole card with a caller-chosen description
-// budget. A media message can only carry a 1024-unit caption, so the queue photo
-// card passes a smaller budget while the regular text card keeps 2400.
-func engineerCardTextLimit(t domain.Ticket, client, company, assignee string, descriptionLimit int) string {
+// engineerCardTextLimit renders the whole card with a caller-chosen status line
+// and description budget. The status is explicit because a retired queue card
+// describes the transfer, not the live ticket: it must read «Передана» even
+// though the ticket already belongs to the receiving department. A media message
+// can only carry a 1024-unit caption, so the queue photo card passes a smaller
+// budget while the regular text card keeps 2400.
+func engineerCardTextLimit(t domain.Ticket, status, client, company, assignee string, descriptionLimit int) string {
 	description := strings.TrimSpace(t.Description)
 	if description == "" {
 		description = "Описание не указано"
 	}
-	return engineerCardPrefix(t, client, company, assignee) + html.EscapeString(engineerTextBound(description, descriptionLimit)) + engineerCardSuffix(t)
+	return engineerCardPrefix(t, status, client, company, assignee) + html.EscapeString(engineerTextBound(description, descriptionLimit)) + engineerCardSuffix(t)
 }
 
 // engineerCardPrefix ends right after the "Описание" heading, and
 // engineerCardSuffix carries the transient provisioning note. Keeping the pieces
 // separate lets a caption budget leave room for the queue-only extras without
 // cutting HTML tags or rebuilding the card in two places.
-func engineerCardPrefix(t domain.Ticket, client, company, assignee string) string {
+func engineerCardPrefix(t domain.Ticket, status, client, company, assignee string) string {
 	if t.AssigneeID == 0 {
 		assignee = "Не назначен"
 	}
-	heading := fmt.Sprintf("Заявка #%d · %s", t.ID, statusName(t.Status))
+	heading := fmt.Sprintf("Заявка #%d · %s", t.ID, status)
 	if t.Urgency == domain.Urgent {
-		heading = fmt.Sprintf("🔴 СРОЧНАЯ ЗАЯВКА #%d · %s", t.ID, statusName(t.Status))
+		heading = fmt.Sprintf("🔴 СРОЧНАЯ ЗАЯВКА #%d · %s", t.ID, status)
 	}
 	urgency := urgencyLabel(t.Urgency)
 	if t.Urgency == domain.Urgent {
@@ -88,7 +89,7 @@ func engineerCardSuffix(t domain.Ticket) string {
 	return ""
 }
 func engineerTopicButtons(t domain.Ticket) [][]Button {
-	if !t.Status.Active() || t.Status == domain.New {
+	if !t.Status.Active() || t.Status == domain.New || t.RoutingPending {
 		return [][]Button{}
 	}
 	id := fmt.Sprint(t.ID)
@@ -132,9 +133,9 @@ func (w *Worker) sendEngineerCard(ctx context.Context, chat, topic int64, text s
 	return w.send(ctx, chat, topic, text, buttons, "HTML")
 }
 
-// Reply keyboards send ordinary text. The handler resolves that text only in
-// the source's current ticket topic, before public message relay or prompts.
-func (a *Adapter) engineerKeyboardAction(ctx context.Context, m *Message) (bool, error) {
+// Reply buttons send text, so only the current client conversation topic may
+// turn that text into an action. An old keyboard in Queue is removed on tap.
+func (a *Adapter) engineerKeyboardAction(ctx context.Context, m *Message, u domain.User) (bool, error) {
 	action := ""
 	switch strings.TrimSpace(m.Text) {
 	case engineerCloseLabel:
@@ -144,58 +145,39 @@ func (a *Adapter) engineerKeyboardAction(ctx context.Context, m *Message) (bool,
 	default:
 		return false, nil
 	}
+	if !u.Approved || (u.Role != "engineer" && u.Role != "admin" && u.Role != "dispatcher") {
+		return true, domain.ErrForbidden
+	}
+	for _, team := range a.cfg.Departments {
+		if m.Chat.ID == team.ChatID && m.ThreadID == team.QueueTopicID {
+			return true, a.removeQueueKeyboard(ctx, m)
+		}
+	}
 	t, err := a.store.TopicTicket(ctx, m.Chat.ID, m.ThreadID)
 	if errors.Is(err, domain.ErrNotFound) {
-		return true, a.say(ctx, m, "Откройте актуальный топик заявки и нажмите кнопку там. В очереди выберите действие на карточке заявки.", nil)
+		return true, a.say(ctx, m, "Откройте актуальный топик заявки и нажмите кнопку там.", nil)
 	}
 	if err != nil {
 		return true, err
 	}
-	if t.TopicID == 0 || m.Chat.ID != t.TopicChatID || m.ThreadID != t.TopicID || !t.Status.Active() || m.ThreadID == a.cfg.Departments[t.Department].QueueTopicID {
+	if t.TopicID == 0 || m.Chat.ID != t.TopicChatID || m.ThreadID != t.TopicID || !t.Status.Active() || t.RoutingPending {
 		return true, domain.ErrConflict
 	}
 	if err = a.beginStaffPrompt(ctx, &Callback{From: m.From, Message: m}, t.ID, action); err != nil {
 		return true, err
 	}
-	// Only this validated control message is disposable, never free-text input.
 	if action == "transfer" {
 		return true, a.recordAux(ctx, m, m.From.ID, actionScenario(t.ID), m.ID)
 	}
 	return true, nil
 }
-func (w *Worker) ensureEngineerKeyboard(ctx context.Context, t domain.Ticket) error {
-	events, err := w.store.Events(ctx, t.ID)
-	if err != nil {
-		return err
+
+func (a *Adapter) removeQueueKeyboard(ctx context.Context, m *Message) error {
+	text := "В «Очереди» управляйте заявкой кнопками на её карточке."
+	remove := map[string]any{"remove_keyboard": true}
+	if a.activeUpdate != 0 {
+		return a.queueScreen(ctx, m, m.From.ID, "", text, remove)
 	}
-	for _, event := range events {
-		if event.Kind != "engineer_keyboard_ready" {
-			continue
-		}
-		var data struct {
-			ChatID  int64 `json:"chat_id"`
-			TopicID int64 `json:"topic_id"`
-		}
-		if json.Unmarshal(event.Data, &data) == nil && data.ChatID == t.TopicChatID && data.TopicID == t.TopicID {
-			return nil
-		}
-	}
-	return w.store.Transact(ctx, func(tx domain.Tx) error {
-		current, e := tx.GetTicket(ctx, t.ID)
-		if e != nil {
-			return e
-		}
-		if current.TopicChatID != t.TopicChatID || current.TopicID != t.TopicID || current.RoutingGeneration != t.RoutingGeneration || !provisioningStatus(current.Status) {
-			return domain.ErrConflict
-		}
-		if e = w.rate(ctx, t.TopicChatID, "sendMessage"); e != nil {
-			return e
-		}
-		keyboard := map[string]any{"keyboard": [][]map[string]string{{{"text": engineerCloseLabel}, {"text": engineerTransferLabel}}}, "resize_keyboard": true, "is_persistent": true, "input_field_placeholder": "Сообщение клиенту"}
-		if e = w.client.Call(ctx, "sendMessage", map[string]any{"chat_id": t.TopicChatID, "message_thread_id": t.TopicID, "text": "Сообщения в этом топике отправляются клиенту. Для управления заявкой используйте кнопки ниже.", "reply_markup": keyboard}, nil); e != nil {
-			return e
-		}
-		data, _ := json.Marshal(map[string]int64{"chat_id": t.TopicChatID, "topic_id": t.TopicID})
-		return tx.AddEvent(ctx, domain.Event{TicketID: t.ID, Kind: "engineer_keyboard_ready", Data: data, CreatedAt: time.Now().UTC()})
-	})
+	payload := map[string]any{"chat_id": m.Chat.ID, "message_thread_id": m.ThreadID, "text": text, "reply_markup": remove}
+	return a.client.Call(ctx, "sendMessage", payload, nil)
 }

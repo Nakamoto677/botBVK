@@ -144,7 +144,8 @@ func TestClaimNotifiesClientWithEngineerTelegramName(t *testing.T) {
 	for _, tt := range []struct {
 		name, username, want string
 	}{
-		{"Анна Иванова", "anna", "Анна Иванова"},
+		{"Анна Иванова", "anna", "Анна Иванова (@anna)"},
+		{"Анна Иванова", "@anna", "Анна Иванова (@anna)"},
 		{"", "anna", "@anna"},
 		{"", "", "служба поддержки"},
 	} {
@@ -240,6 +241,7 @@ func TestTransferRetainsHistoryAndClosedTicketAllowsNew(t *testing.T) {
 	s, f := setup()
 	engineer := f.users[3]
 	engineer.Name = "Мария Петрова"
+	engineer.Username = "maria"
 	f.users[3] = engineer
 	ticket, _ := s.Create(t.Context(), 1, domain.IT, "help")
 	_ = s.Claim(t.Context(), 2, ticket.ID)
@@ -278,7 +280,7 @@ func TestTransferRetainsHistoryAndClosedTicketAllowsNew(t *testing.T) {
 	if err := s.Claim(t.Context(), 3, v.ID); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := notificationText(t, f.ops[len(f.ops)-1]), fmt.Sprintf("Заявка №%d · В работе\nНа связи: Мария Петрова. Продолжайте переписку в этом чате.", v.ID); got != want {
+	if got, want := notificationText(t, f.ops[len(f.ops)-1]), fmt.Sprintf("Заявка №%d · В работе\nНа связи: Мария Петрова (@maria). Продолжайте переписку в этом чате.", v.ID); got != want {
 		t.Fatalf("claim notice = %q, want %q", got, want)
 	}
 	if f.ops[len(f.ops)-3].Kind != "create_topic" {

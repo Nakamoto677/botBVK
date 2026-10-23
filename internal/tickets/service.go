@@ -72,11 +72,16 @@ func (s *Service) notify(ctx context.Context, tx domain.Tx, t domain.Ticket, tex
 }
 
 func engineerName(u domain.User) string {
-	if name := strings.Join(strings.Fields(u.Name), " "); name != "" {
-		return name
+	name := strings.Join(strings.Fields(u.Name), " ")
+	username := strings.TrimPrefix(strings.TrimSpace(u.Username), "@")
+	if username != "" {
+		if name != "" {
+			return name + " (@" + username + ")"
+		}
+		return "@" + username
 	}
-	if username := strings.TrimSpace(u.Username); username != "" {
-		return "@" + strings.TrimPrefix(username, "@")
+	if name != "" {
+		return name
 	}
 	return "служба поддержки"
 }

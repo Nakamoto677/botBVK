@@ -215,6 +215,9 @@ func hasUsableKeyboard(raw json.RawMessage) bool {
 	if !ok {
 		return false
 	}
+	if object["remove_keyboard"] == true {
+		return true
+	}
 	for _, field := range []string{"inline_keyboard", "keyboard"} {
 		rows, present := object[field]
 		if !present {

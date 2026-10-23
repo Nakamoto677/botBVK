@@ -54,10 +54,20 @@ func TestEngineerCardEscapesPersonalDataAndBoundsRenderedUnicode(t *testing.T) {
 		t.Fatal("name injected card field")
 	}
 }
-func TestEngineerReplyButtonsStartServiceInputAndNeverRelay(t *testing.T) {
-	for _, label := range []string{engineerCloseLabel, engineerTransferLabel} {
+
+// The transfer label is only for the retired queue card. A card of a really
+// closed ticket must keep saying «Закрыта».
+func TestEngineerCardKeepsClosedStatus(t *testing.T) {
+	ticket := domain.Ticket{ID: 42, Status: domain.Closed, Department: domain.IT, Description: "Решено"}
+	text := engineerCardText(ticket, "Клиент", "Компания", "Специалист")
+	if !strings.Contains(text, "Заявка #42 · Закрыта") || strings.Contains(text, transferredStatusName) {
+		t.Fatalf("closed card status = %q", text)
+	}
+}
+func TestEngineerReplyButtonsStartActionInClientTopic(t *testing.T) {
+	for label, action := range map[string]string{engineerCloseLabel: "close", engineerTransferLabel: "transfer"} {
 		t.Run(label, func(t *testing.T) {
-			client, capture := capturedClient()
+			client, _ := capturedClient()
 			store := &adapterStore{user: domain.User{ID: 2, Role: "engineer", Approved: true, Departments: []domain.Department{domain.IT}}, ticket: domain.Ticket{ID: 7, Status: domain.InProgress, Department: domain.IT, AssigneeID: 2, TopicChatID: -100, TopicID: 10}}
 			svc := &adapterService{}
 			a := NewAdapter(client, store, svc, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100, QueueTopicID: 1}}})
@@ -65,74 +75,79 @@ func TestEngineerReplyButtonsStartServiceInputAndNeverRelay(t *testing.T) {
 			if err := a.Handle(context.Background(), Update{Message: message}); err != nil {
 				t.Fatal(err)
 			}
-			if len(svc.messages) != 0 || len(a.prompts) != 1 {
-				t.Fatal("button relayed or prompt absent")
+			if len(svc.messages) != 0 || svc.closedID != 0 || svc.transferID != 0 {
+				t.Fatal("reply button was relayed or completed action without confirmation")
 			}
-			raw, _ := json.Marshal(capture.bodies[len(capture.bodies)-1]["reply_markup"])
-			if !strings.Contains(string(raw), "Отменить") {
-				t.Fatal("no escape button")
-			}
-			if label == engineerCloseLabel {
-				message.Text = "Исправили доступ"
-				if err := a.Handle(context.Background(), Update{Message: message}); err != nil {
-					t.Fatal(err)
-				}
-				if svc.closedID != 7 || len(svc.messages) != 0 {
-					t.Fatal("resolution relayed")
-				}
+			p, ok := a.prompts[scope(2, message)]
+			if !ok || p.TicketID != 7 || p.Action != action {
+				t.Fatal("reply button did not start action", a.prompts)
 			}
 		})
 	}
 }
-func TestEngineerKeyboardDeniedOutsideCurrentTopicAndToNonAssignee(t *testing.T) {
-	client, _ := capturedClient()
-	store := &adapterStore{user: domain.User{ID: 3, Role: "engineer", Approved: true, Departments: []domain.Department{domain.IT}}, ticket: domain.Ticket{ID: 7, Status: domain.InProgress, Department: domain.IT, AssigneeID: 2, TopicChatID: -100, TopicID: 10}}
+func TestEngineerReplyButtonsCannotActInQueue(t *testing.T) {
+	client, capture := capturedClient()
+	store := &adapterStore{user: domain.User{ID: 2, Role: "engineer", Approved: true, Departments: []domain.Department{domain.IT}}, ticket: domain.Ticket{ID: 7, Status: domain.InProgress, Department: domain.IT, AssigneeID: 2, TopicChatID: -100, TopicID: 10}}
 	svc := &adapterService{}
 	a := NewAdapter(client, store, svc, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100, QueueTopicID: 1}}})
-	for _, topic := range []int64{1, 9, 10} {
-		err := a.Handle(context.Background(), Update{Message: &Message{From: Person{ID: 3}, Chat: Chat{ID: -100, Type: "supergroup"}, ThreadID: topic, Text: engineerCloseLabel}})
-		if err == nil {
-			t.Fatalf("unauthorized close accepted topic %d", topic)
+	for _, label := range []string{engineerCloseLabel, engineerTransferLabel} {
+		err := a.Handle(context.Background(), Update{Message: &Message{From: Person{ID: 2}, Chat: Chat{ID: -100, Type: "supergroup"}, ThreadID: 1, Text: label}})
+		if err != nil {
+			t.Fatalf("queue button was not retired: %v", err)
 		}
 	}
-	if len(svc.messages) != 0 || svc.closedID != 0 || len(a.prompts) != 0 {
-		t.Fatal("forbidden button changed state")
+	if len(svc.messages) != 0 || svc.closedID != 0 || svc.transferID != 0 || len(a.prompts) != 0 || len(capture.bodies) != 2 {
+		t.Fatal("queue button changed state", capture.bodies)
+	}
+	for _, body := range capture.bodies {
+		raw, _ := json.Marshal(body["reply_markup"])
+		if body["message_thread_id"] != float64(1) || !strings.Contains(string(raw), `"remove_keyboard":true`) {
+			t.Fatal("queue keyboard was not removed", body)
+		}
 	}
 }
-func TestEngineerKeyboardDurableOncePerBindingAndTopicMarkupSeparate(t *testing.T) {
+
+func TestEngineerReplyButtonCannotActInDifferentTopic(t *testing.T) {
+	client, _ := capturedClient()
+	store := &adapterStore{user: domain.User{ID: 2, Role: "engineer", Approved: true, Departments: []domain.Department{domain.IT}}, ticket: domain.Ticket{ID: 7, Status: domain.InProgress, Department: domain.IT, AssigneeID: 2, TopicChatID: -100, TopicID: 10}}
+	svc := &adapterService{}
+	a := NewAdapter(client, store, svc, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100, QueueTopicID: 1}}})
+	m := &Message{ID: 80, From: Person{ID: 2}, Chat: Chat{ID: -100, Type: "supergroup"}, ThreadID: 9, Text: engineerCloseLabel}
+	if err := a.Handle(context.Background(), Update{Message: m}); err != domain.ErrConflict {
+		t.Fatalf("different topic accepted button: %v", err)
+	}
+	if len(a.prompts) != 0 || len(svc.messages) != 0 || svc.closedID != 0 {
+		t.Fatal("different topic changed ticket")
+	}
+}
+
+func TestClaimUsesOnlyEditableInlineCards(t *testing.T) {
 	client, capture := capturedClient()
-	ticket := domain.Ticket{ID: 7, Status: domain.InProgress, Department: domain.IT, TopicChatID: -100, TopicID: 10, TopicMessageID: 99}
-	store := &workerStore{current: ticket}
-	worker := NewWorker(client, store, Config{})
+	ticket := domain.Ticket{ID: 7, ClientID: 12, CompanyID: 10, Status: domain.InProgress, Department: domain.IT, AssigneeID: 2, TopicChatID: -100, TopicID: 10, QueueMessageID: 77, RoutingPending: true, RoutingGeneration: 1}
+	store := &workerStore{ticket: ticket, current: ticket}
+	cfg := Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100, QueueTopicID: 1}}}
+	worker := NewWorker(client, store, cfg)
 	worker.interval = 0
-	if _, err := worker.ensureTopicCard(context.Background(), ticket); err != nil {
+	if err := worker.Handle(context.Background(), domain.Operation{ID: 5, Kind: "create_topic", TicketID: 7}); err != nil {
 		t.Fatal(err)
 	}
-	if len(capture.bodies) != 1 {
-		t.Fatal("keyboard not installed")
+	if store.current.RoutingPending || store.current.TopicMessageID == 0 {
+		t.Fatal("claim did not finish", store.current)
 	}
-	keyboard := capture.bodies[0]["reply_markup"].(map[string]any)
-	raw, _ := json.Marshal(keyboard)
-	if keyboard["is_persistent"] != true || capture.bodies[0]["message_thread_id"] != float64(10) || !strings.Contains(string(raw), engineerCloseLabel) {
-		t.Fatal(capture.bodies)
+	if len(capture.calls) != 3 || !strings.HasSuffix(capture.calls[0], "sendMessage") || !strings.HasSuffix(capture.calls[1], "editMessageText") || !strings.HasSuffix(capture.calls[2], "editMessageText") {
+		t.Fatal("claim must send one client card and edit both cards without an extra message", capture.calls, capture.bodies)
 	}
-	// A new worker models a restart; recorded binding suppresses a duplicate.
-	worker = NewWorker(client, store, Config{})
-	worker.interval = 0
-	if _, err := worker.ensureTopicCard(context.Background(), ticket); err != nil {
-		t.Fatal(err)
-	}
-	if len(capture.bodies) != 1 {
-		t.Fatal("keyboard duplicated on restart")
-	}
-	ticket.TopicID = 20
-	ticket.RoutingGeneration++
-	store.current = ticket
-	if _, err := worker.ensureTopicCard(context.Background(), ticket); err != nil {
-		t.Fatal(err)
-	}
-	if len(capture.bodies) != 2 {
-		t.Fatal("new topic did not receive controls")
+	for i, body := range capture.bodies {
+		raw, _ := json.Marshal(body["reply_markup"])
+		if strings.Contains(string(raw), `"keyboard"`) || strings.Contains(string(raw), `"remove_keyboard"`) {
+			t.Fatal("claim installed a group-wide reply keyboard", capture.calls[i], body)
+		}
+		if i == 0 && (body["message_thread_id"] != float64(10) || strings.Contains(string(raw), "close:7")) {
+			t.Fatal("client card sent to wrong topic or actions enabled before provisioning", body)
+		}
+		if i > 0 && (!strings.Contains(string(raw), `"callback_data":"close:7"`) || !strings.Contains(string(raw), `"callback_data":"transfer:7"`)) {
+			t.Fatal("inline actions missing from an edited card", body)
+		}
 	}
 }
 
@@ -173,8 +188,8 @@ func TestTransferPromptCommentAndControlCleanup(t *testing.T) {
 		s := &durableUIStore{adapterStore: &adapterStore{user: domain.User{ID: 2, Role: "engineer", Approved: true, Departments: []domain.Department{domain.IT}}, ticket: domain.Ticket{ID: 7, Status: domain.InProgress, Department: domain.IT, AssigneeID: 2, TopicChatID: -100, TopicID: 10}}, workflows: map[promptKey][]byte{}, aux: map[auxKey][]domain.AuxiliaryMessage{}}
 		svc := &adapterService{}
 		a := NewAdapter(client, s, svc, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100, QueueTopicID: 1}, domain.OneC: {ChatID: -200, QueueTopicID: 1}}})
-		m := &Message{ID: 80, From: Person{ID: 2}, Chat: Chat{ID: -100, Type: "supergroup"}, ThreadID: 10, Text: engineerTransferLabel}
-		if err := a.Handle(ctx, Update{Message: m}); err != nil {
+		m := &Message{ID: 80, From: Person{ID: 2}, Chat: Chat{ID: -100, Type: "supergroup"}, ThreadID: 10}
+		if err := a.beginStaffPrompt(ctx, &Callback{From: m.From, Message: m}, 7, "transfer"); err != nil {
 			t.Fatal(err)
 		}
 		// Restart must retain the engineer control's cleanup scope.
@@ -206,15 +221,15 @@ func TestTransferPromptCommentAndControlCleanup(t *testing.T) {
 				ID int64 `json:"message_id"`
 			}
 			json.Unmarshal(op.Payload, &p)
-			if p.ID == 80 {
+			if op.Kind == "delete_aux_message" {
 				removed = true
 			}
-			if p.ID == 81 {
-				t.Fatal("free-text reason deleted")
+			if p.ID == 80 || p.ID == 81 {
+				t.Fatal("ticket card or free-text reason deleted")
 			}
 		}
 		if !removed {
-			t.Fatal("transfer control retained")
+			t.Fatal("transfer prompt retained")
 		}
 	}
 }
@@ -237,6 +252,92 @@ func TestTransferWithoutCommentButtonCompletesPrompt(t *testing.T) {
 	}
 	if svc.transferID != 7 || svc.transferDepartment != domain.OneC || svc.transferReason != "-" || len(s.workflows) != 0 || len(svc.messages) != 0 {
 		t.Fatal("button did not complete a silent transfer")
+	}
+}
+
+func TestCloseWithoutCommentButtonCompletesPrompt(t *testing.T) {
+	client, capture := capturedClient()
+	s := &adapterStore{user: domain.User{ID: 2, Role: "engineer", Approved: true, Departments: []domain.Department{domain.IT}}, ticket: domain.Ticket{ID: 7, Status: domain.InProgress, Department: domain.IT, AssigneeID: 2, TopicChatID: -100, TopicID: 10, QueueMessageID: 77}}
+	svc := &adapterService{}
+	a := NewAdapter(client, s, svc, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100, QueueTopicID: 1}}})
+	card := &Message{ID: 77, From: Person{ID: 2}, Chat: Chat{ID: -100, Type: "supergroup"}, ThreadID: 10}
+	if err := a.Handle(context.Background(), Update{Callback: &Callback{ID: "close", From: card.From, Message: card, Data: "close:7"}}); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, body := range capture.bodies {
+		if text, _ := body["text"].(string); strings.Contains(text, "напишите итог решения") {
+			raw, _ := json.Marshal(body["reply_markup"])
+			found = strings.Contains(string(raw), `"callback_data":"closewithout:7"`) && strings.Contains(string(raw), `"text":"Без комментария"`) && strings.Contains(string(raw), `"callback_data":"promptcancel:7"`)
+		}
+	}
+	if !found {
+		t.Fatal("client-topic close prompt has no skip button", capture.bodies)
+	}
+	promptMessage := &Message{ID: 77, Chat: card.Chat, ThreadID: 10}
+	cb := &Callback{ID: "skip", From: card.From, Message: promptMessage, Data: "closewithout:7"}
+	if err := a.Handle(context.Background(), Update{Callback: cb}); err != nil {
+		t.Fatal(err)
+	}
+	if svc.closedID != 7 || svc.closeText != "Без комментария" || len(a.prompts) != 0 || len(svc.messages) != 0 {
+		t.Fatal("skip button did not close the ticket without a message", svc, a.prompts)
+	}
+	if err := a.Handle(context.Background(), Update{Callback: cb}); err != domain.ErrConflict {
+		t.Fatalf("old button was accepted again: %v", err)
+	}
+}
+
+func TestQueueClosePromptKeepsTextOnly(t *testing.T) {
+	client, capture := capturedClient()
+	s := &adapterStore{user: domain.User{ID: 2, Role: "engineer", Approved: true, Departments: []domain.Department{domain.IT}}, ticket: domain.Ticket{ID: 7, Status: domain.InProgress, Department: domain.IT, AssigneeID: 2, TopicChatID: -100, TopicID: 10, QueueMessageID: 77}}
+	svc := &adapterService{}
+	a := NewAdapter(client, s, svc, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100, QueueTopicID: 1}}})
+	card := &Message{ID: 77, From: Person{ID: 2}, Chat: Chat{ID: -100, Type: "supergroup"}, ThreadID: 1}
+	if err := a.Handle(context.Background(), Update{Callback: &Callback{ID: "close", From: card.From, Message: card, Data: "close:7"}}); err != nil {
+		t.Fatal(err)
+	}
+	foundPrompt := false
+	for _, body := range capture.bodies {
+		if text, _ := body["text"].(string); strings.Contains(text, "напишите итог решения") {
+			foundPrompt = true
+			raw, _ := json.Marshal(body["reply_markup"])
+			if strings.Contains(string(raw), "closewithout:7") || !strings.Contains(string(raw), "promptcancel:7") {
+				t.Fatal("queue prompt gained a skip button", body)
+			}
+		}
+	}
+	if !foundPrompt {
+		t.Fatal("queue close prompt missing", capture.bodies)
+	}
+	if err := a.Handle(context.Background(), Update{Callback: &Callback{ID: "old-skip", From: card.From, Message: card, Data: "closewithout:7"}}); err != domain.ErrConflict {
+		t.Fatalf("skip callback in queue accepted: %v", err)
+	}
+	if svc.closedID != 0 {
+		t.Fatal("queue ticket closed without a text result")
+	}
+	if err := a.Handle(context.Background(), Update{Message: &Message{ID: 81, From: card.From, Chat: card.Chat, ThreadID: 1, Text: "Готово"}}); err != nil {
+		t.Fatal(err)
+	}
+	if svc.closedID != 7 || svc.closeText != "Готово" {
+		t.Fatal("queue text close stopped working", svc)
+	}
+}
+
+func TestCloseWithoutCommentRechecksAssignee(t *testing.T) {
+	client, _ := capturedClient()
+	s := &adapterStore{user: domain.User{ID: 2, Role: "engineer", Approved: true, Departments: []domain.Department{domain.IT}}, ticket: domain.Ticket{ID: 7, Status: domain.InProgress, Department: domain.IT, AssigneeID: 2, TopicChatID: -100, TopicID: 10}}
+	svc := &adapterService{}
+	a := NewAdapter(client, s, svc, Config{Departments: map[domain.Department]Team{domain.IT: {ChatID: -100, QueueTopicID: 1}}})
+	m := &Message{From: Person{ID: 2}, Chat: Chat{ID: -100, Type: "supergroup"}, ThreadID: 10}
+	if err := a.beginStaffPrompt(context.Background(), &Callback{From: m.From, Message: m}, 7, "close"); err != nil {
+		t.Fatal(err)
+	}
+	s.ticket.AssigneeID = 3
+	if err := a.promptCallback(context.Background(), &Callback{From: m.From, Message: m}, "closewithout", 7, []string{"closewithout", "7"}); err != domain.ErrForbidden {
+		t.Fatalf("unassigned engineer could close without comment: %v", err)
+	}
+	if svc.closedID != 0 {
+		t.Fatal("unassigned engineer closed ticket")
 	}
 }
 

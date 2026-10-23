@@ -42,6 +42,9 @@ var burstDeliveryMigration string
 //go:embed persistent_topics.sql
 var persistentTopicsMigration string
 
+//go:embed index_cleanup.sql
+var indexCleanupMigration string
+
 type Store struct{ pool *pgxpool.Pool }
 type transaction struct{ tx pgx.Tx }
 
@@ -142,6 +145,16 @@ func (s *Store) Migrate(ctx context.Context) error {
 		}
 		if marker.RowsAffected() != 0 {
 			_, err = tx.Exec(ctx, persistentTopicsMigration)
+		}
+		if err != nil {
+			return err
+		}
+		marker, err = tx.Exec(ctx, "INSERT INTO bvk_migrations(version) VALUES('010_index_cleanup') ON CONFLICT DO NOTHING")
+		if err != nil {
+			return err
+		}
+		if marker.RowsAffected() != 0 {
+			_, err = tx.Exec(ctx, indexCleanupMigration)
 		}
 		return err
 	})

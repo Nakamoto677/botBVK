@@ -22,6 +22,16 @@ func (w *Worker) retireQueueCard(ctx context.Context, payload operationPayload, 
 	if chat == 0 || payload.MessageID == 0 {
 		return nil
 	}
+	// The card stays in the queue of the department the ticket left, so it must
+	// describe that department and carry the transfer label. Rendering the live
+	// ticket instead put the receiving department's status on it ("Новая", and
+	// after a retried or delayed edit "В работе"/"Закрыта"), although the ticket
+	// had already moved on.
+	retired := t
+	if payload.FromDepartment.Valid() {
+		retired.Department = payload.FromDepartment
+	}
+	retired.AssigneeID = 0
 	note := "\nПередано в отдел: " + departmentName(payload.ToDepartment)
 	if payload.QueueMediaType != "" {
 		media, hasMedia, e := w.queueCardAttachment(ctx, t)
@@ -32,13 +42,13 @@ func (w *Worker) retireQueueCard(ctx context.Context, payload operationPayload, 
 		if hasMedia {
 			mediaID = media.ID
 		}
-		caption, e := w.cardCaption(ctx, t, mediaID)
+		caption, e := w.cardCaptionWithStatus(ctx, retired, mediaID, transferredStatusName)
 		if e != nil {
 			return e
 		}
 		return w.editQueueCardCaption(ctx, chat, payload.MessageID, caption+note, [][]Button{})
 	}
-	text, err := w.card(ctx, t)
+	text, err := w.cardWithStatus(ctx, retired, transferredStatusName)
 	if err != nil {
 		return err
 	}

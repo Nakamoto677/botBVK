@@ -93,8 +93,17 @@ func TestClaimTopicReplaysDeferredMessagesWithoutDuplicates(t *testing.T) {
 	if len(replayed) != 2 {
 		t.Fatal("backlog message lost", replayed)
 	}
-	if len(store.events) != 4 {
-		t.Fatal("initial-card or replay mappings missing", store.events)
+	delivered := 0
+	for _, event := range store.events {
+		if event.Kind == "message_delivered" {
+			delivered++
+		}
+		if event.Kind == "engineer_keyboard_ready" {
+			t.Fatal("claim installed a group-wide reply keyboard", store.events)
+		}
+	}
+	if delivered != 3 {
+		t.Fatal("initial card or replay missing", store.events)
 	}
 }
 

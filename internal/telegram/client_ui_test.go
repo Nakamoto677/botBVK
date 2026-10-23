@@ -111,7 +111,7 @@ func TestMinimalClientFlowDraftCancelAcceptedAndFinished(t *testing.T) {
 		t.Fatal("department edit reset the reviewed draft")
 	}
 	raw, _ = json.Marshal((*requests)[len(*requests)-1]["reply_markup"])
-	if !strings.Contains(string(raw), clientCancelDraftLabel) || !strings.Contains(string(raw), "submit") {
+	if !strings.Contains(string(raw), clientCancelDraftLabel) || !strings.Contains(string(raw), `"text":"✅ Отправить заявку"`) || !strings.Contains(string(raw), "submit:") {
 		t.Fatal(string(raw))
 	}
 	svc.createErr = errors.New("temporary storage failure")
